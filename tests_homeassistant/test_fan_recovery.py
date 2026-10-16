@@ -165,6 +165,9 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         guest = self.cfg.heads["guest"]
         await self.until(lambda: self.hass.states.get(guest).state == "cool")
         attrs = dict(self.hass.states.get(guest).attributes)
+        heater = self.cfg.heater_entity
+        heater_state = self.hass.states.get(heater)
+        heater_attrs = dict(heater_state.attributes)
 
         async def lost_off(call):
             if call.data["entity_id"] == guest:
@@ -173,7 +176,10 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.hass.services.async_register("climate", "set_hvac_mode", lost_off)
         with self.assertLogs("custom_components.house_climate.runtime", level="ERROR"):
-            self.hass.states.async_set(guest, "cool", {**attrs, "hvac_modes": ["off"]})
+            # A verified high thermostat target outside the device range is
+            # structural; a cooling-only head is a valid local capability.
+            self.hass.states.async_set(heater, heater_state.state,
+                                       {**heater_attrs, "max_temp": 80})
             await self.until(lambda: runtime.controls.recovering and runtime.fault_count > 0)
         faults = runtime.fault_count
         observed = runtime.controls.overlay({})
@@ -182,6 +188,7 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.15)
         self.assertEqual(runtime.fault_count, faults)
         self.hass.services.async_register("climate", "set_hvac_mode", self.handle)
+        self.hass.states.async_set(heater, "off", heater_attrs)
         self.hass.states.async_set(guest, "off", attrs)
         await runtime.controls.async_check()
         await self.until(lambda: self.hass.states.get(guest).state == "cool")
