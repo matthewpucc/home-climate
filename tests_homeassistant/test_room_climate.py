@@ -77,7 +77,7 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
     async def test_ha_range_service_converts_celsius_to_native_fahrenheit(self):
         self.hass.config.units = METRIC_SYSTEM
         await _async_service_temperature_set(self.climate, ServiceCall(
-            "climate", "set_temperature", {"target_temp_low": 20, "target_temp_high": 22}))
+            self.hass, "climate", "set_temperature", {"target_temp_low": 20, "target_temp_high": 22}))
         args = self.comfort.async_set_range.await_args.args
         self.assertEqual(args[0], "office")
         self.assertAlmostEqual(args[1], 68)
@@ -88,13 +88,13 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ha_range_service_passes_fahrenheit_unchanged(self):
         await _async_service_temperature_set(self.climate, ServiceCall(
-            "climate", "set_temperature", {"target_temp_low": 68, "target_temp_high": 70,
+            self.hass, "climate", "set_temperature", {"target_temp_low": 68, "target_temp_high": 70,
                                          "hvac_mode": HVACMode.HEAT_COOL}))
         self.comfort.async_set_range.assert_awaited_once_with("office", 68, 70)
 
     async def test_ha_desired_service_converts_celsius_to_native_fahrenheit(self):
         self.hass.config.units = METRIC_SYSTEM
-        await _async_set_value(self.number, ServiceCall("number", "set_value", {"value": 22}))
+        await _async_set_value(self.number, ServiceCall(self.hass, "number", "set_value", {"value": 22}))
         args = self.comfort.async_set_target.await_args.args
         self.assertEqual(args[0], "office")
         self.assertAlmostEqual(args[1], 71.6)
@@ -102,7 +102,7 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(self.number.value, 21.7)
 
     async def test_ha_desired_service_passes_fahrenheit_unchanged(self):
-        await _async_set_value(self.number, ServiceCall("number", "set_value", {"value": 72}))
+        await _async_set_value(self.number, ServiceCall(self.hass, "number", "set_value", {"value": 72}))
         self.comfort.async_set_target.assert_awaited_once_with("office", 72)
 
     async def test_schedule_preset_resumes_and_temporary_preserves_effective_profile(self):
