@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2
+
+- Read only configured entities through HA's direct cached-state API, avoiding per-poll event-loop waits and whole-house state copies.
+- Preserve probe report timestamps and include all controller interlocks and legacy helpers in selective reads.
+- Reject queued native operations after their deadline so a delayed command cannot activate equipment after timing out.
+- Keep the latest fault reason, time, and count visible in controller status after recovery; include the operation in timeout messages.
+
 ## 0.4.1
 
 - Fix missing room-name translation errors when opening room menus during setup or configuration. Room names now appear in the menu description, where Home Assistant supports placeholders.
