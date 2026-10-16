@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Fix missing room-name translation errors when opening room menus during setup or configuration. Room names now appear in the menu description, where Home Assistant supports placeholders.
+
 ## 0.4.0
 
 - Replace fixed household roles with arbitrary rooms, editable names, shared-head assignments, profiles, schedules, and fan rules.
