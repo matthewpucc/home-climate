@@ -158,7 +158,7 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.states.get(fan).state, "on")
         self.hass.services.async_register("fan", "turn_off", self.handle)
 
-    async def test_recovery_hides_virtual_lease_and_prevents_claim_fault_cascade(self):
+    async def test_structural_fault_recovery_hides_virtual_lease_and_prevents_claim_cascade(self):
         runtime, switch = await self.runtime(entry_id="fault_cascade")
         runtime.async_start()
         await switch.async_turn_on()
@@ -173,7 +173,7 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         self.hass.services.async_register("climate", "set_hvac_mode", lost_off)
         with self.assertLogs("custom_components.house_climate.runtime", level="ERROR"):
-            self.hass.states.async_set(guest, "unavailable", attrs)
+            self.hass.states.async_set(guest, "cool", {**attrs, "hvac_modes": ["off"]})
             await self.until(lambda: runtime.controls.recovering and runtime.fault_count > 0)
         faults = runtime.fault_count
         observed = runtime.controls.overlay({})

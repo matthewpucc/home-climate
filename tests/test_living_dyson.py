@@ -105,8 +105,8 @@ class LivingDysonTests(unittest.TestCase):
         self.ha.data[self.cfg.heater_entity]["state"] = "heat"
         self.ha.ignore.add(self.cfg.heater_entity)
         self.step(Plan(auxiliary_fan_only=True), 0)
-        with self.assertRaises(ControlFault):
-            self.step(Plan(auxiliary_fan_only=True), 45)
+        self.step(Plan(auxiliary_fan_only=True), 45)
+        self.assertIn(self.cfg.heater_entity, self.executor.waiting_devices)
         self.assertFalse(any(call[2].get("hvac_mode") == "fan_only" for call in self.ha.calls))
 
     def test_conflicting_auxiliary_requests_are_rejected_before_any_commands(self):

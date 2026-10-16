@@ -72,6 +72,7 @@ class FakeHA:
         if entity in self.ignore:
             return
         state = self.data[entity]
+        state["last_reported"] = datetime.now(timezone.utc).isoformat()
         if service in ("set_hvac_mode", "set_temperature"):
             state["state"] = data["hvac_mode"]
             if "temperature" in data:
@@ -302,8 +303,9 @@ class ExecutorTests(unittest.TestCase):
         plan = Plan(mode="cool", head_targets_f={"bonus": 72})
         self.step(plan, 0)
         self.step(plan, 15)
-        with self.assertRaises(ControlFault):
-            self.step(plan, 45)
+        self.step(plan, 45)
+        self.assertEqual(self.executor.phase, "stopping")
+        self.assertIn(entity, self.executor.waiting_devices)
         self.assertFalse(self.activations())
 
     def test_direction_switch_has_new_off_barrier(self):
@@ -342,11 +344,13 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(self.executor.phase, "stopping")
         self.assertFalse(self.activations())
 
-    def test_failed_activation_times_out(self):
-        self.ha.ignore.add(self.cfg.heads["bonus"])
+    def test_failed_activation_waits_for_local_off_recovery(self):
+        entity = self.cfg.heads["bonus"]
+        self.ha.ignore.add(entity)
         plan = self.start_cooling()
-        with self.assertRaises(ControlFault):
-            self.step(plan, 240)
+        self.step(plan, 240)
+        self.assertIn(entity, self.executor.waiting_devices)
+        self.assertEqual(self.executor.phase, "running")
 
     def test_heater_exaggerated_target_and_explicit_off(self):
         plan = Plan(heater_on=True)

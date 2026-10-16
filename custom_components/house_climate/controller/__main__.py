@@ -36,11 +36,13 @@ def preflight(config: Config, states: dict, executor: Executor):
             raise ControlFault("HA watchdog mapping differs from this config; regenerate and reload the HA package")
     for entity in config.climate_entities:
         state = states.get(entity, {})
-        modes = set(state.get("attributes", {}).get("hvac_modes", []))
+        modes = set(state.get("attributes", {}).get("hvac_modes") or [])
         required = {"off", "heat"} if entity == config.heater_entity else {"off", "heat", "cool"}
-        if state.get("state") in (None, "unknown", "unavailable") or not required <= modes:
-            raise ControlFault(f"Climate entity unavailable or missing required modes: {entity}")
-    if config.heater_entity:
+        if not executor.ready(state):
+            continue
+        if not required <= modes:
+            raise ControlFault(f"Climate entity missing required modes: {entity}")
+    if config.heater_entity and executor.ready(states.get(config.heater_entity, {})):
         executor.target(config.heater_entity, config.heater_high_setpoint_f, states, heater=True)
 
 
@@ -114,11 +116,9 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         active = True
                         # Reconcile startup/reenable through a full off barrier, including heater.
                         failures = executor.shutdown()
-                        critical = [entity for entity in failures if entity not in config.fans.values()]
-                        if critical:
-                            raise ControlFault("Startup off commands failed: " + ", ".join(critical))
                         for entity in failures:
-                            plan.warnings.append(f"Circulation fan {entity}: startup off command failed; retrying independently")
+                            kind = "Circulation fan" if entity in config.fans.values() else "Climate device"
+                            plan.warnings.append(f"{kind} {entity}: startup off command failed; retrying independently")
                         policy = Policy(config)
                         # The old snapshot predates shutdown. Read again next cycle.
                         report("arming", message="All-off commands sent; awaiting fresh state")
@@ -137,7 +137,9 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                 elif args.live and states.get(config.entity("heater_owned"), {}).get("state") == "on":
                     # Recover ownership left behind by a previous process, even when disabled.
                     release(ha, executor, event_callback=report)
-                report("live" if args.live and enabled else "shadow", timestamp=now.isoformat(), phase=executor.phase, **plan.as_dict())
+                report("live" if args.live and enabled else "shadow", timestamp=now.isoformat(), phase=executor.phase,
+                       device_issues=dict(executor.device_issues), waiting_devices=executor.waiting_devices,
+                       **plan.as_dict())
                 faults = 0
             except Exception as exc:
                 report("fault", error=str(exc))

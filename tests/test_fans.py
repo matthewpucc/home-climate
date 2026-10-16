@@ -235,17 +235,18 @@ class CirculationFanTests(unittest.TestCase):
         states.pop(self.fan)
         preflight(self.cfg, states, self.executor)
 
-    def test_shared_climate_acknowledgement_failures_remain_fatal(self):
+    def test_shared_climate_acknowledgement_failure_retains_local_off_obligation(self):
         self.ha.ignore.add(self.cfg.heads["bonus"])
         self.start_cooling()
-        with self.assertRaises(ControlFault):
-            self.step(240, Plan(mode="cool", head_targets_f={"bonus": 72}))
+        self.step(240, Plan(mode="cool", head_targets_f={"bonus": 72}))
+        self.assertIn(self.cfg.heads["bonus"], self.executor.waiting_devices)
+        self.assertEqual(self.executor.phase, "running")
 
-    def test_auxiliary_heater_acknowledgement_failures_remain_fatal(self):
+    def test_auxiliary_acknowledgement_failure_retains_local_off_obligation(self):
         self.ha.ignore.add(self.cfg.heater_entity)
         self.step(0, Plan(heater_on=True))
-        with self.assertRaises(ControlFault):
-            self.step(45, Plan(heater_on=True))
+        self.step(45, Plan(heater_on=True))
+        self.assertIn(self.cfg.heater_entity, self.executor.waiting_devices)
 
     def test_startup_fan_transport_failure_does_not_abort_live_control(self):
         cfg = replace(self.cfg, equipment_timing_confirmed=True,

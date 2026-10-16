@@ -12,7 +12,7 @@ Heat/cool direction uses hysteresis, dwell, and sustained competing demand. Defa
 
 ## Device execution
 
-Startup, direction change, mixed reported modes, and recovery request all heads off. Every head must report off before the settling timer begins. Selected heads then receive one shared direction. Climate commands time out when state acknowledgement does not arrive.
+Startup, direction change, mixed reported modes, and recovery request all heads off. Every head must report off before the settling timer begins. Selected heads then receive one shared direction. Unacknowledged climate commands enter device recovery and retry off; startup or changeover continues waiting until the required acknowledgements arrive.
 
 Changing active rooms within the same direction does not restart all heads. Device temperature ranges, steps, and fan percentage steps are respected. Fan speed commands use HA-compatible integer percentages and allow one point of reporting rounding on stepped fans. HA-reported state is the available acknowledgement, not proof of the compressor's physical state.
 
@@ -36,11 +36,23 @@ Native ownership is persisted before actuator commands. After an HA restart, the
 
 While enabled, House Climate owns its mapped devices. Disable it before manual operation or using competing automations. Normal disable/shutdown attempts off for all owned devices. It does not restore an earlier device schedule.
 
-An unavailable climate actuator or unacknowledged climate command stops live execution and triggers shutdown attempts. Recovery begins from the all-off barrier. Native climate ownership remains armed until every owned climate device acknowledges off and in-flight activation calls finish. A failed climate shutdown blocks unload and re-enabling while watchdog retries continue. Unfinished circulation-fan stops are persisted separately and retried without blocking climate recovery. Standalone ownership remains armed if auxiliary shutdown is unconfirmed.
+Invalid configuration, explicit unsupported modes, invalid temperature ranges, or a controller-wide failure trigger shutdown attempts. Temporary climate connection loss is handled per device as described below. Shared direction changes still require the all-off barrier. Native climate ownership remains armed until every owned climate device acknowledges off and in-flight activation calls finish. A failed climate shutdown blocks unload and re-enabling while watchdog retries continue. Unfinished circulation-fan stops are persisted separately and retried without blocking climate recovery. Standalone ownership remains armed if auxiliary shutdown is unconfirmed.
 
 The native integration serializes its worker lifecycle and refuses a second loaded instance. Reload waits for shutdown; a stuck worker blocks successful reload. The standalone CLI additionally has a host-local process lock. Neither provides a distributed lock across separate hosts.
 
 The native watchdog pauses control and stops all owned devices when the worker heartbeat expires after 120 seconds; probe cutoffs independently stop auxiliary heating. The standalone package watches only the auxiliary heater, so shared heads can retain setpoints if its process stops. While HA or the host is down, neither watchdog can run. Native ownership recovery resumes after HA starts.
+
+## Climate connectivity recovery
+
+An unavailable or unknown climate state is not an off acknowledgement. Missing capability metadata is treated as initialization in progress; an available device that explicitly lacks required modes is a configuration error.
+
+A disconnected climate device, failed service call, or unacknowledged activation enters local recovery. The controller retains ownership and heartbeat, requests off, and waits for a fresh HA report confirming off before resuming that device. Cached pre-command off state cannot acknowledge a potentially late activation. Off retries are bounded to avoid flooding an offline device.
+
+Reachable shared heads continue in the established direction. A request to change direction stops available heads and waits for every head, including any disconnected head, to acknowledge off before starting the full settling interval. Startup follows the same all-head barrier. An unreachable head cannot permit opposite-mode activation.
+
+Auxiliary recovery is independent of the shared heads. The heater receives off retries and no new heat or fan-only activation until off is freshly confirmed. External probe cutoffs and the independent watchdog remain active. Explicit disable, restart recovery, and critical shutdown still retain ownership until climate shutdown is confirmed.
+
+Current issues identifies waiting devices; affected room and heater plans show off requests rather than implying that activation is proceeding. Other room plans remain visible.
 
 ## Circulation fan recovery
 

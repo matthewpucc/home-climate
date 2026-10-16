@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2
+
+- Tolerate temporary climate-device disconnections, API failures, and missing acknowledgements without restarting healthy rooms or dropping controller ownership.
+- Keep reachable heads in the established shared direction; wait and retry at startup or changeover until every shared head confirms off before settling and activation.
+- Reconcile an affected device through a fresh off report before resuming commands, including when an earlier activation may have completed late.
+- Recover the auxiliary heater independently while retaining external-probe cutoffs, off retries, and strict heat-to-off-to-fan sequencing.
+- Show waiting climate devices and off requests in room/heater plans and Current issues. Clear resolved auxiliary connectivity warnings.
+- Update all GitHub Actions to stable Node.js 24 releases with immutable commit pins.
+
 ## 0.5.1
 
 - Recover shutdown ownership once climate devices confirm off; persist unfinished circulation-fan stops separately so an offline fan cannot prevent climate control from resuming.

@@ -108,7 +108,8 @@ class ControllerStatus(ControllerEntity):
                 ("mode", "phase", "reasons", "warnings", "head_targets_f",
                  "heater_on", "auxiliary_fan_only", "fans", "room_targets", "error",
                  "last_error", "last_fault_at", "fault_count",
-                 "control_enabled", "control_block_reason", "pending_fans") if key in status}
+                 "control_enabled", "control_block_reason", "pending_fans",
+                 "device_issues", "waiting_devices") if key in status}
 
 
 class Overview(ControllerEntity):
@@ -250,7 +251,11 @@ class RoomPlan(RoomEntity):
         shared = sum(zone.head == room.head for zone in config.zones.values()) > 1
         head = "shared head" if shared else "head"
         limits = status["room_targets"][self.room_id]
-        if target is not None:
+        waiting = (status.get("event") == "live"
+                   and config.heads[room.head] in status.get("device_issues", {}))
+        if waiting:
+            action = f"wait for {head}; off requested"
+        elif target is not None:
             action = f'{status["mode"]} {head} to {self.temperature(target)}'
         else:
             action = f"keep {head} off"
@@ -319,6 +324,9 @@ class AuxiliaryPlan(ControllerEntity):
         if not self.available:
             return None
         status = self.runtime.status
+        if (status.get("event") == "live"
+                and self.runtime.config.heater_entity in status.get("device_issues", {})):
+            return "Waiting for heater · off requested"
         action = ("heat using room probes" if status["heater_on"] else
                   "circulate air without heat" if status.get("auxiliary_fan_only") else "stay off")
         return plan_prefix(status) + action
