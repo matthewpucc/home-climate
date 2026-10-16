@@ -1,0 +1,15 @@
+{
+  "domain": "house_climate",
+  "name": "House Climate",
+  "version": "0.4.0",
+  "codeowners": [
+    "@matthewpucc"
+  ],
+  "config_flow": true,
+  "documentation": "https://github.com/matthewpucc/home-climate#readme",
+  "issue_tracker": "https://github.com/matthewpucc/home-climate/issues",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "requirements": [],
+  "single_config_entry": true
+}

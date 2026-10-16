@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "house-climate-controller"
+version = "0.4.0"
+description = "Configurable shared-system climate control for Home Assistant"
+requires-python = ">=3.11"
+dependencies = []
+license = {file = "LICENSE"}
+readme = "README.md"
+
+[project.optional-dependencies]
+test = ["Jinja2>=3.1.6,<4"]
+
+[project.scripts]
+house-climate = "house_climate.__main__:main"
+
+[tool.setuptools]
+packages = ["house_climate"]
+package-dir = {house_climate = "custom_components/house_climate/controller"}

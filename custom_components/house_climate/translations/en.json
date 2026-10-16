@@ -1,0 +1,284 @@
+{
+  "title": "House Climate",
+  "config": {
+    "step": {
+      "menu": {
+        "title": "House Climate",
+        "description": "Configure rooms for one shared heating/cooling system. Changes take effect only when you save.",
+        "menu_options": {
+          "add_room": "Add room",
+          "select_room": "Edit a room",
+          "system": "System settings",
+          "auxiliary": "Auxiliary heater",
+          "import_file": "Import TOML configuration",
+          "finish": "Review and save"
+        }
+      },
+      "select_room": {
+        "title": "Choose a room",
+        "data": {
+          "room": "Room"
+        }
+      },
+      "room_menu": {
+        "title": "{room}",
+        "menu_options": {
+          "room": "Room settings",
+          "add_schedule": "Add schedule",
+          "select_schedule": "Edit or remove schedule",
+          "add_fan": "Add fan",
+          "select_fan": "Edit or remove fan",
+          "remove_room": "Remove room",
+          "menu": "Back to controller"
+        }
+      },
+      "room": {
+        "title": "Room settings",
+        "description": "Choose independent temperature probes where possible. Rooms sharing a heat-pump head must select the same climate entity. Higher comfort priority wins when rooms disagree; temperature limits take precedence.\n\n{detail}",
+        "data": {
+          "name": "Room name",
+          "area": "Home Assistant area (optional)",
+          "head": "Heat-pump head",
+          "sensors": "Temperature sensors",
+          "comfort_enabled": "Maintain a comfort target",
+          "target_f": "Target temperature",
+          "half_band_f": "Half-width of comfort band",
+          "priority": "Comfort priority",
+          "fan_percentage": "Scheduled fan speed",
+          "low_f": "Lower comfort limit (optional override)",
+          "high_f": "Upper comfort limit (optional override)"
+        }
+      },
+      "remove_room": {
+        "title": "Remove room",
+        "description": "Remove airflow links and the auxiliary heater assignment first. At least one room must remain.\n\n{detail}",
+        "data": {
+          "confirm": "Remove this room"
+        }
+      },
+      "select_schedule": {
+        "title": "Choose a schedule",
+        "data": {
+          "schedule": "Schedule"
+        }
+      },
+      "schedule": {
+        "title": "Daily comfort schedule",
+        "description": "Uses Home Assistant's timezone. A schedule may cross midnight; schedules in the same room must not overlap. The base profile applies outside these hours. Fan speed applies to fans using the schedule strategy.\n\n{detail}",
+        "data": {
+          "name": "Schedule name",
+          "start": "Start",
+          "end": "End",
+          "comfort_enabled": "Maintain a comfort target",
+          "target_f": "Target temperature",
+          "half_band_f": "Half-width of comfort band",
+          "priority": "Comfort priority",
+          "fan_percentage": "Scheduled fan speed",
+          "low_f": "Lower comfort limit (optional override)",
+          "high_f": "Upper comfort limit (optional override)",
+          "remove": "Remove this schedule"
+        }
+      },
+      "select_fan": {
+        "title": "Choose a fan",
+        "data": {
+          "fan": "Fan"
+        }
+      },
+      "fan": {
+        "title": "Fan behavior",
+        "description": "Assign fans to the room they help, even if physically located elsewhere. For airflow transfer, select the room supplying useful air. Scheduled fans use the active room profile's speed.\n\n{detail}",
+        "data": {
+          "entity_id": "Fan",
+          "strategy": "Run when",
+          "percentage": "Fan speed",
+          "source_room": "Air source room",
+          "remove": "Remove this fan"
+        }
+      },
+      "system": {
+        "title": "System settings",
+        "description": "Live mode also requires the generated HA enable switch. Confirm the off interval against your equipment before enabling live commands.\n\n{detail}",
+        "data": {
+          "low_f": "Minimum room temperature",
+          "high_f": "Maximum room temperature",
+          "off_settle_seconds": "All-off settling interval",
+          "mode_hold_seconds": "Minimum heat/cool direction dwell",
+          "poll_seconds": "Control interval",
+          "equipment_timing_confirmed": "I have verified the equipment timing",
+          "live": "Enable live commands"
+        }
+      },
+      "auxiliary": {
+        "title": "Optional auxiliary heater",
+        "description": "Room probes control this heater externally. Choose a high device setpoint that reliably calls for heat, and a separate cutoff above the room's comfort band. Exclude the heater's own sensor and separate fan entity from room configuration. Regenerate the watchdog package after changing this configuration.\n\n{detail}",
+        "data": {
+          "enabled": "Use an auxiliary heater",
+          "heater_entity": "Heater",
+          "auxiliary_room": "Heated room",
+          "heater_high_setpoint_f": "Heating device setpoint",
+          "heater_cutoff_f": "Independent heating cutoff",
+          "auxiliary_fan_enabled": "Use fan-only mode during cooling demand",
+          "heater_setpoint_confirmed": "I have verified the device setpoint"
+        }
+      },
+      "import_file": {
+        "title": "Import existing configuration",
+        "description": "Enter a TOML path relative to the Home Assistant configuration directory. Import replaces this draft and starts in shadow mode. Version-1 helper values are copied from HA when available.\n\n{detail}",
+        "data": {
+          "config_file": "Configuration file"
+        }
+      },
+      "finish": {
+        "title": "Review and save",
+        "description": "{detail}\n\nSaving applies all edits and reloads the controller. Live reloads stop owned devices before restarting. If the auxiliary heater, its probes, or cutoff changed, regenerate and install the watchdog package before enabling control."
+      }
+    },
+    "error": {
+      "invalid_config": "The configuration could not be saved. Review the details above.",
+      "room_in_use": "This room is still referenced, or is the last remaining room."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one shared-system controller may be configured."
+    }
+  },
+  "options": {
+    "step": {
+      "menu": {
+        "title": "House Climate",
+        "description": "Configure rooms for one shared heating/cooling system. Changes take effect only when you save.",
+        "menu_options": {
+          "add_room": "Add room",
+          "select_room": "Edit a room",
+          "system": "System settings",
+          "auxiliary": "Auxiliary heater",
+          "import_file": "Import TOML configuration",
+          "finish": "Review and save"
+        }
+      },
+      "select_room": {
+        "title": "Choose a room",
+        "data": {
+          "room": "Room"
+        }
+      },
+      "room_menu": {
+        "title": "{room}",
+        "menu_options": {
+          "room": "Room settings",
+          "add_schedule": "Add schedule",
+          "select_schedule": "Edit or remove schedule",
+          "add_fan": "Add fan",
+          "select_fan": "Edit or remove fan",
+          "remove_room": "Remove room",
+          "menu": "Back to controller"
+        }
+      },
+      "room": {
+        "title": "Room settings",
+        "description": "Choose independent temperature probes where possible. Rooms sharing a heat-pump head must select the same climate entity. Higher comfort priority wins when rooms disagree; temperature limits take precedence.\n\n{detail}",
+        "data": {
+          "name": "Room name",
+          "area": "Home Assistant area (optional)",
+          "head": "Heat-pump head",
+          "sensors": "Temperature sensors",
+          "comfort_enabled": "Maintain a comfort target",
+          "target_f": "Target temperature",
+          "half_band_f": "Half-width of comfort band",
+          "priority": "Comfort priority",
+          "fan_percentage": "Scheduled fan speed",
+          "low_f": "Lower comfort limit (optional override)",
+          "high_f": "Upper comfort limit (optional override)"
+        }
+      },
+      "remove_room": {
+        "title": "Remove room",
+        "description": "Remove airflow links and the auxiliary heater assignment first. At least one room must remain.\n\n{detail}",
+        "data": {
+          "confirm": "Remove this room"
+        }
+      },
+      "select_schedule": {
+        "title": "Choose a schedule",
+        "data": {
+          "schedule": "Schedule"
+        }
+      },
+      "schedule": {
+        "title": "Daily comfort schedule",
+        "description": "Uses Home Assistant's timezone. A schedule may cross midnight; schedules in the same room must not overlap. The base profile applies outside these hours. Fan speed applies to fans using the schedule strategy.\n\n{detail}",
+        "data": {
+          "name": "Schedule name",
+          "start": "Start",
+          "end": "End",
+          "comfort_enabled": "Maintain a comfort target",
+          "target_f": "Target temperature",
+          "half_band_f": "Half-width of comfort band",
+          "priority": "Comfort priority",
+          "fan_percentage": "Scheduled fan speed",
+          "low_f": "Lower comfort limit (optional override)",
+          "high_f": "Upper comfort limit (optional override)",
+          "remove": "Remove this schedule"
+        }
+      },
+      "select_fan": {
+        "title": "Choose a fan",
+        "data": {
+          "fan": "Fan"
+        }
+      },
+      "fan": {
+        "title": "Fan behavior",
+        "description": "Assign fans to the room they help, even if physically located elsewhere. For airflow transfer, select the room supplying useful air. Scheduled fans use the active room profile's speed.\n\n{detail}",
+        "data": {
+          "entity_id": "Fan",
+          "strategy": "Run when",
+          "percentage": "Fan speed",
+          "source_room": "Air source room",
+          "remove": "Remove this fan"
+        }
+      },
+      "system": {
+        "title": "System settings",
+        "description": "Live mode also requires the generated HA enable switch. Confirm the off interval against your equipment before enabling live commands.\n\n{detail}",
+        "data": {
+          "low_f": "Minimum room temperature",
+          "high_f": "Maximum room temperature",
+          "off_settle_seconds": "All-off settling interval",
+          "mode_hold_seconds": "Minimum heat/cool direction dwell",
+          "poll_seconds": "Control interval",
+          "equipment_timing_confirmed": "I have verified the equipment timing",
+          "live": "Enable live commands"
+        }
+      },
+      "auxiliary": {
+        "title": "Optional auxiliary heater",
+        "description": "Room probes control this heater externally. Choose a high device setpoint that reliably calls for heat, and a separate cutoff above the room's comfort band. Exclude the heater's own sensor and separate fan entity from room configuration. Regenerate the watchdog package after changing this configuration.\n\n{detail}",
+        "data": {
+          "enabled": "Use an auxiliary heater",
+          "heater_entity": "Heater",
+          "auxiliary_room": "Heated room",
+          "heater_high_setpoint_f": "Heating device setpoint",
+          "heater_cutoff_f": "Independent heating cutoff",
+          "auxiliary_fan_enabled": "Use fan-only mode during cooling demand",
+          "heater_setpoint_confirmed": "I have verified the device setpoint"
+        }
+      },
+      "import_file": {
+        "title": "Import existing configuration",
+        "description": "Enter a TOML path relative to the Home Assistant configuration directory. Import replaces this draft and starts in shadow mode. Version-1 helper values are copied from HA when available.\n\n{detail}",
+        "data": {
+          "config_file": "Configuration file"
+        }
+      },
+      "finish": {
+        "title": "Review and save",
+        "description": "{detail}\n\nSaving applies all edits and reloads the controller. Live reloads stop owned devices before restarting. If the auxiliary heater, its probes, or cutoff changed, regenerate and install the watchdog package before enabling control."
+      }
+    },
+    "error": {
+      "invalid_config": "The configuration could not be saved. Review the details above.",
+      "room_in_use": "This room is still referenced, or is the last remaining room."
+    }
+  }
+}

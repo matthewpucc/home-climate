@@ -1,0 +1,7 @@
+"""Shared native integration constants."""
+DOMAIN = "house_climate"
+CONF_CONFIG_FILE = "config_file"
+CONF_LIVE = "live"
+DEFAULT_CONFIG_FILE = "house_climate.toml"
+SIGNAL_STATUS = "house_climate_status"
+CONF_CONFIGURATION = "configuration"

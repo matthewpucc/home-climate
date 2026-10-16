@@ -1,0 +1,12 @@
+{
+  "configuration": {
+    "config_file": {
+      "name": "Controller configuration file",
+      "description": "Path relative to your Home Assistant config directory. Restart this add-on after changing the TOML file."
+    },
+    "live": {
+      "name": "Enable live commands",
+      "description": "Off means read-only shadow mode. Live control also requires commissioning checks, the HA watchdog package, and the hp_enabled helper."
+    }
+  }
+}

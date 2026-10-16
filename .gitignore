@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.env
+config.local.toml
+*.jsonl
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+home_assistant/*.yaml
+home_assistant/*.json
+house_climate.toml

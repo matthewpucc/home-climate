@@ -1,0 +1,165 @@
+name: Container
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install and test
+        run: |
+          python -m pip install '.[test]'
+          python -m unittest discover -s tests -v
+          python -m house_climate --config config.example.toml check-config
+          python -m house_climate --config config.example.toml demo
+      - name: Check add-on version
+        run: |
+          python - <<'PY'
+          import json, tomllib
+          from pathlib import Path
+          project = tomllib.loads(Path("pyproject.toml").read_text())
+          addon = json.loads(Path("house_climate_addon/config.json").read_text())
+          manifest = json.loads(Path("custom_components/house_climate/manifest.json").read_text())
+          assert project["project"]["version"] == addon["version"] == manifest["version"]
+          assert addon["options"]["live"] is False
+          PY
+
+  homeassistant:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.14"
+      - name: Test native integration against Home Assistant
+        run: |
+          python -m pip install '.[test]' 'homeassistant==2026.10.1'
+          python -m unittest discover -s tests_homeassistant -v
+      - name: Package HACS and reviewable public distribution
+        run: python scripts/package_hacs.py
+      - name: Validate installation and public-source archives
+        run: python scripts/validate_distribution.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: house-climate-hacs-install
+          path: dist/*.zip
+          if-no-files-found: error
+
+  image:
+    needs: [test, homeassistant]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Read image metadata and create installation bundles
+        id: config
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          addon = json.loads(Path("house_climate_addon/config.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print("version=" + addon["version"], file=output)
+              print("image=" + addon["image"], file=output)
+          PY
+          python scripts/package_addon.py
+          mkdir -p /tmp/addon-build
+          tar -xzf dist/house-climate-local.tar.gz -C /tmp/addon-build
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build local-install bundle for smoke testing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: /tmp/addon-build/house_climate
+          load: true
+          platforms: linux/amd64
+          tags: house-climate:test
+          build-args: BUILD_VERSION=${{ steps.config.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test packaged CLI without HA access
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp --user 10001:10001 \
+            --entrypoint python house-climate:test -m house_climate \
+            --config /opt/house-climate/config.example.toml check-config
+          docker run --rm --network none --read-only --tmpfs /tmp --user 10001:10001 \
+            --entrypoint python house-climate:test -m house_climate \
+            --config /opt/house-climate/config.example.toml demo
+          docker run --rm --network none --read-only --entrypoint python house-climate:test \
+            -c 'import ssl; from zoneinfo import ZoneInfo; assert ssl.create_default_context().get_ca_certs(); ZoneInfo("America/Los_Angeles")'
+      - name: Log into GitHub Container Registry
+        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        id: meta
+        with:
+          images: ${{ steps.config.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.config.outputs.version }},enable={{is_default_branch}}
+            type=sha,format=long
+      - name: Build and publish AMD64 and ARM64
+        id: publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: BUILD_VERSION=${{ steps.config.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify published architectures and ARM64 CLI
+        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+        env:
+          IMAGE: ${{ steps.config.outputs.image }}
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" > /tmp/manifest.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path("/tmp/manifest.json").read_text())
+          platforms = {(m["platform"]["os"], m["platform"]["architecture"]) for m in manifest["manifests"]}
+          assert {("linux", "amd64"), ("linux", "arm64")} <= platforms, platforms
+          PY
+          docker run --rm --platform linux/arm64 --network none --read-only \
+            --entrypoint python "$IMAGE@$DIGEST" -m house_climate \
+            --config /opt/house-climate/config.example.toml demo
+          echo "Published $IMAGE@$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload HA installation bundles
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: house-climate-ha-install
+          path: dist/*.tar.gz
+          if-no-files-found: error

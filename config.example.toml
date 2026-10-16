@@ -1,0 +1,99 @@
+# Optional standalone/import example. Native HA users can configure everything
+# through Settings > Devices & services > House Climate > Configure.
+# All stored temperatures and deltas use Fahrenheit; HA forms use your local units.
+schema_version = 2
+timezone = "Etc/UTC"
+helper_prefix = "house_climate"
+low_f = 66
+high_f = 75
+poll_seconds = 15
+off_settle_seconds = 180 # Confirm the required interval for your shared equipment.
+mode_hold_seconds = 1200
+switch_confirmation_seconds = 120
+sensor_stale_seconds = 900
+sensor_confirmation_seconds = 60
+sensor_disagreement_f = 3
+forecast_minutes = 10
+equipment_timing_confirmed = false
+
+# Optional independent heater. Remove these fields if you do not have one.
+heater_entity = "climate.example_auxiliary"
+auxiliary_room = "room_c"
+auxiliary_fan_enabled = true
+heater_high_setpoint_f = 86
+heater_cutoff_f = 70
+heater_setpoint_confirmed = false
+
+[heads]
+shared_a = "climate.example_head_a"
+shared_b = "climate.example_head_b"
+
+# IDs remain stable when display names change. Multiple rooms may share one head.
+[rooms.room_a]
+name = "Room A"
+head = "shared_a"
+sensors = [
+  {entity_id = "sensor.example_a_1", source = "probe_a_1"},
+  {entity_id = "sensor.example_a_2", source = "probe_a_2"},
+]
+[rooms.room_a.profile]
+target_f = 72
+half_band_f = 0.5
+priority = 1
+
+# Airflow rules belong to the room they help, regardless of a fan's location.
+[[rooms.room_a.fans]]
+entity_id = "fan.example_transfer"
+strategy = "transfer"
+source_room = "room_b"
+percentage = 60
+
+[rooms.room_b]
+name = "Room B"
+head = "shared_a"
+sensors = [
+  {entity_id = "sensor.example_b_1", source = "probe_b_1"},
+  {entity_id = "sensor.example_b_2", source = "probe_b_2"},
+]
+[rooms.room_b.profile]
+comfort_enabled = false
+target_f = 70
+half_band_f = 0.5
+fan_percentage = 0
+
+# Daily schedule, using HA's timezone during connected operation.
+[[rooms.room_b.schedules]]
+name = "Sleep"
+start = "22:00:00"
+end = "05:00:00"
+target_f = 68
+half_band_f = 1
+priority = 10
+fan_percentage = 60
+
+[[rooms.room_b.schedules]]
+name = "Morning"
+start = "05:00:00"
+end = "09:00:00"
+target_f = 69.5
+low_f = 66
+high_f = 70
+half_band_f = 0.5
+priority = 1
+fan_percentage = 0
+
+[[rooms.room_b.fans]]
+entity_id = "fan.example_scheduled"
+strategy = "schedule"
+
+[rooms.room_c]
+name = "Room C"
+head = "shared_b"
+sensors = [
+  {entity_id = "sensor.example_c_1", source = "probe_c_1"},
+  {entity_id = "sensor.example_c_2", source = "probe_c_2"},
+]
+[rooms.room_c.profile]
+target_f = 68
+half_band_f = 0.5
+priority = 0.1

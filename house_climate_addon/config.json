@@ -1,0 +1,33 @@
+{
+  "name": "House Climate",
+  "version": "0.4.0",
+  "slug": "house_climate",
+  "description": "Room-based shared heat-pump control, fans, and optional auxiliary heating",
+  "url": "https://github.com/matthewpucc/home-climate",
+  "arch": [
+    "amd64",
+    "aarch64"
+  ],
+  "startup": "application",
+  "boot": "auto",
+  "init": false,
+  "timeout": 180,
+  "homeassistant_api": true,
+  "map": [
+    {
+      "type": "homeassistant_config",
+      "read_only": true,
+      "path": "/homeassistant"
+    }
+  ],
+  "options": {
+    "config_file": "house_climate.toml",
+    "live": false
+  },
+  "schema": {
+    "config_file": "str",
+    "live": "bool"
+  },
+  "image": "ghcr.io/matthewpucc/home-climate",
+  "stage": "experimental"
+}

@@ -1,0 +1,6 @@
+generate_package:
+  name: Generate control and watchdog configuration
+  description: >-
+    Write the current enable, lease, and optional auxiliary-watchdog package and
+    dashboard card to house_climate_generated in the Home Assistant configuration
+    directory. Replaces generated files; installation into HA packages is manual.

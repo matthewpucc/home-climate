@@ -1,0 +1,10 @@
+**
+!Dockerfile
+!pyproject.toml
+!README.md
+!LICENSE
+!custom_components/
+!custom_components/house_climate/
+!custom_components/house_climate/controller/
+!custom_components/house_climate/controller/*.py
+!config.example.toml
