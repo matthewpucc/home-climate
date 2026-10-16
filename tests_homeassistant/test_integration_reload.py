@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.config_entries import ConfigEntries, ConfigEntry, ConfigEntryState
 from homeassistant.helpers import entity_registry as er
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.house_climate.recovery import RecoveryManager
 from tests_homeassistant import test_native as fixtures
@@ -269,3 +270,75 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(self.cfg.entity("enabled"), "on", {})
         await self.failed_for()
         self.reload.assert_awaited_once_with(self.owner.entry_id)
+
+    async def test_manual_reload_works_in_shadow_for_valid_cooling_only_head(self):
+        self.runtime.live = False
+        self.runtime.controls.enabled = False
+        self.hass.states.async_set(self.head, "off", {"hvac_modes": ["off", "cool"]})
+        self.assertTrue(await self.manager.async_reload_entity(self.head))
+        self.reload.assert_awaited_once_with(self.owner.entry_id)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.hass.states.get(self.head).state, "off")
+        self.assertIn("Reload completed", self.manager.diagnostics["reload_status"])
+
+    async def test_manual_reload_bypasses_incident_budget_but_debounces_shared_owner(self):
+        self.manager._attempts[self.owner.entry_id] = 3
+        self.manager._next_retry[self.owner.entry_id] = 100_000
+        other_head = self.cfg.heads["guest"]
+        self.register(other_head, self.owner)
+        await self.manager.async_reload_entity(self.head)
+        with self.assertRaisesRegex(HomeAssistantError, "15 seconds"):
+            await self.manager.async_reload_entity(other_head)
+        self.clock.return_value = 15
+        await self.manager.async_reload_entity(other_head)
+        self.assertEqual(self.reload.await_count, 2)
+        self.assertEqual(self.manager._attempts[self.owner.entry_id], 3)
+
+    async def test_manual_reload_rejects_unregistered_self_owned_busy_and_unknown_entities(self):
+        unregistered = self.cfg.heads["primary"]
+        with self.assertRaisesRegex(HomeAssistantError, "No reloadable"):
+            await self.manager.async_reload_entity(unregistered)
+        own = self.entry("house_climate", "controller")
+        other_head = self.cfg.heads["guest"]
+        self.register(other_head, own)
+        with self.assertRaisesRegex(HomeAssistantError, "No reloadable"):
+            await self.manager.async_reload_entity(other_head)
+        busy_head = self.cfg.heads["bonus"]
+        self.register(busy_head, self.entry("mitsubishi", "busy", ConfigEntryState.UNLOAD_IN_PROGRESS))
+        with self.assertRaisesRegex(HomeAssistantError, "unload_in_progress"):
+            await self.manager.async_reload_entity(busy_head)
+        with self.assertRaisesRegex(HomeAssistantError, "Only configured"):
+            await self.manager.async_reload_entity("climate.unrelated")
+        self.reload.assert_not_awaited()
+
+    async def test_manual_reload_rejects_when_an_automatic_reload_is_in_progress(self):
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def slow_reload(_entry_id):
+            started.set()
+            await finish.wait()
+            return True
+
+        self.reload.side_effect = slow_reload
+        status = self.status(self.head)
+        self.manager.observe(status)
+        self.clock.return_value = 120
+        self.manager.observe(status)
+        await started.wait()
+        with self.assertRaisesRegex(HomeAssistantError, "already in progress"):
+            await self.manager.async_reload_entity(self.head)
+        finish.set()
+        await self.manager._task
+        self.reload.assert_awaited_once_with(self.owner.entry_id)
+
+    async def test_manual_failed_reload_raises_actionable_error(self):
+        self.reload.return_value = False
+        with self.assertRaisesRegex(HomeAssistantError, "could not reload"):
+            await self.manager.async_reload_entity(self.head)
+        self.assertIn("Reload failed", self.manager.diagnostics["reload_status"])
+
+    async def test_manual_reload_refuses_after_close(self):
+        await self.manager.async_close()
+        with self.assertRaisesRegex(HomeAssistantError, "stopping"):
+            await self.manager.async_reload_entity(self.head)
+        self.reload.assert_not_awaited()
