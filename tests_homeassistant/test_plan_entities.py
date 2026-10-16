@@ -299,6 +299,7 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
     async def test_auxiliary_capability_block_is_distinct_from_offline_recovery(self):
         raw = configuration()
         raw.update(heater_entity="climate.test_auxiliary", auxiliary_room="alpha")
+        raw["rooms"]["alpha"]["profile"] = {"target_f": 68, "half_band_f": .5}
         entry = self.entry(Config.from_dict(raw))
         self.decide(entry, {"alpha": 67, "gamma": 68})
         detail = {"kind": "capability", "state": "off", "required_mode": "heat",
