@@ -49,7 +49,9 @@ Imported version-1 configurations retain the `hp_` helper prefix; use `input_boo
 
 ## Operation
 
-The loop starts after HA startup and runs in a dedicated worker. HA state reads and service calls execute on HA's event loop; blocking waits do not. Shutdown and option reload stop the worker before another can start.
+The loop starts after HA startup and runs in a dedicated worker. It reads only configured entities through HA's synchronous cached-state API, preserving their original report timestamps. Service calls execute on HA's event loop with a deadline that includes queue time; expired requests are rejected before dispatch. Shutdown and option reload stop the worker before another can start.
+
+If a fault clears before you can inspect it, the controller status retains `last_error`, `last_fault_at`, and `fault_count` until the integration reloads. The current state still shows recovery to shadow or live operation. A native timeout message identifies the operation. Recurring service timeouts can indicate slow device integrations or a busy HA event loop; cached state reads do not make those services responsive.
 
 A recent existing controller lease blocks native live setup. This is a guard against accidental overlap, not a distributed lock. Stop competing controllers and automations before enabling control.
 

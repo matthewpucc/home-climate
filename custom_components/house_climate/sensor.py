@@ -52,7 +52,8 @@ class ControllerStatus(SensorEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("mode", "phase", "reasons", "warnings", "head_targets_f",
-                 "heater_on", "auxiliary_fan_only", "error") if key in status}
+                 "heater_on", "auxiliary_fan_only", "error",
+                 "last_error", "last_fault_at", "fault_count") if key in status}
 
 
 class RoomTemperature(ControllerStatus):

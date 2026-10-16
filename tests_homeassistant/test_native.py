@@ -1,11 +1,12 @@
 """Exercise the bridge and worker against real Home Assistant state/services."""
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.core import HomeAssistant, CoreState
@@ -17,6 +18,12 @@ from custom_components.house_climate.config_flow import HouseClimateConfigFlow
 from custom_components.house_climate.configuration import load_configuration
 from custom_components.house_climate.runtime import ControllerRuntime, NativeAPI
 from custom_components.house_climate.controller.ha import HAError
+from custom_components.house_climate.controller.config import Config, Settings
+from custom_components.house_climate.controller.__main__ import preflight
+from custom_components.house_climate.controller.executor import Executor
+from custom_components.house_climate.controller.ha_package import watchdog_signature
+from custom_components.house_climate.controller.policy import Policy
+from custom_components.house_climate.sensor import ControllerStatus
 from tests.test_controller import config, fixture, add_helpers
 
 
@@ -127,7 +134,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bridge_refuses_shadow_writes_and_activation_after_stop(self):
         stop = threading.Event()
-        api = NativeAPI(self.hass, False, stop)
+        api = NativeAPI(self.hass, False, stop, self.cfg)
         with self.assertRaises(HAError):
             await asyncio.to_thread(api.service, "climate", "set_hvac_mode",
                                     entity_id=self.cfg.heater_entity, hvac_mode="heat")
@@ -142,13 +149,106 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 1)
 
     async def test_bridge_does_not_block_event_loop_or_lose_probe_report_times(self):
-        api = NativeAPI(self.hass, False, threading.Event())
+        api = NativeAPI(self.hass, False, threading.Event(), self.cfg)
         with self.assertRaises(RuntimeError):
             api.states()
         states = await asyncio.to_thread(api.states)
         probe = self.cfg.zones["living"].probes[0].entity_id
         self.assertIsInstance(states[probe]["last_reported"], str)
         self.assertIsNotNone(datetime.fromisoformat(states[probe]["last_reported"]).tzinfo)
+
+    async def test_state_reads_finish_without_the_ha_loop_processing_callbacks(self):
+        api = NativeAPI(self.hass, False, threading.Event(), self.cfg)
+        self.hass.states.async_set("sensor.test_unrelated", "123")
+        done, observed, errors = threading.Event(), {}, []
+
+        def read():
+            try:
+                observed.update(api.states())
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=read, daemon=True)
+        worker.start()
+        # Deliberately do not yield the HA loop. Cached reads must still finish.
+        completed = done.wait(.5)
+        await asyncio.to_thread(worker.join, 2)
+        self.assertTrue(completed, "State reads waited for HA's event loop")
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertNotIn("sensor.test_unrelated", observed)
+        self.assertTrue(set(self.cfg.climate_entities) <= observed.keys())
+        Settings.read(observed, self.cfg, strict=True)
+        preflight(self.cfg, observed, Executor(self.cfg, api, "°F"))
+        self.assertEqual(self.calls, [])
+
+    async def test_selective_reads_include_custom_prefix_interlocks(self):
+        cfg = replace(Config.from_dict(self.cfg.to_dict()), helper_prefix="test_controller")
+        helpers = {
+            cfg.entity("enabled"): ("on", {}),
+            cfg.entity("heater_owned"): ("off", {}),
+            cfg.entity("heartbeat", "input_datetime"): ("2026-10-16 05:00:00", {}),
+            cfg.entity("status", "input_text"): ("", {}),
+            cfg.entity("auxiliary_watchdog", "automation"): ("on", {}),
+            cfg.entity("auxiliary_probe_safe", "binary_sensor"):
+                ("on", {"configuration_signature": watchdog_signature(cfg)}),
+        }
+        for entity, (state, attrs) in helpers.items():
+            self.hass.states.async_set(entity, state, attrs)
+        api = NativeAPI(self.hass, False, threading.Event(), cfg)
+        observed = await asyncio.to_thread(api.states)
+        self.assertTrue(helpers.keys() <= observed.keys())
+        self.assertTrue(set(cfg.fans.values()) <= observed.keys())
+        self.assertTrue({p.entity_id for room in cfg.zones.values() for p in room.probes}
+                        <= observed.keys())
+        self.assertNotIn("input_number.hp_office_target", observed)
+        self.assertNotIn("input_boolean.hp_enabled", observed)
+        preflight(cfg, observed, Executor(cfg, api, "°F"))
+
+    async def test_cached_reads_preserve_staleness_and_observe_removed_probes(self):
+        api = NativeAPI(self.hass, False, threading.Event(), self.cfg)
+        first = await asyncio.to_thread(api.states)
+        second = await asyncio.to_thread(api.states)
+        probe, other = self.cfg.zones["living"].probes[:2]
+        self.assertEqual(first[probe.entity_id]["last_reported"],
+                         second[probe.entity_id]["last_reported"])
+        later = datetime.now(timezone.utc) + timedelta(seconds=self.cfg.sensor_stale_seconds + 1)
+        plan = Policy(self.cfg).decide(second, later, Settings.read(second, self.cfg))
+        self.assertEqual(plan.rooms, {})
+        self.assertEqual(plan.head_targets_f, {})
+        self.assertFalse(plan.heater_on)
+        self.assertTrue(all(speed == 0 for speed in plan.fans.values()))
+        self.hass.states.async_set(probe.entity_id, "unavailable")
+        self.hass.states.async_remove(other.entity_id)
+        observed = await asyncio.to_thread(api.states)
+        self.assertEqual(observed[probe.entity_id]["state"], "unavailable")
+        self.assertNotIn(other.entity_id, observed)
+
+    async def test_expired_queued_heat_command_is_never_dispatched(self):
+        api = NativeAPI(self.hass, True, threading.Event(), self.cfg)
+        # Simulate eleven seconds passing between queuing and dispatch.
+        clock = SimpleNamespace(monotonic=Mock(side_effect=[100, 111]))
+        with patch("custom_components.house_climate.runtime.time", clock):
+            with self.assertRaisesRegex(HAError, "expired before dispatch: services/climate/set_temperature"):
+                await asyncio.to_thread(api.service, "climate", "set_temperature",
+                                        entity_id=self.cfg.heater_entity, hvac_mode="heat", temperature=86)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.hass.states.get(self.cfg.heater_entity).state, "off")
+
+    async def test_fault_details_remain_visible_after_recovery(self):
+        runtime = self.runner(False)
+        sensor = ControllerStatus(SimpleNamespace(entry_id="test", runtime_data=runtime))
+        with self.assertLogs("custom_components.house_climate.runtime", level="ERROR"):
+            runtime._async_report("fault", {"error": "Test native timeout"})
+        failed_at = sensor.extra_state_attributes["last_fault_at"]
+        runtime._async_report("shadow", {"mode": "cool"})
+        self.assertEqual(sensor.native_value, "shadow")
+        self.assertNotIn("error", sensor.extra_state_attributes)
+        self.assertEqual(sensor.extra_state_attributes["last_error"], "Test native timeout")
+        self.assertEqual(sensor.extra_state_attributes["last_fault_at"], failed_at)
+        self.assertEqual(sensor.extra_state_attributes["fault_count"], 1)
 
     async def test_setup_waits_for_ha_start_and_unload_before_start_is_safe(self):
         from types import SimpleNamespace
