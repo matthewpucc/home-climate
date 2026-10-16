@@ -9,6 +9,7 @@ from homeassistant.util.unit_system import METRIC_SYSTEM
 
 from custom_components.house_climate import async_migrate_entry, async_setup_entry, async_unload_entry
 from custom_components.house_climate.config_flow import HouseClimateConfigFlow, HouseClimateOptionsFlow
+from custom_components.house_climate.configuration import validate_actuators
 from custom_components.house_climate.controller.config import Config
 from custom_components.house_climate.sensor import RoomTemperature
 from tests.test_rooms import configuration
@@ -131,3 +132,58 @@ class RoomUITests(unittest.IsolatedAsyncioTestCase):
         await flow.async_step_import_file({"config_file": "house_climate.toml"})
         self.assertEqual(flow.draft["rooms"]["office"]["profile"]["target_f"], 73)
         self.assertFalse(flow.live)
+
+    async def test_virtual_room_climates_are_rejected_as_heads_and_auxiliary_heaters(self):
+        registry = er.async_get(self.hass)
+        virtual = registry.async_get_or_create(
+            "climate", "house_climate", "guard_virtual_room",
+            suggested_object_id="guard_virtual_room")
+        flow = await self.flow()
+        for actuator in ("head", "auxiliary"):
+            candidate = configuration()
+            if actuator == "head":
+                candidate["heads"]["shared"] = virtual.entity_id
+            else:
+                candidate.update(heater_entity=virtual.entity_id, auxiliary_room="alpha")
+                candidate["rooms"]["alpha"]["profile"] = {"target_f": 68}
+            with self.subTest(actuator=actuator):
+                config = Config.from_dict(candidate)
+                with self.assertRaisesRegex(ValueError, "Select physical heat-pump and auxiliary heater entities"):
+                    validate_actuators(self.hass, config)
+                with self.assertRaisesRegex(ValueError, "Select physical heat-pump and auxiliary heater entities"):
+                    flow.validate(candidate)
+
+    async def test_physical_climates_remain_valid_equipment_targets(self):
+        registry = er.async_get(self.hass)
+        head = registry.async_get_or_create(
+            "climate", "physical_integration", "guard_physical_head",
+            suggested_object_id="guard_physical_head")
+        heater = registry.async_get_or_create(
+            "climate", "physical_integration", "guard_physical_heater",
+            suggested_object_id="guard_physical_heater")
+        candidate = configuration()
+        candidate["heads"]["shared"] = head.entity_id
+        candidate.update(heater_entity=heater.entity_id, auxiliary_room="alpha")
+        candidate["rooms"]["alpha"]["profile"] = {"target_f": 68}
+        flow = await self.flow()
+        config = flow.validate(candidate)
+        validate_actuators(self.hass, config)
+        self.assertEqual(config.heads["shared"], head.entity_id)
+        self.assertEqual(config.heater_entity, heater.entity_id)
+
+    async def test_equipment_selectors_exclude_virtual_room_climates(self):
+        registry = er.async_get(self.hass)
+        virtual = registry.async_get_or_create(
+            "climate", "house_climate", "guard_virtual_selector",
+            suggested_object_id="guard_virtual_selector")
+        physical = registry.async_get_or_create(
+            "climate", "physical_integration", "guard_physical_selector",
+            suggested_object_id="guard_physical_selector")
+        flow = await self.flow()
+        for form, field in ((await flow.async_step_add_room(), "head"),
+                            (await flow.async_step_auxiliary(), "heater_entity")):
+            with self.subTest(field=field):
+                control = next(value for marker, value in form["data_schema"].schema.items()
+                               if marker.schema == field)
+                self.assertIn(virtual.entity_id, control.config["exclude_entities"])
+                self.assertNotIn(physical.entity_id, control.config["exclude_entities"])

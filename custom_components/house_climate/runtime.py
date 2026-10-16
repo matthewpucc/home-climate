@@ -155,6 +155,7 @@ class ControllerRuntime:
         self.stop_event = threading.Event()
         self.wake_event = threading.Event()
         self.controls = None
+        self.comfort = None
         self.api = NativeAPI(hass, live, self.stop_event, config)
         self.thread = None
         self.finished = None
@@ -166,12 +167,25 @@ class ControllerRuntime:
         self.recovery = RecoveryManager(hass, self)
 
     async def async_setup_controls(self, entry_id):
-        if not self.config.legacy:
-            from .controls import NativeControls
-            self.controls = NativeControls(self.hass, self.config, self.live, entry_id,
-                                           self._async_controls_changed)
-            self.api.controls = self.controls
-            await self.controls.async_load()
+        from .comfort import RoomComfort
+        self.comfort = RoomComfort(self.hass, self.config, entry_id,
+                                   self._async_comfort_changed, self.wake_event)
+        try:
+            await self.comfort.async_load()
+            if not self.config.legacy:
+                from .controls import NativeControls
+                self.controls = NativeControls(self.hass, self.config, self.live, entry_id,
+                                               self._async_controls_changed)
+                self.api.controls = self.controls
+                await self.controls.async_load()
+        except BaseException:
+            await self.comfort.async_close()
+            raise
+
+    @callback
+    def _async_comfort_changed(self):
+        self.wake_event.set()
+        async_dispatcher_send(self.hass, SIGNAL_STATUS)
 
     @callback
     def _async_controls_changed(self):
@@ -263,7 +277,8 @@ class ControllerRuntime:
         try:
             args = SimpleNamespace(live=self.live, once=False, snapshot=None, at=None)
             run_loop(args, self.config, ha_client=self.api,
-                     stop_event=self.stop_event, wake_event=self.wake_event, event_callback=self._report)
+                     stop_event=self.stop_event, wake_event=self.wake_event, event_callback=self._report,
+                     settings_provider=self.comfort.settings if self.comfort else None)
         except Exception as exc:
             error = str(exc)
             _LOGGER.exception("Controller worker stopped unexpectedly")
@@ -282,6 +297,8 @@ class ControllerRuntime:
     async def async_stop(self, _event=None):
         self.stop_event.set()
         self.wake_event.set()
+        if self.comfort:
+            await self.comfort.async_close()
         recovery_closed = await self.recovery.async_close()
         if self.controls:
             await self.controls.async_set_enabled(False)

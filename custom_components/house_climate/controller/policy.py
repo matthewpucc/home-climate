@@ -38,7 +38,7 @@ class Policy:
         self.transfer_on: dict[str, bool] = {}
 
     def band(self, name: str, settings: Settings, now: datetime) -> tuple[float, float, float]:
-        profile = settings.profile(self.config.zones[name], now, self.config.timezone)
+        profile = settings.profile(self.config.zones[name], now, self.config.timezone, name)
         low, high = self.config.low_f, self.config.high_f
         if not profile.comfort_enabled:
             return low, high, (low + high) / 2
@@ -76,7 +76,7 @@ class Policy:
         rooms, warnings = self.sensors.read(states, now, climate_unit)
         plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings)
         LOW, HIGH = self.config.low_f, self.config.high_f
-        profiles = {key: settings.profile(room, now, self.config.timezone) for key, room in self.config.zones.items()}
+        profiles = {key: settings.profile(room, now, self.config.timezone, key) for key, room in self.config.zones.items()}
         plan.fans = {entity: 0 for entity in self.config.fans.values()}
         bands = {name: self.band(name, settings, now) for name in self.config.zones}
         demands = {name: self.demand(name, reading, bands[name], profiles[name].priority)

@@ -10,7 +10,7 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import entity_registry as er, selector
 
-from .configuration import entry_configuration, load_configuration
+from .configuration import entry_configuration, load_configuration, validate_actuators
 from .const import DOMAIN
 from .controller.config import Config, Settings
 from .controller.sensors import from_f, to_f
@@ -84,9 +84,17 @@ class RoomEditor:
         result["half_band_f"] = float(result["half_band_f"]) * (9 / 5 if self.unit == "°C" else 1)
         return result
 
+    def climate_selector(self):
+        registry = er.async_get(self.hass)
+        excluded = [entry.entity_id for entry in registry.entities.values()
+                    if entry.domain == "climate" and entry.platform == DOMAIN]
+        return selector.EntitySelector(selector.EntitySelectorConfig(
+            domain="climate", exclude_entities=excluded))
+
     def validate(self, candidate, live=False):
         cfg = Config.from_dict(candidate)
         cfg.validate(live=live)
+        validate_actuators(self.hass, cfg)
         # HA's device registry identifies aliases and the auxiliary heater's own
         # probes/fan entity. Never give that physical device two independent owners.
         registry = er.async_get(self.hass)
@@ -161,7 +169,7 @@ class RoomEditor:
             vol.Required("name", default=room.get("name", "")): str,
             vol.Optional("area", **({"default": room["area_id"]} if room.get("area_id") else {})): selector.AreaSelector(),
             vol.Required("head", **({"default": self.draft["heads"][room["head"]]} if room else {})):
-                selector.EntitySelector(selector.EntitySelectorConfig(domain="climate")),
+                self.climate_selector(),
             vol.Required("sensors", default=[p["entity_id"] for p in room.get("sensors", [])]):
                 selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="temperature", multiple=True)),
             **self.profile_schema(room.get("profile", {})),
@@ -329,7 +337,7 @@ class RoomEditor:
         schema = {
             vol.Required("enabled", default=bool(self.draft.get("heater_entity"))): bool,
             vol.Optional("heater_entity", **({"default": self.draft["heater_entity"]} if self.draft.get("heater_entity") else {})):
-                selector.EntitySelector(selector.EntitySelectorConfig(domain="climate")),
+                self.climate_selector(),
             vol.Required("heater_high_setpoint_f", default=self.temperature(self.draft.get("heater_high_setpoint_f", 86))):
                 self.number(self.temperature(70), self.temperature(110), .1, self.unit),
             vol.Required("heater_cutoff_f", default=self.temperature(self.draft.get("heater_cutoff_f", 70))):

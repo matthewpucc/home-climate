@@ -266,6 +266,7 @@ class Settings:
     numbers: dict[str, float]
     times: dict[str, time]
     toggles: dict[str, bool]
+    room_profiles: dict[str, Profile] = field(default_factory=dict)
 
     @classmethod
     def read(cls, states, config, strict=False):
@@ -290,7 +291,9 @@ class Settings:
         start, end = self.clock(period.start), self.clock(period.end)
         return start <= local < end if start < end else local >= start or local < end
 
-    def profile(self, room, now, timezone):
+    def profile(self, room, now, timezone, room_id=None):
+        if room_id is not None and room_id in self.room_profiles:
+            return self.room_profiles[room_id]
         local = now.astimezone(ZoneInfo(timezone)).time()
         return next((p.profile for p in room.schedules if self.active(p, local)), room.profile)
 
