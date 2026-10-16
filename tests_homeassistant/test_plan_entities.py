@@ -29,7 +29,8 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
     def entry(self, config=None):
         runtime = ControllerRuntime(self.hass, config or Config.from_dict(configuration()), False)
         self.runtimes.append(runtime)
-        return SimpleNamespace(entry_id="plans", runtime_data=runtime, disabled_by=None)
+        return SimpleNamespace(entry_id="plans", runtime_data=runtime, disabled_by=None,
+                               pref_disable_new_entities=False)
 
     def decide(self, entry, temperatures=None, now=NOW, data=None):
         cfg = entry.runtime_data.config
