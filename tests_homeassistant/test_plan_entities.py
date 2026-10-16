@@ -14,7 +14,7 @@ from custom_components.house_climate.controller.policy import Policy
 from custom_components.house_climate.runtime import ControllerRuntime
 from custom_components.house_climate.sensor import (
     AuxiliaryPlan, ControllerStatus, CurrentIssues, FanPlan, LastFault, Overview,
-    RoomPlan, RoomTemperature, async_setup_entry,
+    RecoveryStatus, RoomPlan, RoomTemperature, async_setup_entry,
 )
 from tests.test_rooms import NOW, configuration, states
 from tests_homeassistant import test_native as fixtures
@@ -54,7 +54,7 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
         added = []
         await async_setup_entry(self.hass, entry, added.extend)
         by_name = {entity.name: entity for entity in added}
-        for name in ("Plan summary", "Current issues", "North alcove plan", "Quiet space plan",
+        for name in ("Plan summary", "Recovery status", "Current issues", "North alcove plan", "Quiet space plan",
                      "Desk fan planned speed"):
             entity = by_name[name]
             self.assertIsNone(entity.entity_category)
@@ -62,6 +62,7 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(entity.entity_registry_visible_default)
             self.assertEqual(entity.device_info["identifiers"], {("house_climate", "plans")})
         self.assertFalse(any(isinstance(entity, AuxiliaryPlan) for entity in added))
+        self.assertEqual(by_name["Recovery status"].unique_id, "plans_recovery")
         self.assertEqual(by_name["North alcove temperature"].unique_id, "plans_room_alpha")
         self.assertEqual(self.rendered(by_name["Plan summary"]), "Waiting for Home Assistant")
 
@@ -144,9 +145,9 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
             self.decide(entry, {"alpha": temperature, "gamma": 68})
             self.assertEqual(self.rendered(sensor), expected)
         self.decide(entry, {"alpha": 67, "gamma": 68})
-        entry.runtime_data.status.update(event="live", phase="settling")
+        entry.runtime_data.status.update(event="live", phase="settling", settle_remaining_seconds=45)
         self.assertEqual(self.rendered(sensor), "Plan: heat using room probes")
-        self.assertIn("Waiting for all heads off / settling", self.rendered(Overview(entry)))
+        self.assertIn("Settling: 45s remaining", self.rendered(Overview(entry)))
         self.assertEqual(self.calls, [])
 
     async def test_reload_preserves_ids_and_removes_only_obsolete_owned_entities(self):
@@ -189,7 +190,7 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.rendered(Overview(entry))), 255)
         with self.assertLogs("custom_components.house_climate.runtime", level="ERROR"):
             entry.runtime_data._async_report("fault", {"error": "Timed out " * 80})
-        for sensor in (Overview(entry), CurrentIssues(entry), LastFault(entry)):
+        for sensor in (Overview(entry), RecoveryStatus(entry), CurrentIssues(entry), LastFault(entry)):
             self.assertEqual(len(self.rendered(sensor)), 255)
 
     async def test_native_shadow_worker_feeds_visible_plans_without_device_commands(self):
@@ -236,3 +237,104 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
         entry.runtime_data.status["device_issues"] = {}
         self.assertNotIn("wait for", self.rendered(RoomPlan(entry, "alpha")))
         self.assertEqual(self.rendered(AuxiliaryPlan(entry)), "Plan: heat using room probes")
+
+
+    async def test_recovery_progress_shows_distinct_off_and_settling_waits(self):
+        entry = self.entry()
+        self.decide(entry, {"alpha": 73, "beta": 71, "gamma": 68})
+        status = entry.runtime_data.status
+        status.update(event="live", phase="new")
+        recovery = RecoveryStatus(entry)
+        self.assertEqual(self.rendered(recovery), "Confirming all heat-pump heads are off")
+        status["phase"] = "stopping"
+        self.assertEqual(self.rendered(recovery), "Waiting for all heat-pump heads off")
+        status.update(phase="settling", settle_remaining_seconds=44.1)
+        self.assertEqual(self.rendered(recovery), "Settling: 45s remaining")
+        self.assertIn("Settling: 45s remaining", self.rendered(Overview(entry)))
+        self.assertEqual(ControllerStatus(entry).extra_state_attributes["settle_remaining_seconds"], 44.1)
+        status.update(mode="off", head_targets_f={}, settle_remaining_seconds=0)
+        self.assertEqual(self.rendered(recovery), "Ready; no heat-pump demand")
+        status["phase"] = "running"
+        self.assertEqual(self.rendered(recovery), "Ready")
+
+    async def test_recovery_status_names_affected_rooms_and_explains_fresh_off_wait(self):
+        entry = self.entry()
+        self.decide(entry, {"alpha": 73, "beta": 71, "gamma": 68})
+        status = entry.runtime_data.status
+        config = entry.runtime_data.config
+        entity = config.heads[config.zones["alpha"].head]
+        detail = {"kind": "recovery", "reason": "Waiting for a newer off report",
+                  "state": "off", "available_modes": ["off", "heat", "cool"],
+                  "required_mode": "cool"}
+        status.update(event="live", phase="running", device_issues={entity: detail["reason"]},
+                      waiting_devices=[entity], recovery_details={entity: detail})
+        sensor = RecoveryStatus(entry)
+        self.assertEqual(self.rendered(sensor),
+                         "North alcove, South nook: Waiting for a newer off report")
+        self.assertEqual(sensor.extra_state_attributes["recovery_details"], {entity: detail})
+        self.assertEqual(ControllerStatus(entry).extra_state_attributes["recovery_details"], {entity: detail})
+        self.assertIn("wait for shared head", self.rendered(RoomPlan(entry, "alpha")))
+        self.assertTrue(RoomPlan(entry, "gamma").available)
+        detail.update(state="unavailable", reason="Waiting for device to reconnect")
+        self.assertIn("Waiting for device to reconnect", self.rendered(sensor))
+
+    async def test_cooling_only_head_shows_requested_mode_block_and_clears_when_recovered(self):
+        entry = self.entry()
+        self.decide(entry, {"alpha": 73, "beta": 71, "gamma": 68})
+        status = entry.runtime_data.status
+        config = entry.runtime_data.config
+        entity = config.heads[config.zones["alpha"].head]
+        detail = {"kind": "capability", "reason": "Requested mode is unavailable",
+                  "state": "off", "available_modes": ["off", "cool"], "required_mode": "heat"}
+        status.update(event="live", phase="running", device_issues={entity: detail["reason"]},
+                      waiting_devices=[entity], recovery_details={entity: detail})
+        self.assertEqual(self.rendered(RecoveryStatus(entry)),
+                         "North alcove, South nook: heat unavailable (HA modes: off, cool)")
+        self.assertIn("keep shared head off; heat unavailable", self.rendered(RoomPlan(entry, "alpha")))
+        self.assertNotIn("wait for", self.rendered(RoomPlan(entry, "alpha")))
+        status.update(device_issues={}, waiting_devices=[], recovery_details={})
+        self.assertEqual(self.rendered(RecoveryStatus(entry)), "Ready")
+        self.assertIn("cool shared head", self.rendered(RoomPlan(entry, "alpha")))
+
+    async def test_auxiliary_capability_block_is_distinct_from_offline_recovery(self):
+        raw = configuration()
+        raw.update(heater_entity="climate.test_auxiliary", auxiliary_room="alpha")
+        entry = self.entry(Config.from_dict(raw))
+        self.decide(entry, {"alpha": 67, "gamma": 68})
+        detail = {"kind": "capability", "state": "off", "required_mode": "heat",
+                  "available_modes": ["off", "fan_only"], "reason": "Heat mode unavailable"}
+        entry.runtime_data.status.update(
+            event="live", phase="running", device_issues={"climate.test_auxiliary": detail["reason"]},
+            recovery_details={"climate.test_auxiliary": detail})
+        self.assertEqual(self.rendered(AuxiliaryPlan(entry)),
+                         "Heater kept off · heat unavailable (HA modes: off, fan_only)")
+        self.assertEqual(self.rendered(RecoveryStatus(entry)),
+                         "North alcove auxiliary heater: heat unavailable (HA modes: off, fan_only)")
+
+    async def test_recovery_sensor_retains_preview_stopped_and_fault_meaning(self):
+        entry = self.entry()
+        self.decide(entry, {"alpha": 73, "beta": 71, "gamma": 68})
+        sensor = RecoveryStatus(entry)
+        self.assertEqual(self.rendered(sensor), "Preview only")
+        entry.runtime_data.status["control_block_reason"] = "Turn on Controller enabled"
+        self.assertEqual(self.rendered(sensor), "Preview only · Turn on Controller enabled")
+        entry.runtime_data._async_report("stopped", {})
+        self.assertEqual(self.rendered(sensor), "Controller stopped")
+        with self.assertLogs("custom_components.house_climate.runtime", level="ERROR"):
+            entry.runtime_data._async_report("fault", {"error": "Test transport failure"})
+        self.assertEqual(self.rendered(sensor), "Controller fault: Test transport failure")
+
+    async def test_integration_reload_progress_is_visible_and_idle_is_quiet(self):
+        entry = self.entry()
+        self.decide(entry, {"alpha": 73, "beta": 71, "gamma": 68})
+        status = entry.runtime_data.status
+        status.update(event="live", phase="running",
+                      integration_recovery={"reload_status": "Reloading heat-pump integration"})
+        sensor = RecoveryStatus(entry)
+        self.assertEqual(self.rendered(sensor), "Reloading heat-pump integration")
+        self.assertEqual(sensor.extra_state_attributes["integration_recovery"],
+                         {"reload_status": "Reloading heat-pump integration"})
+        self.assertEqual(ControllerStatus(entry).extra_state_attributes["integration_recovery"],
+                         {"reload_status": "Reloading heat-pump integration"})
+        status["integration_recovery"] = {"reload_status": "Idle"}
+        self.assertEqual(self.rendered(sensor), "Ready")
