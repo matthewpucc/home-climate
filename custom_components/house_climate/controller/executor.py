@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 from .config import Config
+from .ha import HAError
 from .policy import Plan
 from .sensors import from_f
 
@@ -18,6 +19,14 @@ class Pending:
     since: float
 
 
+@dataclass
+class FanRetry:
+    command: tuple | None
+    message: str
+    retry_at: float
+    attempts: int
+
+
 class Executor:
     """Nonblocking, acknowledged all-off barrier before any shared mode change."""
 
@@ -28,14 +37,15 @@ class Executor:
         self.all_off_since: float | None = None
         self.pending: dict[str, Pending] = {}
         self.stop_started: float | None = None
+        self.fan_failures: dict[str, FanRetry] = {}
 
-    def ensure(self, entity, service, data, matches, states, now):
+    def ensure(self, entity, service, data, matches, states, now, *, force=False):
         command = (service, tuple(sorted(data.items())))
         pending = self.pending.get(entity)
-        if matches(states.get(entity, {})) and (pending is None or pending.command == command):
+        if not force and matches(states.get(entity, {})) and (pending is None or pending.command == command):
             self.pending.pop(entity, None)
             return
-        if pending and pending.command == command:
+        if not force and pending and pending.command == command:
             if now - pending.since >= self.config.command_timeout_seconds:
                 raise ControlFault(f"Command acknowledgement timed out: {entity}")
             return
@@ -109,23 +119,83 @@ class Executor:
         else:
             self.off(entity, states, now)
 
-    def step(self, plan: Plan, states: dict, now: float):
-        # Auxiliary equipment is independent of the shared-system changeover delay.
-        self.auxiliary(plan, states, now)
-        for entity, percentage in plan.fans.items():
+    def fan(self, entity, percentage, plan, states, now):
+        """Circulation is optional: retain a visible issue and retry one fan."""
+        failure = self.fan_failures.get(entity)
+        command = None
+        try:
+            state = states.get(entity, {})
+            attrs = state.get("attributes", {})
+            if percentage and state.get("state") not in ("on", "off"):
+                raise ControlFault("Fan unavailable")
             if percentage:
-                attrs = states.get(entity, {}).get("attributes", {})
-                step = float(attrs.get("percentage_step", 1))
-                if not math.isfinite(step) or step <= 0 or step > 100:
-                    raise ControlFault(f"Invalid fan percentage step: {entity}")
-                percentage = min(100, max(step, round(percentage / step) * step))
-                def matches(s, p=percentage):
-                    observed = s.get("attributes", {}).get("percentage")
-                    return s.get("state") == "on" and isinstance(observed, (int, float)) and abs(observed - p) < .1
-                self.ensure(entity, "set_percentage", {"percentage": percentage}, matches, states, now)
-            else:
-                self.ensure(entity, "turn_off", {}, lambda s: s.get("state") == "off", states, now)
+                if not isinstance(attrs.get("supported_features"), int) or not attrs["supported_features"] & 1:
+                    raise ControlFault("Fan lacks percentage control")
+                try:
+                    step = float(attrs.get("percentage_step", 1))
+                    if not math.isfinite(step) or not 0 < step <= 100:
+                        raise ValueError
+                except (ValueError, TypeError, OverflowError):
+                    raise ControlFault("Invalid fan percentage step") from None
+                # HA's ordered/ranged speed converters use floored integer
+                # percentages. E.g. a 3-speed fan's middle speed is 66, not 67.
+                rung = max(1, round(percentage / step))
+                target = min(100, max(1, math.floor(rung * step + 1e-7)))
+                tolerance = min(1.0, step / 2)
+                service, data = "set_percentage", {"percentage": target}
 
+                def matches(observed):
+                    value = observed.get("attributes", {}).get("percentage")
+                    return (observed.get("state") == "on"
+                            and isinstance(value, (int, float)) and not isinstance(value, bool)
+                            and math.isfinite(value) and abs(value - target) <= tolerance)
+            else:
+                service, data = "turn_off", {}
+                def matches(observed):
+                    return observed.get("state") == "off"
+
+            command = (service, tuple(sorted(data.items())))
+            pending = self.pending.get(entity)
+            # Supersede even a timed-out activation whose old snapshot says off.
+            urgent_off = failure and service == "turn_off" and failure.command != command
+            if not urgent_off and matches(state) and (pending is None or pending.command == command):
+                self.pending.pop(entity, None)
+                self.fan_failures.pop(entity, None)
+                return
+            # A newly requested off bypasses the failed activation's backoff.
+            if failure and now < failure.retry_at and not urgent_off:
+                plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
+                return
+            self.ensure(entity, service, data, matches, states, now, force=bool(urgent_off))
+            if urgent_off:
+                failure.command, failure.retry_at = command, now
+        except (ControlFault, HAError) as exc:
+            if failure and now < failure.retry_at and command in (None, failure.command):
+                plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
+                return
+            self.pending.pop(entity, None)
+            attempts = failure.attempts + 1 if failure else 1
+            delay = min(300, max(15, self.config.poll_seconds, self.config.command_timeout_seconds)
+                        * 2 ** min(attempts - 1, 5))
+            observed = states.get(entity, {})
+            requested = dict(command[1])["percentage"] if command and command[0] == "set_percentage" else percentage
+            target = f"{requested}%" if percentage else "off"
+            reason = str(exc).removesuffix(f": {entity}")
+            message = (f"{reason}; requested {target}, reported {observed.get('state')} "
+                       f"({observed.get('attributes', {}).get('percentage')}%)")
+            failure = FanRetry(command, message, now + delay, attempts)
+            self.fan_failures[entity] = failure
+        if failure:
+            plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
+
+    def step(self, plan: Plan, states: dict, now: float):
+        # Critical climate commands run before optional circulation services.
+        self.auxiliary(plan, states, now)
+        self.shared(plan, states, now)
+        for entity, percentage in plan.fans.items():
+            self.fan(entity, percentage, plan, states, now)
+
+    def shared(self, plan: Plan, states: dict, now: float):
         if self.phase == "new":
             self.begin_stop(states, now)
             return
@@ -172,4 +242,5 @@ class Executor:
                 failures.append(entity)
         self.phase, self.direction = "new", None
         self.pending.clear()
+        self.fan_failures.clear()
         return failures

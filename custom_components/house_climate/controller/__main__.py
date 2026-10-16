@@ -42,10 +42,6 @@ def preflight(config: Config, states: dict, executor: Executor):
             raise ControlFault(f"Climate entity unavailable or missing required modes: {entity}")
     if config.heater_entity:
         executor.target(config.heater_entity, config.heater_high_setpoint_f, states, heater=True)
-    for entity in config.fans.values():
-        state = states.get(entity, {})
-        if state.get("state") not in ("on", "off") or not state.get("attributes", {}).get("supported_features", 0) & 1:
-            raise ControlFault(f"Fan unavailable or lacks percentage control: {entity}")
 
 
 def release(ha, executor, event_callback=None):
@@ -118,8 +114,11 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         active = True
                         # Reconcile startup/reenable through a full off barrier, including heater.
                         failures = executor.shutdown()
-                        if failures:
-                            raise ControlFault("Startup off commands failed: " + ", ".join(failures))
+                        critical = [entity for entity in failures if entity not in config.fans.values()]
+                        if critical:
+                            raise ControlFault("Startup off commands failed: " + ", ".join(critical))
+                        for entity in failures:
+                            plan.warnings.append(f"Circulation fan {entity}: startup off command failed; retrying independently")
                         policy = Policy(config)
                         # The old snapshot predates shutdown. Read again next cycle.
                         report("arming", message="All-off commands sent; awaiting fresh state")

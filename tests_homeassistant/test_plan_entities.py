@@ -203,3 +203,18 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
         self.assertTrue(await entry.runtime_data.async_stop())
         self.assertEqual(self.rendered(Overview(entry)), "Controller stopped")
+
+    async def test_unfinished_fan_shutdown_is_visible_without_blocking_plan(self):
+        entry = self.entry()
+        self.decide(entry, {"alpha": 73, "beta": 71, "gamma": 68})
+        entry.runtime_data.status.update(event="live", phase="running",
+                                         pending_fans=["fan.test_previous_mapping"])
+        issues = CurrentIssues(entry)
+        self.assertIn("fan.test_previous_mapping", self.rendered(issues))
+        self.assertIn("retrying independently", self.rendered(issues))
+        self.assertIn("1 warning(s)", self.rendered(Overview(entry)))
+        self.assertTrue(RoomPlan(entry, "alpha").available)
+        self.assertEqual(issues.extra_state_attributes["warnings"], [
+            "Circulation fan fan.test_previous_mapping: waiting for off; retrying independently"])
+        entry.runtime_data.status["pending_fans"] = []
+        self.assertEqual(self.rendered(issues), "None")
