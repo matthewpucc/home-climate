@@ -85,3 +85,11 @@ If a fault clears before you can inspect it, the controller status retains `last
 A recent existing controller lease blocks native live setup. This is a guard against accidental overlap, not a distributed lock. Stop competing controllers and automations before enabling control.
 
 Turning Controller enabled off commands owned devices off; it does not restore their previous schedules. If auxiliary shutdown cannot be confirmed, ownership remains armed so the watchdog can retry. The watchdog also depends on HA and the device integration remaining operational.
+
+## Heat-pump recovery
+
+A temporary disconnect is handled per device. Healthy heads can continue in the current direction; startup and direction changes still wait for every head to confirm off and complete the configured settling interval. The device's **Recovery status** names a waiting room or shows the settling countdown.
+
+With live control enabled, a heat-pump recovery problem persisting for two minutes can make House Climate reload the HA integration that owns that head. If several heads share the entry, all of them can briefly disappear together. Attempts use a per-integration cooldown and stop after three attempts in one continuous incident. No extra automation is needed. Missing Heat on a valid Off/Cool head produces a capability warning when needed, rather than a reload loop.
+
+Each configured head also has a **Reload integration** button on the House Climate device. It reloads the HA entry that owns that head, including any other heads on the same entry. This explicit action also works while control is disabled or previewing, and can refresh stale capabilities without waiting for automatic recovery. It does not enable House Climate or change its safety checks.

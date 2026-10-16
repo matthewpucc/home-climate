@@ -1,4 +1,6 @@
 """Readable plans on the device page; planned actions never imply device feedback."""
+from math import ceil
+
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.const import EntityCategory, PERCENTAGE, UnitOfTemperature
 from homeassistant.core import callback
@@ -41,8 +43,45 @@ def plan_prefix(status):
     return "Would " if status.get("event") == "shadow" else "Plan: "
 
 
+def phase_message(status):
+    """Describe the actual shared-head wait without guessing a timer."""
+    phase = status.get("phase")
+    if phase == "new":
+        return "Confirming all heat-pump heads are off"
+    if phase == "stopping":
+        return "Waiting for all heat-pump heads off"
+    if phase == "settling":
+        remaining = status.get("settle_remaining_seconds")
+        if remaining is None:
+            return "Settling before heat-pump activation"
+        seconds = max(0, ceil(remaining))
+        if seconds == 0 and status.get("mode") == "off":
+            return "Ready; no heat-pump demand"
+        return f"Settling: {seconds}s remaining"
+    return None
+
+
+def climate_label(config, entity_id):
+    """Use the configured room names, including every area sharing a head."""
+    names = [room.name or key for key, room in config.zones.items()
+             if config.heads[room.head] == entity_id]
+    if names:
+        return ", ".join(names)
+    if entity_id == config.heater_entity and config.auxiliary_room:
+        room = config.zones[config.auxiliary_room]
+        return f"{room.name or config.auxiliary_room} auxiliary heater"
+    return entity_id
+
+
+def capability_message(detail):
+    mode = detail.get("required_mode") or "Requested mode"
+    modes = ", ".join(detail.get("available_modes") or []) or "not reported"
+    return f"{mode} unavailable (HA modes: {modes})"
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
-    entities = [ControllerStatus(entry), Overview(entry), CurrentIssues(entry), LastFault(entry)]
+    entities = [ControllerStatus(entry), Overview(entry), RecoveryStatus(entry),
+                CurrentIssues(entry), LastFault(entry)]
     for key in entry.runtime_data.config.zones:
         entities.extend((RoomTemperature(entry, key), RoomPlan(entry, key)))
     for fan in entry.runtime_data.config.fan_controls.values():
@@ -109,7 +148,8 @@ class ControllerStatus(ControllerEntity):
                  "heater_on", "auxiliary_fan_only", "fans", "room_targets", "error",
                  "last_error", "last_fault_at", "fault_count",
                  "control_enabled", "control_block_reason", "pending_fans",
-                 "device_issues", "waiting_devices") if key in status}
+                 "device_issues", "waiting_devices", "recovery_details",
+                 "settle_remaining_seconds", "integration_recovery") if key in status}
 
 
 class Overview(ControllerEntity):
@@ -128,8 +168,8 @@ class Overview(ControllerEntity):
         prefix = "Preview only · " if preview else "Live plan · "
         if preview and status.get("control_block_reason"):
             prefix += status["control_block_reason"] + " · "
-        if not preview and status.get("phase") in ("new", "stopping", "settling"):
-            prefix += "Waiting for all heads off / settling · "
+        if not preview and (wait := phase_message(status)):
+            prefix += wait + " · "
         warnings = plan_warnings(status)
         if warnings:
             prefix += f'{len(warnings)} warning(s) · '
@@ -145,6 +185,48 @@ class Overview(ControllerEntity):
         elif status.get("auxiliary_fan_only"):
             text += "; auxiliary fan-only " + ("would be on" if preview else "requested")
         return short(prefix + text)
+
+
+class RecoveryStatus(ControllerEntity):
+    """Put recovery progress on the device page without opening attributes."""
+    _attr_name = "Recovery status"
+    _attr_icon = "mdi:progress-clock"
+
+    def __init__(self, entry):
+        super().__init__(entry, "recovery")
+
+    @property
+    def native_value(self):
+        status = self.runtime.status
+        reload_status = status.get("integration_recovery", {}).get("reload_status")
+        reload_message = reload_status if reload_status and reload_status not in ("Idle", "Disabled", "Shadow mode", "Stopped") else None
+        if not has_plan(status):
+            message = inactive_message(status)
+            return short(message + (" · " + reload_message if reload_message else ""))
+        if status["event"] == "shadow":
+            reason = status.get("control_block_reason")
+            messages = ["Preview only", reason, reload_message]
+            return short(" · ".join(message for message in messages if message))
+        details = status.get("recovery_details", {})
+        issues = status.get("device_issues", {})
+        waiting = dict.fromkeys([*details, *issues, *status.get("waiting_devices", [])])
+        messages = [reload_message] if reload_message else []
+        for entity_id in waiting:
+            detail = details.get(entity_id, {})
+            reason = (capability_message(detail) if detail.get("kind") == "capability"
+                      else detail.get("reason") or issues.get(entity_id)
+                      or "Waiting for off confirmation")
+            messages.append(f"{climate_label(self.runtime.config, entity_id)}: {reason}")
+        if wait := phase_message(status):
+            messages.append(wait)
+        return short("; ".join(messages) or "Ready")
+
+    @property
+    def extra_state_attributes(self):
+        status = self.runtime.status
+        return {key: status[key] for key in
+                ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
+                 "integration_recovery") if key in status}
 
 
 class CurrentIssues(ControllerEntity):
@@ -254,7 +336,10 @@ class RoomPlan(RoomEntity):
         waiting = (status.get("event") == "live"
                    and config.heads[room.head] in status.get("device_issues", {}))
         if waiting:
-            action = f"wait for {head}; off requested"
+            detail = status.get("recovery_details", {}).get(config.heads[room.head], {})
+            action = (f"keep {head} off; {capability_message(detail)}"
+                      if detail.get("kind") == "capability"
+                      else f"wait for {head}; off requested")
         elif target is not None:
             action = f'{status["mode"]} {head} to {self.temperature(target)}'
         else:
@@ -326,6 +411,9 @@ class AuxiliaryPlan(ControllerEntity):
         status = self.runtime.status
         if (status.get("event") == "live"
                 and self.runtime.config.heater_entity in status.get("device_issues", {})):
+            detail = status.get("recovery_details", {}).get(self.runtime.config.heater_entity, {})
+            if detail.get("kind") == "capability":
+                return short("Heater kept off · " + capability_message(detail))
             return "Waiting for heater · off requested"
         action = ("heat using room probes" if status["heater_on"] else
                   "circulate air without heat" if status.get("auxiliary_fan_only") else "stay off")
