@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
@@ -196,9 +196,12 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         await self.claim(runtime)
         heater = self.hass.states.get(self.cfg.heater_entity)
         self.hass.states.async_set(heater.entity_id, "heat", dict(heater.attributes))
-        with patch.object(self.hass.services, "async_call", new=AsyncMock(side_effect=RuntimeError("offline"))):
-            with self.assertLogs("custom_components.house_climate.controls", level="ERROR"):
-                self.assertFalse(await runtime.async_stop())
+        async def offline(_call):
+            raise RuntimeError("offline")
+        self.hass.services.async_register("climate", "set_hvac_mode", offline)
+        with self.assertLogs("custom_components.house_climate.controls", level="ERROR"):
+            self.assertFalse(await runtime.async_stop())
+        self.hass.services.async_register("climate", "set_hvac_mode", self.handle)
         self.assertTrue(runtime.controls.active)
         self.assertTrue(runtime.controls.owned)
         with self.assertRaises(HAError):
@@ -222,23 +225,43 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         runtime, switch = await self.runtime()
         await self.claim(runtime)
         started, finish = asyncio.Event(), asyncio.Event()
-        original = self.hass.services.async_call
-        async def delayed(domain, service, data, **kwargs):
-            if service == "set_temperature":
-                started.set()
-                await finish.wait()
-            return await original(domain, service, data, **kwargs)
-        with patch.object(self.hass.services, "async_call", side_effect=delayed):
-            command = asyncio.create_task(asyncio.to_thread(
-                runtime.api.service, "climate", "set_temperature",
-                entity_id=self.cfg.heater_entity, hvac_mode="heat", temperature=86))
-            await asyncio.wait_for(started.wait(), 2)
-            await switch.async_turn_off()
-            if runtime.controls._task:
-                await runtime.controls._task
-            self.assertTrue(runtime.controls.owned)
-            finish.set()
-            await command
-            await self.settle_watchdog(runtime.controls)
+        async def delayed(call):
+            started.set()
+            await finish.wait()
+            await self.handle(call)
+        self.hass.services.async_register("climate", "set_temperature", delayed)
+        command = asyncio.create_task(asyncio.to_thread(
+            runtime.api.service, "climate", "set_temperature",
+            entity_id=self.cfg.heater_entity, hvac_mode="heat", temperature=86))
+        await asyncio.wait_for(started.wait(), 2)
+        await switch.async_turn_off()
+        if runtime.controls._task:
+            await runtime.controls._task
+        self.assertTrue(runtime.controls.owned)
+        finish.set()
+        await command
+        await self.settle_watchdog(runtime.controls)
         self.assertEqual(self.hass.states.get(self.cfg.heater_entity).state, "off")
         self.assertFalse(runtime.controls.owned)
+
+    async def test_switch_still_requires_verified_timing_and_heater_setpoint(self):
+        cfg = replace(Config.from_dict(self.cfg.to_dict()), equipment_timing_confirmed=False)
+        runtime, switch = await self.runtime(cfg=cfg)
+        with self.assertRaisesRegex(HomeAssistantError, "Confirm equipment timing"):
+            await switch.async_turn_on()
+        self.assertFalse(runtime.controls.enabled)
+        self.assertEqual(self.calls, [])
+
+    async def test_worker_exit_pauses_control_and_triggers_watchdog_immediately(self):
+        runtime, _ = await self.runtime()
+        await self.claim(runtime)
+        heater = self.hass.states.get(self.cfg.heater_entity)
+        self.hass.states.async_set(heater.entity_id, "heat", dict(heater.attributes))
+        with patch.object(runtime.api, "request", side_effect=HAError("test worker failure")):
+            with self.assertLogs("custom_components.house_climate.runtime", level="ERROR"):
+                runtime.async_start()
+                await self.until(lambda: runtime.status["event"] == "worker_failed")
+        await self.settle_watchdog(runtime.controls)
+        self.assertFalse(runtime.controls.enabled)
+        self.assertFalse(runtime.controls.owned)
+        self.assertEqual(self.hass.states.get(heater.entity_id).state, "off")
