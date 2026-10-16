@@ -66,10 +66,6 @@ class NativeAPI:
         except FutureTimeout:
             future.cancel()
             raise HAError(f"Home Assistant native operation timed out: {path}") from None
-        except HAError:
-            raise
-        except Exception as exc:
-            raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
 
     def _read_states(self):
         # StateMachine.get is HA's synchronous, direct cached-state accessor.
@@ -132,6 +128,10 @@ class NativeAPI:
         try:
             async with asyncio.timeout(remaining):
                 await self.hass.services.async_call(domain, service, body, blocking=True)
+        except (HAError, TimeoutError):
+            raise
+        except Exception as exc:
+            raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
         finally:
             if controls and activation:
                 controls.inflight -= 1

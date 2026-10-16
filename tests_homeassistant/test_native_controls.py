@@ -268,7 +268,7 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unacknowledged_fan_leaves_native_climate_running_and_recovers(self):
         cfg = replace(Config.from_dict(self.cfg.to_dict()), command_timeout_seconds=.12)
-        fan = cfg.fans["office"]
+        fan = self.cfg.fans["office"]
         for probe in cfg.zones["office"].probes:
             old = self.hass.states.get(probe.entity_id)
             self.hass.states.async_set(probe.entity_id, "74", dict(old.attributes))
@@ -305,7 +305,7 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_fan_service_errors_during_startup_do_not_block_climate(self):
         cfg = Config.from_dict(self.cfg.to_dict())
-        fan = cfg.fans["office"]
+        fan = self.cfg.fans["office"]
         for probe in cfg.zones["office"].probes:
             old = self.hass.states.get(probe.entity_id)
             self.hass.states.async_set(probe.entity_id, "74", dict(old.attributes))

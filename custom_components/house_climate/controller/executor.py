@@ -126,7 +126,7 @@ class Executor:
         try:
             state = states.get(entity, {})
             attrs = state.get("attributes", {})
-            if state.get("state") not in ("on", "off"):
+            if percentage and state.get("state") not in ("on", "off"):
                 raise ControlFault("Fan unavailable")
             if percentage:
                 if not isinstance(attrs.get("supported_features"), int) or not attrs["supported_features"] & 1:
@@ -178,8 +178,11 @@ class Executor:
             delay = min(300, max(15, self.config.poll_seconds, self.config.command_timeout_seconds)
                         * 2 ** min(attempts - 1, 5))
             observed = states.get(entity, {})
-            message = (f"{exc} (requested {command}; reported {observed.get('state')}, "
-                       f"percentage {observed.get('attributes', {}).get('percentage')})")
+            requested = dict(command[1])["percentage"] if command and command[0] == "set_percentage" else percentage
+            target = f"{requested}%" if percentage else "off"
+            reason = str(exc).removesuffix(f": {entity}")
+            message = (f"{reason}; requested {target}, reported {observed.get('state')} "
+                       f"({observed.get('attributes', {}).get('percentage')}%)")
             failure = FanRetry(command, message, now + delay, attempts)
             self.fan_failures[entity] = failure
         if failure:

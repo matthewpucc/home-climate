@@ -140,6 +140,18 @@ class CirculationFanTests(unittest.TestCase):
         self.assertNotIn(self.fan, self.executor.fan_failures)
         self.assertNotIn(self.fan, self.executor.pending)
 
+    def test_new_off_attempts_even_if_failed_fan_has_become_unavailable(self):
+        self.ha.ignore.add(self.fan)
+        self.step(0)
+        self.step(45)
+        self.ha.data[self.fan]["state"] = "unavailable"
+        self.ha.ignore.remove(self.fan)
+        self.step(46, self.plan(0))
+        self.assertEqual(self.fan_calls()[-1][1], "turn_off")
+        self.assertEqual(self.ha.data[self.fan]["state"], "off")
+        self.step(61, self.plan(0))
+        self.assertNotIn(self.fan, self.executor.fan_failures)
+
     def test_service_failures_back_off_and_do_not_cycle_operating_head(self):
         self.ha = FailingFanHA(fixture(self.cfg), self.fan)
         self.executor = Executor(self.cfg, self.ha, "°F")
