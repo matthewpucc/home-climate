@@ -54,10 +54,20 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
 
     def register(self, entity, owner):
         domain, object_id = entity.split(".", 1)
-        return er.async_get(self.hass).async_get_or_create(
-            domain, owner.domain, entity, suggested_object_id=object_id,
-            config_entry=owner,
-        )
+        old = self.hass.states.get(entity)
+        # Fixtures publish states before registry entries. Free the intended ID
+        # while registering, or HA correctly allocates an unrelated _2 entity.
+        self.hass.states.async_remove(entity)
+        try:
+            item = er.async_get(self.hass).async_get_or_create(
+                domain, owner.domain, entity, suggested_object_id=object_id,
+                config_entry=owner,
+            )
+            self.assertEqual(item.entity_id, entity)
+            return item
+        finally:
+            if old is not None:
+                self.hass.states.async_set(entity, old.state, dict(old.attributes))
 
     def status(self, *entities, kind="recovery", reason="Device unavailable; off requested"):
         return {
@@ -227,7 +237,7 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         self.manager.observe(status)
         self.clock.return_value = 120
         self.manager.observe(status)
-        await started.wait()
+        await asyncio.wait_for(started.wait(), 1)
         await self.manager.async_close()
         self.clock.return_value = 100_000
         self.manager.observe(status)
@@ -251,7 +261,7 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         self.manager.observe(status)
         self.clock.return_value = 120
         self.manager.observe(status)
-        await started.wait()
+        await asyncio.wait_for(started.wait(), 1)
         self.manager.observe(status)
         self.assertEqual(self.reload.await_count, 1)
         finish.set()
@@ -324,7 +334,7 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         self.manager.observe(status)
         self.clock.return_value = 120
         self.manager.observe(status)
-        await started.wait()
+        await asyncio.wait_for(started.wait(), 1)
         with self.assertRaisesRegex(HomeAssistantError, "already in progress"):
             await self.manager.async_reload_entity(self.head)
         finish.set()
@@ -356,7 +366,7 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         self.reload.side_effect = slow_reload
         action = asyncio.create_task(self.manager.async_reload_entity(self.head))
         try:
-            await started.wait()
+            await asyncio.wait_for(started.wait(), 1)
             self.manager.observe({"event": "shadow", "recovery_details": {}})
             self.assertIn("Manual integration reload", self.manager.diagnostics["reload_status"])
             self.assertIn(self.owner.entry_id, self.manager.diagnostics["reload_details"])
@@ -396,7 +406,7 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         self.manager.observe(status)
         task = self.manager._task
         try:
-            await started.wait()
+            await asyncio.wait_for(started.wait(), 1)
             with patch("custom_components.house_climate.recovery.RELOAD_CLOSE_SECONDS", .01):
                 async with asyncio.timeout(.5):
                     self.assertFalse(await self.manager.async_close())
