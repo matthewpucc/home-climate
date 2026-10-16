@@ -86,6 +86,46 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.climate.state_attributes["target_temp_high"], 22.2)
         self.assertEqual(self.climate.state_attributes["current_temperature"], 22.9)
 
+    async def test_metric_card_endpoints_round_trip_to_exact_safety_limits(self):
+        self.hass.config.units = METRIC_SYSTEM
+        self.assertEqual(self.climate.capability_attributes["min_temp"], 18.9)
+        self.assertEqual(self.climate.capability_attributes["max_temp"], 23.9)
+        await _async_service_temperature_set(self.climate, ServiceCall(
+            self.hass, "climate", "set_temperature",
+            {"target_temp_low": 18.9, "target_temp_high": 23.9}))
+        self.comfort.async_set_range.assert_awaited_once_with("office", 66, 75)
+
+    async def test_metric_auxiliary_endpoint_rounds_back_up_to_actual_cutoff(self):
+        self.hass.config.units = METRIC_SYSTEM
+        climate = RoomClimate(self.entry, self.cfg.auxiliary_room)
+        climate.hass = self.hass
+        self.assertEqual(climate.capability_attributes["max_temp"], 21.1)
+        await _async_service_temperature_set(climate, ServiceCall(
+            self.hass, "climate", "set_temperature",
+            {"target_temp_low": 18.9, "target_temp_high": 21.1}))
+        self.comfort.async_set_range.assert_awaited_once_with(self.cfg.auxiliary_room, 66, 70)
+
+    async def test_metric_card_rejects_values_beyond_displayed_endpoints(self):
+        self.hass.config.units = METRIC_SYSTEM
+        for low, high in ((18, 22), (20, 24)):
+            with self.subTest(low=low, high=high), self.assertRaises(ServiceValidationError):
+                await _async_service_temperature_set(self.climate, ServiceCall(
+                    self.hass, "climate", "set_temperature",
+                    {"target_temp_low": low, "target_temp_high": high}))
+        self.comfort.async_set_range.assert_not_awaited()
+
+    async def test_metric_normalization_does_not_round_arbitrary_out_of_bounds_values(self):
+        self.hass.config.units = METRIC_SYSTEM
+
+        async def validate(room_id, low, high):
+            if high > self.cfg.high_f:
+                raise ValueError("Comfort range exceeds the safety limit")
+
+        self.comfort.async_set_range.side_effect = validate
+        with self.assertRaisesRegex(ServiceValidationError, "safety limit"):
+            await self.climate.async_set_temperature(target_temp_low=68, target_temp_high=75.01)
+        self.comfort.async_set_range.assert_awaited_once_with("office", 68, 75.01)
+
     async def test_ha_range_service_passes_fahrenheit_unchanged(self):
         await _async_service_temperature_set(self.climate, ServiceCall(
             self.hass, "climate", "set_temperature", {"target_temp_low": 68, "target_temp_high": 70,
@@ -157,6 +197,7 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_auxiliary_room_controls_respect_independent_heater_cutoff(self):
         climate = RoomClimate(self.entry, self.cfg.auxiliary_room)
+        climate.hass = self.hass
         number = RoomDesiredTemperature(self.entry, self.cfg.auxiliary_room)
         self.assertEqual(climate.min_temp, self.cfg.low_f)
         self.assertEqual(climate.max_temp, self.cfg.heater_cutoff_f)
