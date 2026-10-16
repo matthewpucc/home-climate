@@ -14,6 +14,7 @@ from tests_homeassistant import test_native as fixtures
 
 
 class RoomComfortTests(unittest.IsolatedAsyncioTestCase):
+    handle = fixtures.NativeTests.handle
     async def asyncSetUp(self):
         await fixtures.NativeTests.asyncSetUp(self)
         self.cfg = Config.from_dict(self.cfg.to_dict())

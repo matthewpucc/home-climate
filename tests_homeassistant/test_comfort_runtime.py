@@ -104,9 +104,11 @@ class ComfortRuntimeTests(unittest.IsolatedAsyncioTestCase):
         runtime.async_start()
         await self.until(lambda: runtime.status.get("event") == "shadow"
                          and "guest" in runtime.status.get("room_targets", {}))
-        await runtime.comfort.async_set_range("guest", 73.5, 74.5)
         await runtime.comfort.async_set_target("guest", 74)
-        await self.until(lambda: runtime.status.get("room_targets", {}).get("guest", {}).get("target_f") == 74)
+        await runtime.comfort.async_set_range("guest", 73.5, 74.5)
+        await self.until(lambda: runtime.status.get("room_targets", {}).get("guest", {}).get("target_f") == 74
+                         and runtime.status["room_targets"]["guest"]["low_f"] == 73.5
+                         and runtime.status["room_targets"]["guest"]["high_f"] == 74.5)
         self.assertEqual(runtime.status["event"], "shadow")
         self.assertEqual(runtime.status["room_targets"]["guest"]["low_f"], 73.5)
         self.assertEqual(runtime.status["room_targets"]["guest"]["high_f"], 74.5)
