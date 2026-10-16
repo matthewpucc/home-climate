@@ -20,6 +20,8 @@ _LOGGER = logging.getLogger(__name__)
 FAILURE_SECONDS = 120
 RETRY_SECONDS = (15 * 60, 30 * 60, 60 * 60)
 MAX_ATTEMPTS = 3
+RELOAD_TIMEOUT_SECONDS = 60
+RELOAD_CLOSE_SECONDS = 2
 
 
 class RecoveryManager:
@@ -71,8 +73,13 @@ class RecoveryManager:
             return
         if not self._enabled():
             self._first_seen.clear()
-            self._details = {}
-            self._summary = "Shadow mode" if not self.runtime.live else "Disabled"
+            active = self._details.get(self._active_entry)
+            if active is not None and self._task is not None and not self._task.done():
+                self._details = {self._active_entry: active}
+                self._summary = active["reason"]
+            else:
+                self._details = {}
+                self._summary = "Shadow mode" if not self.runtime.live else "Disabled"
             return
         now = self._clock()
         heads = set(self.runtime.config.heads.values())
@@ -230,7 +237,8 @@ class RecoveryManager:
                 "other devices attached to that integration may briefly become unavailable",
                 entry.title, entry.domain,
             )
-            result = await self.hass.config_entries.async_reload(entry_id)
+            async with asyncio.timeout(RELOAD_TIMEOUT_SECONDS):
+                result = await self.hass.config_entries.async_reload(entry_id)
             self._last_result[entry_id] = (
                 "Reload completed; waiting for normal device reports" if result
                 else "Reload failed; Home Assistant could not reload the integration"
@@ -239,6 +247,12 @@ class RecoveryManager:
         except asyncio.CancelledError:
             self._last_result[entry_id] = "Reload cancelled while controller stopped"
             raise
+        except TimeoutError:
+            self._last_result[entry_id] = (
+                f"Reload failed: owning integration did not finish within {RELOAD_TIMEOUT_SECONDS:g} seconds"
+            )
+            _LOGGER.warning("%s", self._last_result[entry_id])
+            return False
         except Exception as exc:
             self._last_result[entry_id] = f"Reload failed: {exc}"
             _LOGGER.warning("Heat-pump integration reload failed: %s", exc)
@@ -257,14 +271,18 @@ class RecoveryManager:
                 self._notify()
 
     async def async_close(self):
-        """Stop automatic recovery before the controller's own shutdown."""
+        """Bound cleanup so a stuck owning integration cannot hold shutdown."""
         self._closed = True
         if self._task is not None and not self._task.done():
             self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+            done, _ = await asyncio.wait({self._task}, timeout=RELOAD_CLOSE_SECONDS)
+            if not done:
+                self._summary = "Waiting for owning integration reload to stop"
+                detail = self._details.get(self._active_entry)
+                if detail is not None:
+                    detail["reason"] = self._summary
+                return False
         self._task = None
         self._active_entry = None
         self._summary = "Stopped"
+        return True
