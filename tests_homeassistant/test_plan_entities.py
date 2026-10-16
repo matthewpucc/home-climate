@@ -218,3 +218,21 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
             "Circulation fan fan.test_previous_mapping: waiting for off; retrying independently"])
         entry.runtime_data.status["pending_fans"] = []
         self.assertEqual(self.rendered(issues), "None")
+
+    async def test_recovering_climate_plans_show_off_request_without_hiding_healthy_rooms(self):
+        raw = configuration()
+        raw.update(heater_entity="climate.test_auxiliary", auxiliary_room="alpha")
+        raw["rooms"]["alpha"]["profile"] = {"target_f": 68, "half_band_f": .5}
+        entry = self.entry(Config.from_dict(raw))
+        self.decide(entry, {"alpha": 67, "gamma": 76})
+        head = entry.runtime_data.config.heads[entry.runtime_data.config.zones["alpha"].head]
+        entry.runtime_data.status.update(event="live", phase="running", device_issues={
+            head: "Waiting for device to reconnect",
+            "climate.test_auxiliary": "Waiting for heater off acknowledgement",
+        })
+        self.assertIn("wait for shared head; off requested", self.rendered(RoomPlan(entry, "alpha")))
+        self.assertIn("cool head", self.rendered(RoomPlan(entry, "gamma")))
+        self.assertEqual(self.rendered(AuxiliaryPlan(entry)), "Waiting for heater · off requested")
+        entry.runtime_data.status["device_issues"] = {}
+        self.assertNotIn("wait for", self.rendered(RoomPlan(entry, "alpha")))
+        self.assertEqual(self.rendered(AuxiliaryPlan(entry)), "Plan: heat using room probes")

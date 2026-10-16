@@ -35,6 +35,7 @@ class NativeControls:
         self.heartbeat_monotonic = 0.0
         self.inflight = 0
         self.problem = None
+        self._auxiliary_off_error = None
         self._lock = asyncio.Lock()
         # Serializes every watchdog service with ownership claims and close.
         self._check_lock = asyncio.Lock()
@@ -306,8 +307,12 @@ class NativeControls:
                     _LOGGER.warning("House Climate watchdog: %s", message)
                 self._fan_problems[entity] = message
             else:
+                if self.problem != message:
+                    log = _LOGGER.error if self.recovering or not self.enabled else _LOGGER.warning
+                    log("House Climate watchdog: %s", message)
                 self.problem = message
-                _LOGGER.error("House Climate watchdog: %s", self.problem)
+                if entity == self.config.heater_entity:
+                    self._auxiliary_off_error = message
             self._publish()
 
     async def async_check(self):
@@ -315,6 +320,15 @@ class NativeControls:
         async with self._check_lock:
             if self._claiming:
                 return
+            heater = self.hass.states.get(self.config.heater_entity) if self.config.heater_entity else None
+            safely_idle = bool(heater and heater.state in ("off", "fan_only")
+                               and heater.attributes.get("hvac_action") != "heating")
+            if self._auxiliary_off_error and (self._is_off(self.config.heater_entity)
+                                              or (not self.recovering and safely_idle)):
+                if self.problem == self._auxiliary_off_error:
+                    self.problem = None
+                    self._publish()
+                self._auxiliary_off_error = None
             attempted = set()
             if self.owned:
                 expired = not 0 <= time.monotonic() - self.heartbeat_monotonic <= 120
