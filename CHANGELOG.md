@@ -2,6 +2,7 @@
 
 ## 0.4.2
 
+- Publish numbered GitHub Releases after CI passes, with changelog notes and installation bundles, so HACS can offer versioned updates.
 - Read only configured entities through HA's direct cached-state API, avoiding per-poll event-loop waits and whole-house state copies.
 - Preserve probe report timestamps and include all controller interlocks and legacy helpers in selective reads.
 - Reject queued native operations after their deadline so a delayed command cannot activate equipment after timing out.

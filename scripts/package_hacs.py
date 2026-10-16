@@ -33,12 +33,12 @@ with ZipFile(OUTPUT / "house-climate-integration.zip", "w", ZIP_DEFLATED) as arc
 # Generated mappings, secrets, live snapshots, Git metadata, and build outputs
 # are never copied. Example and regression inputs are synthetic at source.
 public = list(paths)
-for directory in ("house_climate", "tests", "tests_homeassistant", "docs", "house_climate_addon"):
+for directory in ("house_climate", "tests", "tests_homeassistant", "tests_release", "docs", "house_climate_addon"):
     public += files_under(directory)
 for name in ("README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md",
              "hacs.json", "pyproject.toml", "config.example.toml", ".gitignore",
              "Dockerfile", ".dockerignore", "repository.yaml", "scripts/package_addon.py",
-             "scripts/package_hacs.py", "scripts/validate_distribution.py"):
+             "scripts/package_hacs.py", "scripts/validate_distribution.py", "scripts/publish_release.cjs"):
     public.append(ROOT / name)
 
 workflow = (ROOT / ".github/workflows/container.yml").read_text()
