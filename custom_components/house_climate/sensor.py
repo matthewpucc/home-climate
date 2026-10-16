@@ -27,6 +27,7 @@ def inactive_message(status):
         "waiting_for_home_assistant": "Waiting for Home Assistant",
         "started": "Starting; waiting for the first plan",
         "stopped": "Controller stopped",
+        "stopping": "Stopping owned devices",
     }.get(status.get("event"), "Waiting for a plan")
 
 
@@ -100,7 +101,8 @@ class ControllerStatus(ControllerEntity):
         return {key: status[key] for key in
                 ("mode", "phase", "reasons", "warnings", "head_targets_f",
                  "heater_on", "auxiliary_fan_only", "fans", "room_targets", "error",
-                 "last_error", "last_fault_at", "fault_count") if key in status}
+                 "last_error", "last_fault_at", "fault_count",
+                 "control_enabled", "control_block_reason") if key in status}
 
 
 class Overview(ControllerEntity):
@@ -117,6 +119,8 @@ class Overview(ControllerEntity):
             return short(inactive_message(status))
         preview = status["event"] == "shadow"
         prefix = "Preview only · " if preview else "Live plan · "
+        if preview and status.get("control_block_reason"):
+            prefix += status["control_block_reason"] + " · "
         if not preview and status.get("phase") in ("new", "stopping", "settling"):
             prefix += "Waiting for all heads off / settling · "
         if status.get("warnings"):
@@ -147,7 +151,10 @@ class CurrentIssues(ControllerEntity):
         status = self.runtime.status
         if not has_plan(status):
             return short(inactive_message(status))
-        return short("; ".join(status.get("warnings", [])) or "None")
+        issues = [*status.get("warnings", [])]
+        if status.get("control_block_reason"):
+            issues.insert(0, status["control_block_reason"])
+        return short("; ".join(issues) or "None")
 
     @property
     def extra_state_attributes(self):

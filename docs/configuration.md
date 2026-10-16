@@ -64,8 +64,8 @@ Upgrading the integration preserves the old TOML file and live HA helpers. Their
 
 When opening the editor or importing the old file, the controller translates the former room roles into explicit profiles, schedules, priorities, and fan rules. It copies current numeric, schedule, and fan-enable helper values from HA; missing helpers use the prior defaults. The editor starts in shadow mode for this conversion.
 
-Review the imported draft while HA helpers are loaded. Saving stores the configuration in HA; the TOML file and old comfort helpers then stop being authoritative. The helper prefix remains `hp`, preserving the enable switch and lease.
+Review the imported draft while HA helpers are loaded. Saving stores the configuration in HA; the TOML file and old comfort helpers then stop being authoritative. The helper prefix remains in the stored configuration for compatibility, but native control uses the device's Controller enabled switch.
 
-Generate and install the new package before re-enabling live control. It replaces the old comfort-helper package with the enable/lease and generic auxiliary watchdog. Keep a backup of the old file/package until the migration is verified. Do not rerun the old defaults script during migration.
+After saving, verify live-command settings and turn on Controller enabled on the device. Native controls and the watchdog are created automatically. Stop the old controller before migration; once its ownership is off, the obsolete helper package can be removed. Keep a backup of the old file/package until migration is verified. Standalone/add-on installations continue to require their generated package.
 
 An ordinary room rename preserves its stable ID. Existing legacy role words remain only in the compatibility reader and regression fixtures; new configurations do not depend on them.

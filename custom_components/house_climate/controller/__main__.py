@@ -66,7 +66,7 @@ def run(args, config: Config):
     return run_loop(args, config)
 
 
-def run_loop(args, config: Config, *, ha_client=None, stop_event=None, event_callback=None):
+def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_event=None, event_callback=None):
     # Native HA supplies its own API bridge and lifecycle event. CLI behavior stays unchanged.
     report = event_callback or emit
     if args.live and (args.snapshot or args.at or args.once):
@@ -152,7 +152,12 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, event_cal
             if args.once:
                 break
             # Interruptible wait; no heartbeat is renewed during a communication failure.
-            quit_event.wait(max(0, min(60, config.poll_seconds * max(1, min(faults, 4))) - (time.monotonic() - started)))
+            delay = max(0, min(60, config.poll_seconds * max(1, min(faults, 4))) - (time.monotonic() - started))
+            if wake_event is not None:
+                wake_event.wait(delay)
+                wake_event.clear()
+            else:
+                quit_event.wait(delay)
     finally:
         if active:
             release(ha, executor, event_callback=report)

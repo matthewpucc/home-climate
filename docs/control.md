@@ -24,21 +24,23 @@ The heater's internal thermostat is bypassed operationally by requesting a verif
 
 Heating and fan-only are mutually exclusive. A heat-to-fan transition first commands off and confirms it on a subsequent poll. Fan-only never sends the high heating setpoint.
 
-The separate HA watchdog acts while the controller owns the heater. Every 15 seconds and on relevant state/startup events, it commands off when disabled or when the heartbeat is older than 120 seconds. When heating is possible, no valid external probe or any valid probe at the independent cutoff also triggers off. Confirmed fan-only operation is allowed above the heating cutoff unless the device reports heating.
+The HA watchdog acts while the controller owns the equipment. Every 15 seconds and on relevant state/startup events, it commands off when disabled or when the heartbeat is older than 120 seconds. When heating is possible, no valid external probe or any valid probe at the independent cutoff also triggers off. Confirmed fan-only operation is allowed above the heating cutoff unless the device reports heating.
 
-A mapping signature prevents live control with an outdated watchdog package. The watchdog does not depend on the Python worker reporting itself healthy, but it does depend on HA and the device integration continuing to work.
+The native integration supplies its watchdog automatically, using the saved configuration. Standalone/add-on and legacy file installations use the generated HA package, whose mapping signature prevents live control with stale watchdog settings. Both watchdogs run independently of the control worker and depend on HA and the device integration continuing to work.
 
 ## Ownership and failure behavior
 
-Shadow mode rejects service writes at the API adapter. Diagnostic entities still expose proposed decisions. Live operation requires explicit configuration, the HA enable helper, and successful preflight.
+Shadow mode rejects service writes from the control worker. Entities still expose proposed decisions. Live operation requires explicit configuration, the device's Controller enabled switch, and successful preflight. Standalone and legacy file installations use the HA enable helper instead.
+
+Native ownership is persisted before actuator commands. After an HA restart, the independent watchdog stops previously owned devices even if the new configuration is in shadow mode. It never takes over devices without a recorded ownership claim. The enable switch resets off on restart and configuration reload.
 
 While enabled, House Climate owns its mapped devices. Disable it before manual operation or using competing automations. Normal disable/shutdown attempts off for all owned devices. It does not restore an earlier device schedule.
 
-An unavailable actuator or unacknowledged command stops live execution and triggers shutdown attempts. Recovery begins from the all-off barrier. If auxiliary shutdown is unconfirmed, ownership remains armed for watchdog retries.
+An unavailable actuator or unacknowledged command stops live execution and triggers shutdown attempts. Recovery begins from the all-off barrier. Native ownership remains armed until all owned devices acknowledge off and in-flight activation calls finish. A failed shutdown blocks unload and re-enabling while watchdog retries continue. Standalone ownership remains armed if auxiliary shutdown is unconfirmed.
 
 The native integration serializes its worker lifecycle and refuses a second loaded instance. Reload waits for shutdown; a stuck worker blocks successful reload. The standalone CLI additionally has a host-local process lock. Neither provides a distributed lock across separate hosts.
 
-If the process stops, shared-system heads can retain their last native setpoints. Only the auxiliary heater has an independent HA watchdog. If HA or the host stops, its automations cannot run. Physical device protections remain necessary.
+The native watchdog pauses control and stops all owned devices when the worker heartbeat expires after 120 seconds; probe cutoffs independently stop auxiliary heating. The standalone package watches only the auxiliary heater, so shared heads can retain setpoints if its process stops. While HA or the host is down, neither watchdog can run. Native ownership recovery resumes after HA starts.
 
 ## Current scope
 
