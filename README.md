@@ -2,7 +2,7 @@
 
 Coordinate rooms that share a heat pump's heating/cooling direction, using temperature probes and devices already connected to Home Assistant.
 
-House Climate runs continuously inside HA as a custom integration. Configure rooms, sensors, comfort targets, schedules, priorities, and fans in **Settings → Devices & services → House Climate → Configure**. No API token or separate container is needed for the native integration.
+House Climate runs continuously inside HA as a custom integration. Configure rooms, sensors, comfort targets, schedules, priorities, and fans in **Settings → Devices & services → House Climate → Configure**. Everyday temperature adjustments use room thermostat cards and Desired temperature controls on your dashboard. No API token or separate container is needed for the native integration.
 
 **Experimental, shadow mode by default.** The controller proposes decisions without sending device commands until live control is enabled. CI exercises simulated equipment and real HA APIs; physical equipment commissioning remains installation-specific.
 
@@ -12,6 +12,7 @@ House Climate runs continuously inside HA as a custom integration. Configure roo
 - Multiple rooms sharing one head, without averaging away a hot or cold area.
 - Multiple temperature sources, with freshness checks, median fusion, and persistent extreme detection.
 - Per-room targets, priorities, daily schedules, and optional HA area assignments.
+- Dashboard thermostat cards for comfort ranges, Desired temperature controls, and temporary holds that resume the schedule automatically.
 - Cooling, conditioning, scheduled, continuous, and inter-room airflow fan rules.
 - One optional auxiliary heater, thermostated by external room probes.
 - A native device-page enable switch and independent watchdog; no YAML package for native room configurations.

@@ -10,6 +10,12 @@ Heat/cool arbitration compares actual limit violations, forecast limit pressure,
 
 Heat/cool direction uses hysteresis, dwell, and sustained competing demand. Default limits are 66–75°F, with proactive demand near 67°F/74°F. These are configurable control objectives; they cannot guarantee physical bounds.
 
+## Dashboard comfort holds
+
+The native HA integration exposes a range thermostat and a Desired temperature number for each room. Card changes are settings requests to the shared policy, not direct head commands. They wake the existing worker and preserve controller enablement and ownership.
+
+An explicit edit enables a temporary comfort profile, preserving the active schedule's priority and fan settings. The hold expires at the next room schedule transition in HA's timezone; without scheduled transitions it remains until Schedule is selected. Holds persist independently of saved integration configuration and retain their original expiry across restarts. Limits, sensor checks, and auxiliary cutoffs continue to apply. The standalone/add-on engine retains its configured profiles.
+
 ## Device execution
 
 Startup, direction change, mixed reported modes, and recovery request all heads off. Every head must report off before the settling timer begins. Selected heads then receive one shared direction. Unacknowledged climate commands enter device recovery and retry off; startup or changeover continues waiting until the required acknowledgements arrive.

@@ -56,7 +56,8 @@ def run(args, config: Config):
     return run_loop(args, config)
 
 
-def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_event=None, event_callback=None):
+def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_event=None,
+             event_callback=None, settings_provider=None):
     # Native HA supplies its own API bridge and lifecycle event. CLI behavior stays unchanged.
     report = event_callback or emit
     if args.live and (args.snapshot or args.at or args.once):
@@ -94,8 +95,9 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
             try:
                 states = ha.states()
                 enabled = states.get(config.entity("enabled"), {}).get("state") == "on"
-                settings = Settings.read(states, config, strict=args.live and enabled)
                 now = datetime.now(timezone.utc)
+                settings = (settings_provider(states, config, now, strict=args.live and enabled)
+                            if settings_provider else Settings.read(states, config, strict=args.live and enabled))
                 plan = policy.decide(states, now, settings, unit)
                 if args.live and enabled:
                     preflight(config, states, executor)

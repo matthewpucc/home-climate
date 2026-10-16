@@ -19,15 +19,30 @@ For manual installation, copy `custom_components/house_climate` into HA's config
 5. Configure an auxiliary heater if present. Its room must use external temperature probes. Do not separately assign the same device's fan entity.
 6. Choose **Review and save**. New configurations start in shadow mode. The integration's device shows controller decisions and fused room temperatures.
 
-Use **Configure** to edit rooms, names, targets, schedules, fans, and system settings later. Changes are collected in a draft and apply together when saved. Cancelling leaves the running configuration untouched. Saving reloads the integration, stopping owned devices and resetting Controller enabled to off. Enabling it again restarts through the all-off barrier.
+Use the room thermostats and **Desired temperature** controls for everyday temperature adjustments. Use **Configure** to edit rooms, names, saved schedule defaults, fans, and system settings later. Changes are collected in a draft and apply together when saved. Cancelling leaves the running configuration untouched. Saving reloads the integration, stopping owned devices and resetting Controller enabled to off. Enabling it again restarts through the all-off barrier.
 
 Room IDs stay stable when renamed, preserving entity identity/history. Removing a room or fan also removes its integration-owned temperature and plan entities. Shared heads and airflow references are validated before saving.
 
 Temperatures in HA forms follow HA's configured unit system; stored configuration and diagnostic target attributes use Fahrenheit. Temperature entities are converted by HA for display.
 
+## Adjust temperatures from your dashboard
+
+Each configured room automatically gets two normal control entities on the **House climate controller** device:
+
+- **Room thermostat**: the room's fused temperature and its comfort low/high range. Add it to a dashboard with HA's standard **Thermostat** card.
+- **Room desired temperature**: the point the controller aims to reach inside that band. Add it to an **Entities** card for direct adjustment.
+
+Use **Add to dashboard** on the device page, or add cards in the dashboard editor and select the House Climate entities for that room. No helpers, custom cards, YAML, or extra integration configuration are required. These controls remain editable in shadow mode, so you can preview changes before enabling live commands.
+
+Moving Desired temperature shifts the existing band around the new target, clipped to the configured system limits. Editing the range keeps the desired temperature inside it. An explicit edit starts a **Temporary** comfort hold, including during a limits-only period. It keeps the active period's priority and fan schedule.
+
+The hold ends at the next schedule transition for that room, including overnight transitions in HA's timezone. If the room has no schedule, the hold remains until you select **Schedule**. Choose the thermostat's **Schedule** preset in its More info dialog to resume early, or **Temporary** to hold the current values. A still-valid hold survives an HA restart and keeps its original expiry; it does not restart its duration.
+
+Dashboard adjustments apply to the existing worker without reloading the integration or turning off Controller enabled. They do not change saved schedule defaults, enable live control, or directly command a head. The shared controller continues choosing one heat/cool direction for the house. System limits and the auxiliary heater's independent cutoff still constrain the controls. Use the room plan and Recovery status to see whether the requested comfort can currently be served.
+
 ## Updates and version numbers
 
-HACS installs stable GitHub Releases such as `v0.5.0`. Release tags match the integration's manifest version. Each release is published only after controller, native HA, packaging, and container checks pass; installation bundles and changelog notes are attached.
+HACS installs stable GitHub Releases such as `v0.6.0`. Release tags match the integration's manifest version. Each release is published only after controller, native HA, packaging, and container checks pass; installation bundles and changelog notes are attached.
 
 If you installed before the first release, open **HACS → House Climate → ⋮ → Redownload**, choose the latest numbered release instead of `main`, and restart HA. Refresh repository information first if the new release has not appeared yet. Selecting `main` intentionally tracks development commits and may display a commit hash.
 

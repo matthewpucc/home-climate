@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0
+
+- Add a native room thermostat for Home Assistant's standard Thermostat card, exposing the comfort low/high range and fused room temperature.
+- Add an ordinary Desired temperature control per room. Moving it shifts the current comfort band without editing integration configuration.
+- Apply dashboard edits immediately through the running policy, preserving controller enablement, ownership, shared-mode arbitration, fan schedules, and safety limits.
+- Hold edits until the next room schedule transition; rooms without schedules hold until Schedule is selected. Temporary enables an explicit comfort hold during limits-only periods.
+- Persist active holds across HA restarts until their original expiry. Resume the saved schedule from the thermostat's Schedule preset.
+- Convert temperatures through HA's standard climate/number APIs and reject invalid or out-of-bounds service inputs.
+
 ## 0.5.3
 
 - Accept each head's advertised capabilities: an Off/Cool head can stay idle or cool without faulting the whole controller. Unsupported demand no longer wins shared-system arbitration.
