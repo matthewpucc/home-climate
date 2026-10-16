@@ -124,7 +124,16 @@ class RoomComfort:
                 high = min(self.config.high_f, settings.value(profile.high_f)
                            if profile.high_f is not None else target + half)
             else:
-                low, high = self.config.low_f, self.config.high_f
+                # The card presents the saved/proposed comfort request while
+                # inactive. Policy still enforces its full system safety range.
+                half = settings.value(profile.half_band_f)
+                low = settings.value(profile.low_f) if profile.low_f is not None else target - half
+                high = settings.value(profile.high_f) if profile.high_f is not None else target + half
+                minimum, maximum = self.bounds(room_id)
+                width = min(high - low, maximum - minimum)
+                low = min(max(low, minimum), maximum - width)
+                high = low + width
+                target = min(high, max(low, target))
         return {
             "low_f": low, "high_f": high, "target_f": target,
             "comfort_enabled": bool(hold) or profile.comfort_enabled,
