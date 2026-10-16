@@ -14,7 +14,7 @@ House Climate runs continuously inside HA as a custom integration. Configure roo
 - Per-room targets, priorities, daily schedules, and optional HA area assignments.
 - Cooling, conditioning, scheduled, continuous, and inter-room airflow fan rules.
 - One optional auxiliary heater, thermostated by external room probes.
-- HA status and fused room-temperature sensors, including in shadow mode.
+- A readable device-page plan: room temperatures, head actions and comfort ranges, fan speeds, auxiliary heat, and current issues—including in shadow mode.
 - The same engine as a Python CLI, Docker image, or HA add-on.
 
 Room names are labels, not control roles. There are no required bedroom, office, or living-room names. A room's behavior comes entirely from its configuration.
@@ -28,7 +28,7 @@ Use the [installation guide](docs/hacs.md) to add this repository to HACS as an 
 1. Install the integration and restart HA.
 2. Add **House Climate** in Devices & services.
 3. Add your rooms, select their devices and sensors, and save in shadow mode.
-4. Inspect the controller status and room temperatures.
+4. Open the **House climate controller** device to see its **Plan summary**, room plans, temperatures, fan speeds, and current issues.
 5. Follow the guide to install the generated enable/watchdog package and commission live control.
 
 Existing file-based installations continue to work. See [configuration and migration](docs/configuration.md) before moving their settings into the HA editor.

@@ -21,17 +21,32 @@ For manual installation, copy `custom_components/house_climate` into HA's config
 
 Use **Configure** to edit rooms, names, targets, schedules, fans, and system settings later. Changes are collected in a draft and apply together when saved. Cancelling leaves the running configuration untouched. Saving reloads the integration, stopping owned devices and restarting through the all-off barrier.
 
-Room IDs stay stable when renamed, preserving entity identity/history. Removing a room also removes its integration-owned temperature entity. Shared heads and airflow references are validated before saving.
+Room IDs stay stable when renamed, preserving entity identity/history. Removing a room or fan also removes its integration-owned temperature and plan entities. Shared heads and airflow references are validated before saving.
 
 Temperatures in HA forms follow HA's configured unit system; stored configuration and diagnostic target attributes use Fahrenheit. Temperature entities are converted by HA for display.
 
 ## Updates and version numbers
 
-HACS installs stable GitHub Releases such as `v0.4.2`. Release tags match the integration's manifest version. Each release is published only after controller, native HA, packaging, and container checks pass; installation bundles and changelog notes are attached.
+HACS installs stable GitHub Releases such as `v0.4.3`. Release tags match the integration's manifest version. Each release is published only after controller, native HA, packaging, and container checks pass; installation bundles and changelog notes are attached.
 
 If you installed before the first release, open **HACS → House Climate → ⋮ → Redownload**, choose the latest numbered release instead of `main`, and restart HA. Refresh repository information first if the new release has not appeared yet. Selecting `main` intentionally tracks development commits and may display a commit hash.
 
 For manual upgrades, download `house-climate-integration.zip` from the release and copy its `custom_components/house_climate` directory into HA's config directory.
+
+## See what the controller would do
+
+Open **Settings → Devices & services → House Climate → House climate controller** (the device). The **Sensors** section automatically includes:
+
+- **Plan summary**: for example, “Preview only · Would cool North alcove, South nook.”
+- **A plan for each room**: the proposed head action and setpoint alongside the currently scheduled comfort range. Areas sharing a head show that head's same proposed action; “limits only” means ordinary comfort control is disabled for that period.
+- **Room temperatures**: fused readings from the configured probes.
+- **Planned fan speeds**: one percentage per configured fan, with 0% meaning off.
+- **Auxiliary heater plan**, when configured: heat using room probes, circulate without heat, or stay off.
+- **Current issues**: sensor warnings, conflicting demands, or a current controller fault. The latest fault also remains in **Diagnostics → Last controller fault** after recovery, until reload.
+
+These entities appear automatically after updating and restarting HA. Shadow plans say **Would** and send no commands. Live plans still describe requests, not confirmation that a compressor or heater is operating. The summary shows when live control is waiting for heads to stop or settle. Plans become unavailable during startup, faults, and shutdown instead of displaying stale actions.
+
+Temperature text follows HA's unit system. Ranges come from the same active schedule and settings as the controller decision, including HA's timezone. No Developer Tools, template sensors, or dashboard YAML are needed to view plans. Use the device page's **Add to dashboard** button if you want them on your dashboard.
 
 ## Enable and watchdog package
 

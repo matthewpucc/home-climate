@@ -15,6 +15,7 @@ class Plan:
     auxiliary_fan_only: bool = False
     fans: dict[str, int] = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
+    room_targets: dict = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -77,8 +78,19 @@ class Policy:
         LOW, HIGH = self.config.low_f, self.config.high_f
         profiles = {key: settings.profile(room, now, self.config.timezone) for key, room in self.config.zones.items()}
         plan.fans = {entity: 0 for entity in self.config.fans.values()}
-        demands = {name: self.demand(name, reading, self.band(name, settings, now), profiles[name].priority)
+        bands = {name: self.band(name, settings, now) for name in self.config.zones}
+        demands = {name: self.demand(name, reading, bands[name], profiles[name].priority)
                    for name, reading in rooms.items()}
+        # Report the exact active profile used for this decision. Presentation
+        # must not re-evaluate schedules in a different timezone or helper snapshot.
+        plan.room_targets = {
+            name: {"low_f": band[0], "high_f": band[1], "target_f": band[2],
+                   "comfort_enabled": profiles[name].comfort_enabled,
+                   "priority": profiles[name].priority,
+                   "heat_requested": demands.get(name, {}).get("heat", {}).get("active", False),
+                   "cool_requested": demands.get(name, {}).get("cool", {}).get("active", False)}
+            for name, band in bands.items()
+        }
         for key in list(self.calls):
             if key[0] not in rooms:
                 self.calls.pop(key)

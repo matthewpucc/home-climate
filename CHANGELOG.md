@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.3
+
+- Show a readable plan summary, per-room head actions and active comfort ranges, planned fan percentages, and auxiliary-heater plans directly on the Home Assistant device page.
+- Mark shadow decisions as previews and distinguish live plans from equipment feedback. Hide action plans when the controller faults, stops, or has not produced a decision.
+- Expose current issues and the latest controller fault as readable entities. Preserve existing status and room-temperature identities.
+- Display temperatures in HA's unit system and report the exact scheduled profile used by the decision engine. Room and fan configuration changes automatically update the available entities.
+
 ## 0.4.2
 
 - Publish numbered GitHub Releases after CI passes, with changelog notes and installation bundles, so HACS can offer versioned updates.
