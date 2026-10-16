@@ -14,6 +14,12 @@ def short(text):
     return text if len(text) <= 255 else text[:254] + "…"
 
 
+def plan_warnings(status):
+    return [*status.get("warnings", []),
+            *(f"Circulation fan {entity}: waiting for off; retrying independently"
+              for entity in status.get("pending_fans", []))]
+
+
 def has_plan(status):
     return (status.get("event") in ("shadow", "live")
             and status.get("mode") in ("off", "heat", "cool")
@@ -102,7 +108,7 @@ class ControllerStatus(ControllerEntity):
                 ("mode", "phase", "reasons", "warnings", "head_targets_f",
                  "heater_on", "auxiliary_fan_only", "fans", "room_targets", "error",
                  "last_error", "last_fault_at", "fault_count",
-                 "control_enabled", "control_block_reason") if key in status}
+                 "control_enabled", "control_block_reason", "pending_fans") if key in status}
 
 
 class Overview(ControllerEntity):
@@ -123,8 +129,9 @@ class Overview(ControllerEntity):
             prefix += status["control_block_reason"] + " · "
         if not preview and status.get("phase") in ("new", "stopping", "settling"):
             prefix += "Waiting for all heads off / settling · "
-        if status.get("warnings"):
-            prefix += f'{len(status["warnings"])} warning(s) · '
+        warnings = plan_warnings(status)
+        if warnings:
+            prefix += f'{len(warnings)} warning(s) · '
         active = [room.name or key for key, room in self.runtime.config.zones.items()
                   if room.head in status["head_targets_f"]]
         if active:
@@ -151,14 +158,14 @@ class CurrentIssues(ControllerEntity):
         status = self.runtime.status
         if not has_plan(status):
             return short(inactive_message(status))
-        issues = [*status.get("warnings", [])]
+        issues = plan_warnings(status)
         if status.get("control_block_reason"):
             issues.insert(0, status["control_block_reason"])
         return short("; ".join(issues) or "None")
 
     @property
     def extra_state_attributes(self):
-        return {"warnings": self.runtime.status.get("warnings", [])}
+        return {"warnings": plan_warnings(self.runtime.status)}
 
 
 class LastFault(ControllerEntity):

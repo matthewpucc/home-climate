@@ -36,7 +36,7 @@ Native ownership is persisted before actuator commands. After an HA restart, the
 
 While enabled, House Climate owns its mapped devices. Disable it before manual operation or using competing automations. Normal disable/shutdown attempts off for all owned devices. It does not restore an earlier device schedule.
 
-An unavailable climate actuator or unacknowledged climate command stops live execution and triggers shutdown attempts. Recovery begins from the all-off barrier. Native ownership remains armed until all owned devices acknowledge off and in-flight activation calls finish. A failed shutdown blocks unload and re-enabling while watchdog retries continue. Standalone ownership remains armed if auxiliary shutdown is unconfirmed.
+An unavailable climate actuator or unacknowledged climate command stops live execution and triggers shutdown attempts. Recovery begins from the all-off barrier. Native climate ownership remains armed until every owned climate device acknowledges off and in-flight activation calls finish. A failed climate shutdown blocks unload and re-enabling while watchdog retries continue. Unfinished circulation-fan stops are persisted separately and retried without blocking climate recovery. Standalone ownership remains armed if auxiliary shutdown is unconfirmed.
 
 The native integration serializes its worker lifecycle and refuses a second loaded instance. Reload waits for shutdown; a stuck worker blocks successful reload. The standalone CLI additionally has a host-local process lock. Neither provides a distributed lock across separate hosts.
 
@@ -48,7 +48,7 @@ Separate circulation fans do not block climate preflight or heat-pump operation.
 
 Each failed fan retries independently. The first retry delay is the greater of 15 seconds, the poll interval, and the command timeout; subsequent failures double that delay up to five minutes. A warning stays visible until HA reports the requested on/speed or off state. A newly requested off bypasses a failed speed command's backoff. Recovery does not restart the heat pumps' all-off settling interval.
 
-The auxiliary heater's climate entity, including its fan-only mode, still uses strict acknowledgement and heat-to-off-to-fan checks. Disabling or shutting down still attempts off for all owned devices; an offline fan can keep native shutdown ownership armed until it reports off.
+The auxiliary heater's climate entity, including its fan-only mode, still uses strict acknowledgement and heat-to-off-to-fan checks. Disabling or shutting down still attempts off for all owned devices. Native HA retains unfinished circulation-fan stops separately, including fans removed from the current configuration. They resume retrying after a restart and appear in Current issues. Reclaiming a configured fan for live operation cancels its old shutdown retry before new activation. If the integration is unloaded with only circulation-fan stops remaining, their retries resume on the next load; climate shutdown must already be acknowledged.
 
 ## Current scope
 

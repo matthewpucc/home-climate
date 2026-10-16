@@ -2,6 +2,7 @@
 
 ## 0.5.1
 
+- Recover shutdown ownership once climate devices confirm off; persist unfinished circulation-fan stops separately so an offline fan cannot prevent climate control from resuming.
 - Keep heat-pump and auxiliary climate control running when a separate circulation fan times out, becomes unavailable, or rejects a service call.
 - Show persistent fan warnings in Current issues, retry each fan with capped backoff, and clear its warning after HA acknowledges the requested state.
 - Prioritize climate commands over circulation fans and let a new fan-off request supersede an unsuccessful speed command immediately.

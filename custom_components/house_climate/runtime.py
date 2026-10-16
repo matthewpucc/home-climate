@@ -176,7 +176,8 @@ class ControllerRuntime:
         if self.status.get("event") == "live" and not self.controls.enabled:
             self.status = {"event": "stopping", **self.last_fault}
         self.status.update(control_enabled=self.controls.enabled,
-                           control_block_reason=self.controls.hint)
+                           control_block_reason=self.controls.hint,
+                           pending_fans=list(self.controls.pending_fans))
         if previous != self.controls.enabled:
             self.wake_event.set()
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
@@ -210,7 +211,8 @@ class ControllerRuntime:
         self.status = {"event": event, **data, **self.last_fault}
         if self.controls:
             self.status.update(control_enabled=self.controls.enabled,
-                               control_block_reason=self.controls.hint)
+                               control_block_reason=self.controls.hint,
+                               pending_fans=list(self.controls.pending_fans))
         if event in ("fault", "worker_failed"):
             _LOGGER.error("Controller %s: %s", event, data.get("error"))
         else:
