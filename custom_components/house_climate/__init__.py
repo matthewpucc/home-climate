@@ -12,7 +12,7 @@ from .configuration import generate_configuration, entry_configuration
 from .const import CONF_LIVE, DOMAIN
 from .runtime import ControllerRuntime
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
 
 
 async def async_setup_entry(hass, entry):
@@ -38,11 +38,13 @@ async def async_setup_entry(hass, entry):
             if recent:
                 raise ConfigEntryNotReady("An existing controller lease is active; stop the add-on or standalone controller first")
     runtime = ControllerRuntime(hass, config, live)
+    await runtime.async_setup_controls(entry.entry_id)
     entry.runtime_data = runtime
     hass.data[DOMAIN] = runtime
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     except Exception:
+        await runtime.async_stop()
         hass.data.pop(DOMAIN, None)
         raise
     async def generate_package(_call):

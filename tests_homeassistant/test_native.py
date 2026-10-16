@@ -252,7 +252,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_setup_waits_for_ha_start_and_unload_before_start_is_safe(self):
         from types import SimpleNamespace
-        entry = SimpleNamespace(data={"config_file": "house_climate.toml", "live": False},
+        entry = SimpleNamespace(entry_id="native_test", data={"config_file": "house_climate.toml", "live": False},
                                 options={}, async_on_unload=self.stops.append,
                                 add_update_listener=Mock(return_value=lambda: None))
         self.hass.config_entries = Mock()

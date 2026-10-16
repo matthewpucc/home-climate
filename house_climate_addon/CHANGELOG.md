@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- Add a Controller enabled switch directly to the native HA device. Room-based installations no longer need a separate YAML enable/watchdog package.
+- Show the reason live control is paused in the plan summary and current issues.
+- Run a native HA-loop watchdog independently of the worker, checking external heater probes and a 120-second heartbeat.
+- Persist ownership before issuing actuator commands, recover previously owned devices after restart, and retain shutdown retries until off is acknowledged.
+- Reject queued activations after disabling; keep ownership while actuator calls are still in flight. Enabling control always starts through the all-off barrier.
+- Preserve the generated package for standalone/add-on use and legacy version-1 file installations. Native enable controls reset off on restart or configuration reload.
+
 ## 0.4.3
 
 - Show a readable plan summary, per-room head actions and active comfort ranges, planned fan percentages, and auxiliary-heater plans directly on the Home Assistant device page.

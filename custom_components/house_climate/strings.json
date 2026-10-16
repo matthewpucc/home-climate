@@ -99,7 +99,7 @@
       },
       "system": {
         "title": "System settings",
-        "description": "Live mode also requires the generated HA enable switch. Confirm the off interval against your equipment before enabling live commands.\n\n{detail}",
+        "description": "After saving, turn on Controller enabled on the House climate controller device. Confirm the off interval against your equipment before enabling live commands.\n\n{detail}",
         "data": {
           "low_f": "Minimum room temperature",
           "high_f": "Maximum room temperature",
@@ -112,7 +112,7 @@
       },
       "auxiliary": {
         "title": "Optional auxiliary heater",
-        "description": "Room probes control this heater externally. Choose a high device setpoint that reliably calls for heat, and a separate cutoff above the room's comfort band. Exclude the heater's own sensor and separate fan entity from room configuration. Regenerate the watchdog package after changing this configuration.\n\n{detail}",
+        "description": "Room probes control this heater externally. Choose a high device setpoint that reliably calls for heat, and a separate cutoff above the room's comfort band. Exclude the heater's own sensor and separate fan entity from room configuration. The native watchdog follows these settings automatically.\n\n{detail}",
         "data": {
           "enabled": "Use an auxiliary heater",
           "heater_entity": "Heater",
@@ -132,7 +132,7 @@
       },
       "finish": {
         "title": "Review and save",
-        "description": "{detail}\n\nSaving applies all edits and reloads the controller. Live reloads stop owned devices before restarting. If the auxiliary heater, its probes, or cutoff changed, regenerate and install the watchdog package before enabling control."
+        "description": "{detail}\n\nSaving applies all edits and reloads the controller. Owned devices are stopped, and the Controller enabled switch starts off. Turn it on from the device page when ready for live control."
       }
     },
     "error": {
@@ -242,7 +242,7 @@
       },
       "system": {
         "title": "System settings",
-        "description": "Live mode also requires the generated HA enable switch. Confirm the off interval against your equipment before enabling live commands.\n\n{detail}",
+        "description": "After saving, turn on Controller enabled on the House climate controller device. Confirm the off interval against your equipment before enabling live commands.\n\n{detail}",
         "data": {
           "low_f": "Minimum room temperature",
           "high_f": "Maximum room temperature",
@@ -255,7 +255,7 @@
       },
       "auxiliary": {
         "title": "Optional auxiliary heater",
-        "description": "Room probes control this heater externally. Choose a high device setpoint that reliably calls for heat, and a separate cutoff above the room's comfort band. Exclude the heater's own sensor and separate fan entity from room configuration. Regenerate the watchdog package after changing this configuration.\n\n{detail}",
+        "description": "Room probes control this heater externally. Choose a high device setpoint that reliably calls for heat, and a separate cutoff above the room's comfort band. Exclude the heater's own sensor and separate fan entity from room configuration. The native watchdog follows these settings automatically.\n\n{detail}",
         "data": {
           "enabled": "Use an auxiliary heater",
           "heater_entity": "Heater",
@@ -275,7 +275,7 @@
       },
       "finish": {
         "title": "Review and save",
-        "description": "{detail}\n\nSaving applies all edits and reloads the controller. Live reloads stop owned devices before restarting. If the auxiliary heater, its probes, or cutoff changed, regenerate and install the watchdog package before enabling control."
+        "description": "{detail}\n\nSaving applies all edits and reloads the controller. Owned devices are stopped, and the Controller enabled switch starts off. Turn it on from the device page when ready for live control."
       }
     },
     "error": {

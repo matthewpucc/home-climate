@@ -47,6 +47,7 @@ class NativeAPI:
         self.stop_event = stop_event
         self.ownership_entity = config.entity("heater_owned")
         self.entity_ids = controller_entity_ids(config)
+        self.controls = None
 
     def request(self, path, body=None):
         if body is not None and not self.live:
@@ -82,6 +83,9 @@ class NativeAPI:
                     "last_updated": state.last_updated.isoformat(),
                     "last_reported": state.last_reported.isoformat(),
                 })
+        if self.controls is not None:
+            states = self.controls.overlay({state["entity_id"]: state for state in result})
+            return [{"entity_id": entity, **state} for entity, state in states.items()]
         return result
 
     async def _async_request(self, path, body, deadline):
@@ -109,8 +113,25 @@ class NativeAPI:
             )
             if not safe_stop:
                 raise HAError("Controller is stopping; only shutdown commands are allowed")
-        async with asyncio.timeout(remaining):
-            await self.hass.services.async_call(domain, service, body, blocking=True)
+        controls = self.controls
+        if controls and controls.accepts(domain, service, body.get("entity_id")):
+            async with asyncio.timeout(remaining):
+                await controls.async_service(domain, service, body)
+            return []
+        activation = (domain in ("climate", "fan")
+                      and not (service == "turn_off"
+                               or (service == "set_hvac_mode" and body.get("hvac_mode") == "off")
+                               or (service == "set_percentage" and body.get("percentage") == 0)))
+        if controls and activation:
+            controls.check_activation(body.get("entity_id"), body)
+            controls.inflight += 1
+        try:
+            async with asyncio.timeout(remaining):
+                await self.hass.services.async_call(domain, service, body, blocking=True)
+        finally:
+            if controls and activation:
+                controls.inflight -= 1
+                controls._schedule_check()
         return []
 
     def states(self):
@@ -126,6 +147,8 @@ class ControllerRuntime:
         self.config = config
         self.live = live
         self.stop_event = threading.Event()
+        self.wake_event = threading.Event()
+        self.controls = None
         self.api = NativeAPI(hass, live, self.stop_event, config)
         self.thread = None
         self.finished = None
@@ -133,10 +156,33 @@ class ControllerRuntime:
         self.fault_count = 0
         self.last_fault = {}
 
+    async def async_setup_controls(self, entry_id):
+        if not self.config.legacy:
+            from .controls import NativeControls
+            self.controls = NativeControls(self.hass, self.config, self.live, entry_id,
+                                           self._async_controls_changed)
+            self.api.controls = self.controls
+            await self.controls.async_load()
+
+    @callback
+    def _async_controls_changed(self):
+        if self.controls is None:
+            return
+        previous = self.status.get("control_enabled")
+        if self.status.get("event") == "live" and not self.controls.enabled:
+            self.status = {"event": "stopping", **self.last_fault}
+        self.status.update(control_enabled=self.controls.enabled,
+                           control_block_reason=self.controls.hint)
+        if previous != self.controls.enabled:
+            self.wake_event.set()
+        async_dispatcher_send(self.hass, SIGNAL_STATUS)
+
     @callback
     def async_start(self, _hass=None):
         if self.thread is not None or self.stop_event.is_set():
             return
+        if self.controls:
+            self.controls.async_start()
         self.finished = self.hass.loop.create_future()
         self.thread = threading.Thread(
             target=self._run, name="house-climate-controller", daemon=True
@@ -155,7 +201,12 @@ class ControllerRuntime:
                 "last_fault_at": datetime.now(timezone.utc).isoformat(),
                 "fault_count": self.fault_count,
             }
+        if self.controls and event == "live" and not self.controls.enabled:
+            event = "stopping" if self.controls.owned else "shadow"
         self.status = {"event": event, **data, **self.last_fault}
+        if self.controls:
+            self.status.update(control_enabled=self.controls.enabled,
+                               control_block_reason=self.controls.hint)
         if event in ("fault", "worker_failed"):
             _LOGGER.error("Controller %s: %s", event, data.get("error"))
         else:
@@ -167,7 +218,7 @@ class ControllerRuntime:
         try:
             args = SimpleNamespace(live=self.live, once=False, snapshot=None, at=None)
             run_loop(args, self.config, ha_client=self.api,
-                     stop_event=self.stop_event, event_callback=self._report)
+                     stop_event=self.stop_event, wake_event=self.wake_event, event_callback=self._report)
         except Exception as exc:
             error = str(exc)
             _LOGGER.exception("Controller worker stopped unexpectedly")
@@ -176,6 +227,8 @@ class ControllerRuntime:
 
     @callback
     def _async_finished(self, error):
+        if self.controls and error:
+            self.controls.pause("Control paused: controller worker stopped")
         self._async_report("worker_failed" if error else "stopped",
                            {"error": error} if error else {})
         if not self.finished.done():
@@ -183,9 +236,12 @@ class ControllerRuntime:
 
     async def async_stop(self, _event=None):
         self.stop_event.set()
+        self.wake_event.set()
+        if self.controls:
+            await self.controls.async_set_enabled(False)
         if self.finished is None:
             self._async_report("stopped", {})
-            return True
+            return await self.controls.async_close() if self.controls else True
         try:
             await asyncio.wait_for(asyncio.shield(self.finished), timeout=45)
         except TimeoutError:
@@ -193,4 +249,4 @@ class ControllerRuntime:
             self._async_report("worker_failed", {"error": "Controller shutdown timed out"})
             return False
         await self.hass.async_add_executor_job(self.thread.join)
-        return True
+        return await self.controls.async_close() if self.controls else True
