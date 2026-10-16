@@ -265,3 +265,66 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.controls.enabled)
         self.assertFalse(runtime.controls.owned)
         self.assertEqual(self.hass.states.get(heater.entity_id).state, "off")
+
+    async def test_unacknowledged_fan_leaves_native_climate_running_and_recovers(self):
+        cfg = replace(Config.from_dict(self.cfg.to_dict()), command_timeout_seconds=.12)
+        fan = cfg.fans["office"]
+        for probe in cfg.zones["office"].probes:
+            old = self.hass.states.get(probe.entity_id)
+            self.hass.states.async_set(probe.entity_id, "74", dict(old.attributes))
+
+        async def lost_ack(call):
+            if call.data["entity_id"] == fan:
+                self.calls.append((call.domain, call.service, dict(call.data)))
+                return
+            await self.handle(call)
+
+        self.hass.services.async_register("fan", "set_percentage", lost_ack)
+        runtime, switch = await self.runtime(cfg=cfg)
+        runtime.async_start()
+        await switch.async_turn_on()
+        await self.until(lambda: any("Command acknowledgement timed out" in warning
+                                    for warning in runtime.status.get("warnings", [])))
+        self.assertEqual(runtime.status["event"], "live")
+        self.assertTrue(switch.is_on)
+        self.assertEqual(runtime.fault_count, 0)
+        self.assertEqual(self.hass.states.get(cfg.heads["bonus"]).state, "cool")
+        self.assertEqual(self.hass.states.get(cfg.heads["guest"]).state, "cool")
+        count = len([c for c in self.calls if c[0] == "climate"
+                     and c[2]["entity_id"] in cfg.heads.values()])
+
+        # A late HA report acknowledges this fan without cycling any head.
+        old = self.hass.states.get(fan)
+        self.hass.states.async_set(fan, "on", {**old.attributes, "percentage": 60})
+        await self.until(lambda: runtime.status["event"] == "live"
+                         and not any(fan in warning for warning in runtime.status.get("warnings", [])))
+        self.assertEqual(len([c for c in self.calls if c[0] == "climate"
+                              and c[2]["entity_id"] in cfg.heads.values()]), count)
+        self.assertEqual(runtime.fault_count, 0)
+        self.hass.services.async_register("fan", "set_percentage", self.handle)
+
+    async def test_native_fan_service_errors_during_startup_do_not_block_climate(self):
+        cfg = Config.from_dict(self.cfg.to_dict())
+        fan = cfg.fans["office"]
+        for probe in cfg.zones["office"].probes:
+            old = self.hass.states.get(probe.entity_id)
+            self.hass.states.async_set(probe.entity_id, "74", dict(old.attributes))
+
+        async def offline(call):
+            if call.data["entity_id"] == fan:
+                raise HomeAssistantError("test fan offline")
+            await self.handle(call)
+
+        self.hass.services.async_register("fan", "turn_off", offline)
+        self.hass.services.async_register("fan", "set_percentage", offline)
+        runtime, switch = await self.runtime(cfg=cfg)
+        runtime.async_start()
+        await switch.async_turn_on()
+        await self.until(lambda: self.hass.states.get(cfg.heads["bonus"]).state == "cool"
+                         and any("test fan offline" in warning
+                                 for warning in runtime.status.get("warnings", [])))
+        self.assertEqual(runtime.status["event"], "live")
+        self.assertTrue(switch.is_on)
+        self.assertEqual(runtime.fault_count, 0)
+        self.hass.services.async_register("fan", "turn_off", self.handle)
+        self.hass.services.async_register("fan", "set_percentage", self.handle)

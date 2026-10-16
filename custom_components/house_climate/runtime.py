@@ -66,6 +66,10 @@ class NativeAPI:
         except FutureTimeout:
             future.cancel()
             raise HAError(f"Home Assistant native operation timed out: {path}") from None
+        except HAError:
+            raise
+        except Exception as exc:
+            raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
 
     def _read_states(self):
         # StateMachine.get is HA's synchronous, direct cached-state accessor.

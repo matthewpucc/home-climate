@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- Keep heat-pump and auxiliary climate control running when a separate circulation fan times out, becomes unavailable, or rejects a service call.
+- Show persistent fan warnings in Current issues, retry each fan with capped backoff, and clear its warning after HA acknowledges the requested state.
+- Prioritize climate commands over circulation fans and let a new fan-off request supersede an unsuccessful speed command immediately.
+- Use integer fan percentages compatible with HA speed converters and accept one percentage point of reporting rounding for stepped fans.
+- Preserve strict climate acknowledgement checks, shared-head all-off barriers, auxiliary heat/fan-only transitions, and owned-device shutdown recovery.
+
 ## 0.5.0
 
 - Add a Controller enabled switch directly to the native HA device. Room-based installations no longer need a separate YAML enable/watchdog package.
