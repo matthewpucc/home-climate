@@ -34,7 +34,7 @@ Each configured room automatically gets two normal control entities on the **Hou
 
 Use **Add to dashboard** on the device page, or add cards in the dashboard editor and select the House Climate entities for that room. No helpers, custom cards, YAML, or extra integration configuration are required. These controls remain editable in shadow mode, so you can preview changes before enabling live commands.
 
-Moving Desired temperature shifts the existing band around the new target, clipped to the configured system limits. Editing the range keeps the desired temperature inside it. An explicit edit starts a **Temporary** comfort hold, including during a limits-only period. It keeps the active period's priority and fan schedule.
+Moving Desired temperature shifts the existing band around the new target, clipped to the configured system limits. Editing the range keeps the desired temperature inside it. When scheduled comfort is paused, the card shows proposed comfort settings; the room plan continues showing its active safety limits. An explicit edit starts a **Temporary** comfort hold, including during a limits-only period. It keeps the active period's priority and fan schedule.
 
 The hold ends at the next schedule transition for that room, including overnight transitions in HA's timezone. If the room has no schedule, the hold remains until you select **Schedule**. Choose the thermostat's **Schedule** preset in its More info dialog to resume early, or **Temporary** to hold the current values. A still-valid hold survives an HA restart and keeps its original expiry; it does not restart its duration.
 

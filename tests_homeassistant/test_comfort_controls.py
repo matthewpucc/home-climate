@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from custom_components.house_climate.comfort import RoomComfort
 from custom_components.house_climate.controller.config import Config
+from custom_components.house_climate.controller.policy import Policy
 from tests.test_controller import NIGHT
 from tests_homeassistant import test_native as fixtures
 
@@ -92,8 +93,10 @@ class RoomComfortTests(unittest.IsolatedAsyncioTestCase):
         self.now = datetime(2026, 10, 16, 20, tzinfo=timezone.utc)
         comfort = await self.manager()
         self.assertFalse(comfort.effective("primary")["comfort_enabled"])
-        self.assertEqual(comfort.effective("primary")["low_f"], 66)
-        self.assertEqual(comfort.effective("primary")["high_f"], 75)
+        self.assertEqual(comfort.effective("primary")["low_f"], 69.5)
+        self.assertEqual(comfort.effective("primary")["high_f"], 70.5)
+        settings = comfort.settings({}, self.cfg, self.now)
+        self.assertEqual(Policy(self.cfg).band("primary", settings, self.now)[:2], (66, 75))
         await comfort.async_set_target("primary", 71)
         current = comfort.effective("primary")
         self.assertTrue(current["comfort_enabled"])
@@ -105,6 +108,21 @@ class RoomComfortTests(unittest.IsolatedAsyncioTestCase):
         held = comfort.effective("primary")
         self.assertTrue(held["hold"])
         self.assertEqual(held["high_f"] - held["low_f"], 1)
+
+    async def test_inactive_auxiliary_card_stays_inside_editable_limits_without_changing_policy(self):
+        room = self.cfg.zones["living"]
+        config = replace(self.cfg, zones={**self.cfg.zones, "living": replace(
+            room, profile=replace(room.profile, comfort_enabled=False, target_f=74))})
+        config.validate()
+        comfort = await self.manager(config)
+        effective = comfort.effective("living")
+        self.assertFalse(effective["comfort_enabled"])
+        self.assertFalse(effective["hold"])
+        self.assertEqual((effective["low_f"], effective["high_f"], effective["target_f"]),
+                         (69, 70, 70))
+        settings = comfort.settings({}, config, self.now)
+        self.assertEqual(Policy(config).band("living", settings, self.now)[:2], (66, 75))
+        self.assertEqual(config.zones["living"].profile.target_f, 74)
 
     async def test_hold_preserves_schedule_priority_and_fan_percentage(self):
         comfort = await self.manager()

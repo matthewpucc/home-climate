@@ -38,3 +38,15 @@ def entry_configuration(config_dir, values):
     config = Config.from_dict(values["configuration"])
     config.validate(live=live)
     return config
+
+
+def validate_actuators(hass, config):
+    """Reject controller room thermostats as physical equipment targets."""
+    from homeassistant.helpers import entity_registry as er
+
+    from .const import DOMAIN
+
+    registry = er.async_get(hass)
+    if any((entry := registry.async_get(entity)) and entry.platform == DOMAIN
+           for entity in config.climate_entities):
+        raise ValueError("Select physical heat-pump and auxiliary heater entities")

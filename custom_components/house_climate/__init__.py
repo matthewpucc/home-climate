@@ -8,7 +8,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers.start import async_at_started
 
-from .configuration import generate_configuration, entry_configuration
+from .configuration import generate_configuration, entry_configuration, validate_actuators
 from .const import CONF_LIVE, DOMAIN
 from .runtime import ControllerRuntime
 
@@ -24,6 +24,7 @@ async def async_setup_entry(hass, entry):
         config = await hass.async_add_executor_job(
             entry_configuration, hass.config.config_dir, values
         )
+        validate_actuators(hass, config)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ConfigEntryError(f"Invalid controller configuration: {exc}") from exc
     if live:
