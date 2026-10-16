@@ -282,25 +282,26 @@ class ControllerRuntime:
     async def async_stop(self, _event=None):
         self.stop_event.set()
         self.wake_event.set()
-        await self.recovery.async_close()
+        recovery_closed = await self.recovery.async_close()
         if self.controls:
             await self.controls.async_set_enabled(False)
         if self.finished is None:
             self._async_report("stopped", {})
-            closed = await self.controls.async_close() if self.controls else True
-            if closed and self._remove_climate_listener:
-                self._remove_climate_listener()
-                self._remove_climate_listener = None
-            return closed
-        try:
-            await asyncio.wait_for(asyncio.shield(self.finished), timeout=45)
-        except TimeoutError:
-            # Keep the runtime registered; a reload must never start a second worker.
-            self._async_report("worker_failed", {"error": "Controller shutdown timed out"})
-            return False
-        await self.hass.async_add_executor_job(self.thread.join)
-        closed = await self.controls.async_close() if self.controls else True
+        else:
+            try:
+                await asyncio.wait_for(asyncio.shield(self.finished), timeout=45)
+            except TimeoutError:
+                # Keep the runtime registered; a reload must never start a second worker.
+                self._async_report("worker_failed", {"error": "Controller shutdown timed out"})
+                return False
+            await self.hass.async_add_executor_job(self.thread.join)
+        controls_closed = await self.controls.async_close() if self.controls else True
+        closed = controls_closed and recovery_closed
         if closed and self._remove_climate_listener:
             self._remove_climate_listener()
             self._remove_climate_listener = None
+        if not recovery_closed:
+            self._async_report("worker_failed", {
+                "error": "Owning heat-pump integration reload is still stopping; unload deferred"
+            })
         return closed

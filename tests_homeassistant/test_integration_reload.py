@@ -342,3 +342,77 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(HomeAssistantError, "stopping"):
             await self.manager.async_reload_entity(self.head)
         self.reload.assert_not_awaited()
+
+    async def test_shadow_observation_preserves_active_manual_reload_diagnostics(self):
+        self.runtime.live = False
+        self.runtime.controls.enabled = False
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def slow_reload(_entry_id):
+            started.set()
+            await finish.wait()
+            return True
+
+        self.reload.side_effect = slow_reload
+        action = asyncio.create_task(self.manager.async_reload_entity(self.head))
+        try:
+            await started.wait()
+            self.manager.observe({"event": "shadow", "recovery_details": {}})
+            self.assertIn("Manual integration reload", self.manager.diagnostics["reload_status"])
+            self.assertIn(self.owner.entry_id, self.manager.diagnostics["reload_details"])
+            self.reload.assert_awaited_once_with(self.owner.entry_id)
+        finally:
+            finish.set()
+            await action
+
+    async def test_cooperative_reload_timeout_reports_failure_and_clears_active_task(self):
+        async def stuck_reload(_entry_id):
+            await asyncio.Event().wait()
+
+        self.reload.side_effect = stuck_reload
+        with patch("custom_components.house_climate.recovery.RELOAD_TIMEOUT_SECONDS", .01):
+            with self.assertRaisesRegex(HomeAssistantError, "Reload failed"):
+                await self.manager.async_reload_entity(self.head)
+        self.assertTrue(self.manager._task.done())
+        self.assertIsNone(self.manager._active_entry)
+        self.assertTrue(await self.manager.async_close())
+
+    async def test_close_is_bounded_when_owning_integration_suppresses_cancellation(self):
+        started, cancelled, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def stubborn_reload(_entry_id):
+            started.set()
+            try:
+                await finish.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await finish.wait()
+            return True
+
+        self.reload.side_effect = stubborn_reload
+        status = self.status(self.head)
+        self.manager.observe(status)
+        self.clock.return_value = 120
+        self.manager.observe(status)
+        task = self.manager._task
+        try:
+            await started.wait()
+            with patch("custom_components.house_climate.recovery.RELOAD_CLOSE_SECONDS", .01):
+                async with asyncio.timeout(.5):
+                    self.assertFalse(await self.manager.async_close())
+            self.assertTrue(cancelled.is_set())
+            self.assertIs(self.manager._task, task)
+            self.assertFalse(task.done())
+            self.assertEqual(self.manager._active_entry, self.owner.entry_id)
+            self.assertIn("Waiting for owning integration reload", self.manager.diagnostics["reload_status"])
+            self.clock.return_value = 100_000
+            self.manager.observe(status)
+            self.reload.assert_awaited_once_with(self.owner.entry_id)
+            self.runtime._async_recovery_changed.assert_not_called()
+        finally:
+            finish.set()
+            await task
+        self.assertTrue(await self.manager.async_close())
+        self.assertIsNone(self.manager._task)
+        self.assertIsNone(self.manager._active_entry)
+        self.runtime._async_recovery_changed.assert_not_called()
