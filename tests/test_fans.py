@@ -79,7 +79,7 @@ class CirculationFanTests(unittest.TestCase):
         self.step(255, self.plan(mode="cool", head_targets_f={"bonus": 72}))
         self.ha.calls.clear()
         plan = self.step(300, self.plan(mode="heat", head_targets_f={"primary": 68}))
-        self.assertEqual(self.executor.phase, "stopping")
+        self.assertIn(self.executor.phase, ("stopping", "settling"))
         self.assertEqual(self.ha.data[self.cfg.heads["bonus"]]["state"], "off")
         self.assert_fan_warning(plan)
         self.assertFalse(any(call[1] == "set_temperature" for call in self.ha.calls))

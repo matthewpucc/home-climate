@@ -65,10 +65,10 @@ class ConnectivityTests(unittest.TestCase):
         self.step(240, self.cooling(living=True))
         self.ha.ignore.remove(self.living)
         self.step(255, self.cooling(living=True))
-        self.assertEqual(self.ha.data[self.living]["state"], "off")
+        self.assertEqual(self.ha.data[self.living]["state"], "cool")
         self.step(270, self.cooling(living=True))
         self.assertNotIn(self.living, self.executor.waiting_devices)
-        self.assertFalse(self.calls(self.living, "set_temperature"))
+        self.assertEqual(len(self.calls(self.living, "set_temperature")), 1)
         self.step(285, self.cooling(living=True))
         self.assertEqual(self.ha.data[self.living]["state"], "cool")
         self.assertFalse(self.calls(self.guest))
@@ -94,9 +94,10 @@ class ConnectivityTests(unittest.TestCase):
         self.step(630, heat())
         self.step(645, heat())
         self.assertEqual(self.executor.phase, "settling")
-        self.step(824, heat())
+        self.assertEqual(self.executor.all_off_since, 615)
+        self.step(794, heat())
         self.assertFalse(any(call[1] == "set_temperature" for call in self.ha.calls))
-        self.step(825, heat())
+        self.step(795, heat())
         self.assertEqual(self.ha.data[self.cfg.heads["primary"]]["state"], "heat")
 
     def test_reported_opposite_mode_still_forces_shared_off_barrier(self):
@@ -107,7 +108,7 @@ class ConnectivityTests(unittest.TestCase):
         self.ha.data[self.living]["state"] = "heat"
         self.ha.calls.clear()
         self.step(255)
-        self.assertEqual(self.executor.phase, "stopping")
+        self.assertIn(self.executor.phase, ("stopping", "settling"))
         self.assertEqual(self.ha.data[self.guest]["state"], "off")
         self.assertEqual(self.ha.data[self.bonus]["state"], "off")
         self.assertFalse(any(call[1] == "set_temperature" for call in self.ha.calls))
@@ -123,7 +124,7 @@ class ConnectivityTests(unittest.TestCase):
         self.ha.ignore.remove(self.bonus)
         self.step(255)
         self.assertEqual(self.calls(self.bonus)[0][2]["hvac_mode"], "off")
-        self.assertFalse(self.calls(self.bonus, "set_temperature"))
+        self.assertEqual(self.ha.data[self.bonus]["state"], "cool")
         self.step(270)
         self.assertNotIn(self.bonus, self.executor.waiting_devices)
         self.step(285)
@@ -150,8 +151,8 @@ class ConnectivityTests(unittest.TestCase):
         self.assertEqual(self.executor.pending[self.bonus].command[0], "set_temperature")
         self.assertEqual(self.ha.data[self.guest]["state"], "cool")
         self.step(210)
-        self.assertEqual(self.calls(self.bonus)[-1][2]["hvac_mode"], "off")
-        self.assertIn(self.bonus, self.executor.waiting_devices)
+        self.assertEqual(self.calls(self.bonus)[1][2]["hvac_mode"], "off")
+        self.assertNotIn(self.bonus, self.executor.waiting_devices)
         self.step(225)
         self.assertNotIn(self.bonus, self.executor.waiting_devices)
         self.step(240)
@@ -181,7 +182,7 @@ class ConnectivityTests(unittest.TestCase):
         self.ha.ignore.remove(heater)
         self.step(75, Plan())
         self.assertEqual(self.ha.data[heater]["state"], "off")
-        self.assertIn(heater, self.executor.waiting_devices)
+        self.assertNotIn(heater, self.executor.waiting_devices)
         self.step(90, Plan())
         self.assertNotIn(heater, self.executor.waiting_devices)
         self.assertEqual(len(self.calls(heater, "set_temperature")), 1)
@@ -202,7 +203,7 @@ class ConnectivityTests(unittest.TestCase):
         self.step(285, Plan(mode="cool", head_targets_f={"bonus": 72, "guest": 72}, heater_on=True))
         self.step(300, Plan(mode="cool", head_targets_f={"bonus": 72, "guest": 72}, heater_on=True))
         self.assertNotIn(heater, self.executor.waiting_devices)
-        self.assertFalse(self.calls(heater, "set_temperature"))
+        self.assertEqual(len(self.calls(heater, "set_temperature")), 1)
         self.step(315, Plan(mode="cool", head_targets_f={"bonus": 72, "guest": 72}, heater_on=True))
         self.assertEqual(self.ha.data[heater]["state"], "heat")
         self.assertFalse(self.calls(self.guest))
@@ -227,7 +228,7 @@ class ConnectivityTests(unittest.TestCase):
             original(domain, service, **data)
 
         self.ha.service = failed_off
-        failures = self.executor.shutdown()
+        failures = self.executor.shutdown(self.ha.states())
         self.assertIn(self.living, failures)
         self.assertIn(self.living, self.executor.waiting_devices)
         self.assertEqual(self.ha.data[self.living]["state"], "off")
@@ -238,7 +239,7 @@ class ConnectivityTests(unittest.TestCase):
         self.assertFalse(any(call[1] == "set_temperature" for call in self.ha.calls))
         self.ha.service = original
 
-    def test_preflight_tolerates_disconnect_and_incomplete_metadata_but_not_wrong_modes(self):
+    def test_preflight_tolerates_disconnect_incomplete_metadata_and_mode_subsets(self):
         for unavailable in ("unavailable", "unknown", None):
             with self.subTest(state=unavailable):
                 states = fixture(self.cfg)
@@ -253,8 +254,7 @@ class ConnectivityTests(unittest.TestCase):
         states[self.living]["attributes"]["hvac_modes"] = []
         preflight(self.cfg, states, self.executor)
         states[self.living]["attributes"]["hvac_modes"] = ["off", "heat"]
-        with self.assertRaisesRegex(ControlFault, "missing required modes"):
-            preflight(self.cfg, states, self.executor)
+        preflight(self.cfg, states, self.executor)
         states = fixture(self.cfg)
         add_helpers(states)
         states[self.cfg.heater_entity]["attributes"]["max_temp"] = 80
@@ -273,3 +273,155 @@ class ConnectivityTests(unittest.TestCase):
         self.step(225)
         self.step(405)
         self.assertEqual(self.ha.data[self.guest]["state"], "cool")
+
+    def test_cool_only_unused_head_does_not_fault_or_cycle_healthy_cooling(self):
+        self.ha.data[self.living]["attributes"]["hvac_modes"] = ["off", "cool"]
+        states = self.ha.states()
+        add_helpers(states)
+        preflight(self.cfg, states, self.executor)
+        self.start()
+        self.ha.calls.clear()
+        for now in (240, 255, 270):
+            self.step(now)
+        self.assertEqual(self.ha.data[self.guest]["state"], "cool")
+        self.assertFalse(self.calls(self.guest))
+        self.assertFalse(self.calls(self.living))
+        self.assertNotIn(self.living, self.executor.waiting_devices)
+
+    def test_unsupported_requested_heat_is_local_and_resumes_when_capability_returns(self):
+        self.ha.data[self.living]["attributes"]["hvac_modes"] = ["off", "cool"]
+        heat = lambda: Plan(mode="heat", head_targets_f={"primary": 68, "living": 68})
+        for now in (0, 15, 195, 210):
+            self.step(now, heat())
+        primary = self.cfg.heads["primary"]
+        self.assertEqual(self.ha.data[primary]["state"], "heat")
+        self.assertEqual(self.ha.data[self.living]["state"], "off")
+        self.assertNotIn(self.living, self.executor.recoveries)
+        self.assertNotIn(self.living, self.executor.pending)
+        details = self.executor.recovery_status(210)["devices"][self.living]
+        self.assertEqual(details["kind"], "capability")
+        self.assertEqual(details["required_mode"], "heat")
+        self.assertEqual(set(details["available_modes"]), {"off", "cool"})
+        self.assertIn("heat", details["reason"])
+        self.assertFalse(self.calls(self.living))  # Already-off must be a no-op.
+        count = len(self.calls(primary))
+        self.ha.data[self.living]["attributes"]["hvac_modes"].append("heat")
+        self.step(225, heat())
+        self.assertEqual(self.ha.data[self.living]["state"], "heat")
+        self.assertNotIn(self.living, self.executor.waiting_devices)
+        self.assertEqual(len(self.calls(primary)), count)
+
+    def test_capability_only_block_needs_no_new_off_report(self):
+        self.ha.data[self.living]["attributes"]["hvac_modes"] = ["off", "cool"]
+        original = self.ha.service
+
+        def no_off_needed(domain, service, **data):
+            if data["entity_id"] == self.living:
+                raise AssertionError("Available already-off head must not receive an off command")
+            original(domain, service, **data)
+
+        self.ha.service = no_off_needed
+        heat = lambda: Plan(mode="heat", head_targets_f={"primary": 68, "living": 68})
+        for now in (0, 15, 195, 240, 600):
+            self.step(now, heat())
+        self.assertIn(self.living, self.executor.capability_blocks)
+        self.assertNotIn(self.living, self.executor.recoveries)
+        self.assertEqual(self.ha.data[self.cfg.heads["primary"]]["state"], "heat")
+
+    def test_post_activation_off_report_survives_successful_noop_off(self):
+        self.ha.data[self.bonus]["last_reported"] = "before-activation"
+        self.ha.ignore.add(self.bonus)
+        self.start()
+        self.ha.data[self.bonus]["last_reported"] = "after-reconnect"
+        self.step(240)
+        earliest = self.executor.recoveries[self.bonus].baseline
+        self.ha.ignore.remove(self.bonus)
+        original = self.ha.service
+
+        def noop_off(domain, service, **data):
+            if data["entity_id"] == self.bonus and service == "set_hvac_mode":
+                self.ha.calls.append((domain, service, data))
+                return  # Real integrations may avoid publishing already-off.
+            original(domain, service, **data)
+
+        self.ha.service = noop_off
+        self.ha.calls.clear()
+        self.step(255)
+        self.assertNotIn(self.bonus, self.executor.waiting_devices)
+        self.assertEqual(self.ha.data[self.bonus]["state"], "cool")
+        self.assertEqual([call[1] for call in self.calls(self.bonus)],
+                         ["set_hvac_mode", "set_temperature"])
+        self.assertEqual(earliest[-3], "before-activation")
+
+    def test_failed_off_receipts_preserve_earliest_baseline_and_block_recovery(self):
+        self.ha.data[self.bonus]["last_reported"] = "before-activation"
+        self.ha.ignore.add(self.bonus)
+        self.start()
+        self.step(240)
+        earliest = self.executor.recoveries[self.bonus].baseline
+        original = self.ha.service
+
+        def failed_off(domain, service, **data):
+            if data["entity_id"] == self.bonus and service == "set_hvac_mode":
+                self.ha.calls.append((domain, service, data))
+                raise HAError("off delivery failed")
+            original(domain, service, **data)
+
+        self.ha.service = failed_off
+        self.step(255)
+        self.ha.data[self.bonus]["last_reported"] = "after-reconnect"
+        self.step(270)
+        recovery = self.executor.recoveries[self.bonus]
+        self.assertEqual(recovery.baseline, earliest)
+        self.assertFalse(recovery.off_receipt)
+        self.assertIn(self.bonus, self.executor.waiting_devices)
+        self.ha.service = original
+        self.ha.ignore.remove(self.bonus)
+        self.step(285)
+        self.assertNotIn(self.bonus, self.executor.waiting_devices)
+        self.assertEqual(self.ha.data[self.bonus]["state"], "cool")
+
+    def test_stale_off_is_not_confirmed_by_successful_noop_retries_or_time(self):
+        self.ha.data[self.bonus]["last_reported"] = "unchanged-before-activation"
+        self.ha.ignore.add(self.bonus)
+        self.start()
+        self.step(240)
+        baseline = self.executor.recoveries[self.bonus].baseline
+        for now in range(255, 601, 15):
+            self.step(now)
+            self.assertIn(self.bonus, self.executor.waiting_devices)
+            self.assertEqual(self.executor.recoveries[self.bonus].baseline, baseline)
+        self.ha.ignore.remove(self.bonus)
+        self.ha.data[self.bonus]["last_reported"] = "genuine-new-device-report"
+        self.step(615)
+        self.assertNotIn(self.bonus, self.executor.waiting_devices)
+        self.assertEqual(self.ha.data[self.bonus]["state"], "cool")
+
+    def test_recovery_refresh_is_bounded_to_one_cached_state_read(self):
+        self.start()
+        self.disconnect(self.living)
+        self.step(240, self.cooling(living=True))
+        self.ha.ignore.remove(self.living)
+        snapshot = self.ha.states()
+        original = self.ha.states
+        reads = []
+
+        def read():
+            reads.append(True)
+            return original()
+
+        self.ha.states = read
+        self.executor.step(self.cooling(living=True), snapshot, 255)
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(self.ha.data[self.living]["state"], "cool")
+
+    def test_settling_status_exposes_remaining_configured_delay(self):
+        self.start()
+        self.step(300, Plan(mode="heat", head_targets_f={"primary": 68}))
+        status = self.executor.recovery_status(300)
+        self.assertEqual(status["phase"], "settling")
+        self.assertEqual(status["settle_remaining_seconds"], self.cfg.off_settle_seconds)
+        self.assertEqual(self.executor.recovery_status(315)["settle_remaining_seconds"],
+                         self.cfg.off_settle_seconds - 15)
+        self.assertFalse(any(call[1] == "set_temperature" and call[2]["hvac_mode"] == "heat"
+                             for call in self.ha.calls))

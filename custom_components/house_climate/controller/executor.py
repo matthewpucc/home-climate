@@ -23,6 +23,15 @@ class Pending:
     since: float
     baseline: tuple | None = None
     fresh: bool = False
+    receipt: bool = False
+
+
+@dataclass
+class ClimateRecovery:
+    baseline: tuple
+    reason: str
+    off_receipt: bool = False
+    last_attempt: float | None = None
 
 
 @dataclass
@@ -45,6 +54,11 @@ class Executor:
         self.stop_started: float | None = None
         self.fan_failures: dict[str, FanRetry] = {}
         self.device_issues: dict[str, str] = {}
+        self.recoveries: dict[str, ClimateRecovery] = {}
+        self.capability_blocks: dict[str, dict] = {}
+        self._states = {}
+        self._wanted_modes = {}
+        self._refresh_needed = False
 
     @staticmethod
     def available(state):
@@ -87,51 +101,132 @@ class Executor:
         # before calling HA so a later off supersedes the uncertain activation.
         self.pending[entity] = Pending(command, now, self.marker(observed), fresh)
         self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
+        self.pending[entity].receipt = True
         return False
 
-    def _issue(self, entity, reason):
-        self.device_issues[entity] = reason
+    def _sync_issue(self, entity):
+        if entity in self.recoveries:
+            self.device_issues[entity] = self.recoveries[entity].reason
+        elif entity in self.capability_blocks:
+            self.device_issues[entity] = self.capability_blocks[entity]["reason"]
+        else:
+            self.device_issues.pop(entity, None)
+
+    def _issue(self, entity, reason, states=None, *, baseline=None, receipt=False):
+        recovery = self.recoveries.get(entity)
+        if recovery:
+            recovery.reason = reason
+        else:
+            states = self._states if states is None else states
+            pending = self.pending.get(entity)
+            if baseline is None:
+                baseline = pending.baseline if pending else self.marker(states.get(entity, {}))
+            is_off = bool(pending and pending.command == ("set_hvac_mode", (("hvac_mode", "off"),)))
+            recovery = ClimateRecovery(
+                baseline, reason, receipt or bool(is_off and pending.receipt),
+                pending.since if is_off else None)
+            self.recoveries[entity] = recovery
+        self._sync_issue(entity)
+
+    def _clear_recovery(self, entity):
+        self.pending.pop(entity, None)
+        self.recoveries.pop(entity, None)
+        self._sync_issue(entity)
+
+    def recovery_status(self, now):
+        devices = {}
+        for entity, reason in self.device_issues.items():
+            state = self._states.get(entity, {})
+            block = self.capability_blocks.get(entity)
+            devices[entity] = {
+                "reason": reason, "state": state.get("state", "missing"),
+                "available_modes": list(state.get("attributes", {}).get("hvac_modes") or []),
+                "required_mode": self._wanted_modes.get(entity),
+                "kind": "recovery" if entity in self.recoveries else "capability",
+            }
+            if block:
+                devices[entity]["missing_modes"] = block["missing_modes"]
+        remaining = (max(0, self.config.off_settle_seconds - (now - self.all_off_since))
+                     if self.phase == "settling" and self.all_off_since is not None else None)
+        return {"phase": self.phase, "waiting_devices": self.waiting_devices,
+                "settle_remaining_seconds": remaining, "devices": devices}
 
     def _recovery_off(self, entity, states, now):
         command = ("set_hvac_mode", (("hvac_mode", "off"),))
-        pending = self.pending.get(entity)
+        recovery = self.recoveries[entity]
         observed = states.get(entity, {})
-        if (pending and pending.command == command and self.ready(observed) and self.reports_off(observed)
-                and self.marker(observed) != pending.baseline):
-            self.pending.pop(entity, None)
-            self.device_issues.pop(entity, None)
+        if (recovery.off_receipt and self.ready(observed) and self.reports_off(observed)
+                and self.marker(observed) != recovery.baseline):
+            self._clear_recovery(entity)
             return True
-        # Off retries stay prompt but do not flood a disconnected integration.
         interval = min(15, self.config.poll_seconds)
-        if pending and pending.command == command and now - pending.since < interval:
+        if recovery.last_attempt is not None and now - recovery.last_attempt < interval:
             return False
+        recovery.last_attempt = now
         try:
             self.ensure(entity, "set_hvac_mode", {"hvac_mode": "off"}, self.reports_off,
                         states, now, force=True, fresh=True)
+            # Retries renew only the retry clock. Keep the first uncertain
+            # report as evidence, including when an already-off call is a no-op.
+            self.pending[entity].baseline = recovery.baseline
+            recovery.off_receipt = True
+            self._refresh_needed = True
+            if (self.ready(observed) and self.reports_off(observed)
+                    and self.marker(observed) != recovery.baseline):
+                self._clear_recovery(entity)
+                return True
         except HAError as exc:
-            self._issue(entity, f"{exc}; off acknowledgement required")
+            self.pending[entity].baseline = recovery.baseline
+            self._issue(entity, f"{exc}; off acknowledgement required", states)
         return False
 
     def _climate_ensure(self, entity, service, data, matches, states, now, *, fresh=False):
         try:
-            return self.ensure(entity, service, data, matches, states, now, fresh=fresh)
+            before = self.pending.get(entity)
+            acknowledged = self.ensure(entity, service, data, matches, states, now, fresh=fresh)
+            pending = self.pending.get(entity)
+            if (service == "set_hvac_mode" and data.get("hvac_mode") == "off"
+                    and pending is not None and pending is not before and pending.receipt):
+                self._refresh_needed = True
+            return acknowledged
         except (CommandTimeout, HAError) as exc:
-            self._issue(entity, f"{exc}; off acknowledgement required")
+            self._issue(entity, f"{exc}; off acknowledgement required", states)
             pending = self.pending.get(entity)
             if pending and pending.command[0] == "set_hvac_mode":
                 pending.fresh = True
             return False
 
-    def off(self, entity, states, now):
+    def _supports(self, entity, mode, states):
+        modes = set(states.get(entity, {}).get("attributes", {}).get("hvac_modes") or [])
+        missing = sorted({"off", mode} - modes)
+        if missing:
+            available = ", ".join(sorted(modes)) or "none reported"
+            reason = f"Requested {mode} unavailable (missing {', '.join(missing)}); available modes: {available}"
+            self.capability_blocks[entity] = {"reason": reason, "missing_modes": missing}
+            self._sync_issue(entity)
+            return False
+        self.capability_blocks.pop(entity, None)
+        self._sync_issue(entity)
+        return True
+
+    def off(self, entity, states, now, *, preserve_capability=False):
         observed = states.get(entity, {})
+        if not preserve_capability:
+            self.capability_blocks.pop(entity, None)
+            self._sync_issue(entity)
         if not self.available(observed):
-            self._issue(entity, "Entity unavailable; off acknowledgement required")
+            self._issue(entity, "Entity unavailable; off acknowledgement required", states)
         elif not self.ready(observed):
-            self._issue(entity, "Climate metadata incomplete; off acknowledgement required")
-        if entity in self.device_issues:
+            self._issue(entity, "Climate metadata incomplete; off acknowledgement required", states)
+        if entity in self.recoveries:
             return self._recovery_off(entity, states, now)
         pending = self.pending.get(entity)
         command = ("set_hvac_mode", (("hvac_mode", "off"),))
+        if pending and pending.command != command:
+            self._issue(entity, "Previous activation must be reconciled; off acknowledgement required", states)
+            return self._recovery_off(entity, states, now)
+        # An available off device with unsupported heat/cool needs no fresh
+        # report unless an actual earlier activation remains uncertain.
         return self._climate_ensure(
             entity, "set_hvac_mode", {"hvac_mode": "off"}, self.reports_off, states, now,
             fresh=bool(pending and pending.command != command))
@@ -154,14 +249,14 @@ class Executor:
     def climate(self, entity, mode, target_f, states, now, heater=False):
         state = states.get(entity, {})
         if not self.available(state):
-            self._issue(entity, "Entity unavailable; off acknowledgement required")
+            self._issue(entity, "Entity unavailable; off acknowledgement required", states)
         elif not self.ready(state):
-            self._issue(entity, "Climate metadata incomplete; off acknowledgement required")
-        if entity in self.device_issues:
-            self._recovery_off(entity, states, now)
+            self._issue(entity, "Climate metadata incomplete; off acknowledgement required", states)
+        if entity in self.recoveries and not self._recovery_off(entity, states, now):
             return
-        if mode not in state.get("attributes", {}).get("hvac_modes", []):
-            raise ControlFault(f"{entity} does not expose mode {mode}")
+        if not self._supports(entity, mode, states):
+            self.off(entity, states, now, preserve_capability=True)
+            return
         target = self.target(entity, target_f, states, heater)
 
         def matches(observed):
@@ -186,20 +281,17 @@ class Executor:
         if plan.heater_on and plan.auxiliary_fan_only:
             raise ControlFault("The auxiliary heater cannot request heat and fan-only together")
         if not self.available(states.get(entity, {})):
-            self._issue(entity, "Entity unavailable; off acknowledgement required")
+            self._issue(entity, "Entity unavailable; off acknowledgement required", states)
         elif not self.ready(states.get(entity, {})):
-            self._issue(entity, "Climate metadata incomplete; off acknowledgement required")
-        if entity in self.device_issues:
-            self._recovery_off(entity, states, now)
+            self._issue(entity, "Climate metadata incomplete; off acknowledgement required", states)
+        if entity in self.recoveries and not self._recovery_off(entity, states, now):
             return
         if plan.heater_on:
             self.climate(entity, "heat", self.config.heater_high_setpoint_f, states, now, heater=True)
         elif plan.auxiliary_fan_only:
             state = states.get(entity, {})
-            if "fan_only" not in state.get("attributes", {}).get("hvac_modes", []):
-                plan.auxiliary_fan_only = False
-                plan.warnings.append("Auxiliary fan-only mode unsupported; requesting off")
-                self.off(entity, states, now)
+            if not self._supports(entity, "fan_only", states):
+                self.off(entity, states, now, preserve_capability=True)
                 return
             pending = self.pending.get(entity)
             fan_command = ("set_hvac_mode", (("hvac_mode", "fan_only"),))
@@ -284,11 +376,25 @@ class Executor:
             plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
 
     def step(self, plan: Plan, states: dict, now: float):
-        # Critical climate commands run before optional circulation services.
+        self._states = states
+        self._wanted_modes = {entity: plan.mode if key in plan.head_targets_f else "off"
+                              for key, entity in self.config.heads.items()}
+        if self.config.heater_entity:
+            self._wanted_modes[self.config.heater_entity] = (
+                "heat" if plan.heater_on else "fan_only" if plan.auxiliary_fan_only else "off")
+        self._refresh_needed = False
         self.auxiliary(plan, states, now)
         self.shared(plan, states, now)
+        # Consume synchronous HA reports once, without stacking full polling
+        # intervals between off acknowledgement and the next valid local plan.
+        if self._refresh_needed:
+            refreshed = self.ha.states()
+            self._states = refreshed
+            self._refresh_needed = False
+            self.auxiliary(plan, refreshed, now)
+            self.shared(plan, refreshed, now)
         for entity, percentage in plan.fans.items():
-            self.fan(entity, percentage, plan, states, now)
+            self.fan(entity, percentage, plan, self._states, now)
         for entity, issue in self.device_issues.items():
             warning = f"Climate device {entity}: {issue}; retrying independently"
             if warning not in plan.warnings:
@@ -306,12 +412,11 @@ class Executor:
                 self.begin_stop(states, now)
                 return
         if self.phase == "stopping":
-            all_off = all(self.ready(states.get(entity, {})) and self.reports_off(states.get(entity, {}))
-                          and entity not in self.pending and entity not in self.device_issues
-                          for entity in self.config.heads.values())
-            # Clear acknowledged off commands before evaluating the barrier on the next tick.
             for entity in self.config.heads.values():
                 self.off(entity, states, now)
+            all_off = all(self.ready(states.get(entity, {})) and self.reports_off(states.get(entity, {}))
+                          and entity not in self.pending and entity not in self.recoveries
+                          for entity in self.config.heads.values())
             if not all_off:
                 if now - self.stop_started >= self.config.command_timeout_seconds:
                     plan.warnings.append("Waiting for shared-system heads to acknowledge off; activation blocked")
@@ -333,9 +438,11 @@ class Executor:
             for key, target in plan.head_targets_f.items():
                 self.climate(self.config.heads[key], plan.mode, target, states, now)
 
-    def shutdown(self) -> list[str]:
+    def shutdown(self, states=None) -> list[str]:
         """Best effort across every device even when one service call fails."""
         failures = []
+        snapshot = self._states if states is None else states
+        old_pending = dict(self.pending)
         for entity in [*([self.config.heater_entity] if self.config.heater_entity else []), *self.config.heads.values(), *self.config.fans.values()]:
             try:
                 if entity.startswith("climate."):
@@ -348,7 +455,12 @@ class Executor:
         self.pending.clear()
         self.fan_failures.clear()
         self.device_issues.clear()
+        self.recoveries.clear()
+        self.capability_blocks.clear()
         for entity in failures:
             if entity in self.config.climate_entities:
-                self._issue(entity, "Shutdown off command failed; off acknowledgement required")
+                previous = old_pending.get(entity)
+                baseline = previous.baseline if previous else self.marker(snapshot.get(entity, {}))
+                self._issue(entity, "Shutdown off command failed; off acknowledgement required",
+                            snapshot, baseline=baseline)
         return failures
