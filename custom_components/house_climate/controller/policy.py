@@ -99,7 +99,12 @@ class Policy:
         auxiliary = rooms.get(self.config.auxiliary_room)
         heater_available = bool(self.config.heater_entity) and states.get(
             self.config.heater_entity, {}).get("state") not in (None, "unknown", "unavailable")
-        if auxiliary and heater_available:
+        heater_modes = states.get(self.config.heater_entity, {}).get("attributes", {}).get("hvac_modes") or []
+        heater_can_heat = heater_available and (not heater_modes or {"off", "heat"} <= set(heater_modes))
+        if auxiliary and heater_available and not heater_can_heat and demands[self.config.auxiliary_room]["heat"]["active"]:
+            plan.warnings.append(
+                "Auxiliary heat requested but unavailable (HA modes: " + ", ".join(heater_modes) + ")")
+        if auxiliary and heater_can_heat:
             low, high, target = self.band(self.config.auxiliary_room, settings, now)
             if auxiliary.high >= min(high, self.config.heater_cutoff_f):
                 self.heater_on = False
@@ -152,11 +157,17 @@ class Policy:
             for mode in ("heat", "cool"):
                 requests = []
                 for name in names:
-                    if name == self.config.auxiliary_room and mode == "heat" and heater_available:
+                    if name == self.config.auxiliary_room and mode == "heat" and heater_can_heat:
                         continue
                     if demands[name][mode]["active"]:
                         requests.append(demands[name][mode])
                 if not requests:
+                    continue
+                modes = states.get(self.config.heads[head], {}).get("attributes", {}).get("hvac_modes") or []
+                if modes and mode not in modes:
+                    labels = ", ".join(self.config.zones[name].name or name for name in names)
+                    plan.warnings.append(
+                        f"{labels}: {mode} requested but unavailable (HA modes: {', '.join(modes)})")
                     continue
                 # Immediate raw extremes stop aggravating a potentially unsafe area.
                 blocked = any(rooms[name].low <= LOW + .25 for name in names) if mode == "cool" else any(rooms[name].high >= HIGH - .25 for name in names)

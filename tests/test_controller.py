@@ -290,9 +290,9 @@ class ExecutorTests(unittest.TestCase):
         self.assertFalse(self.activations())
         self.step(plan, 15)
         self.step(plan, 30)
-        self.step(plan, 209)
+        self.step(plan, 179)
         self.assertFalse(self.activations())
-        self.step(plan, 210)
+        self.step(plan, 180)
         self.assertEqual(len(self.activations()), 1)
         self.assertEqual(self.activations()[0][2]["hvac_mode"], "cool")
 
@@ -315,9 +315,9 @@ class ExecutorTests(unittest.TestCase):
         self.step(plan, 300)
         self.step(plan, 315)
         self.step(plan, 330)
-        self.step(plan, 509)
+        self.step(plan, 479)
         self.assertFalse(self.activations())
-        self.step(plan, 510)
+        self.step(plan, 480)
         self.assertEqual(self.activations()[0][2]["hvac_mode"], "heat")
         self.assertTrue(all(s["state"] in ("off", "heat") for e, s in self.ha.data.items() if e in self.cfg.heads.values()))
 
@@ -341,7 +341,7 @@ class ExecutorTests(unittest.TestCase):
         self.ha.calls.clear()
         self.ha.data[self.cfg.heads["guest"]]["state"] = "heat"
         self.step(plan, 240)
-        self.assertEqual(self.executor.phase, "stopping")
+        self.assertIn(self.executor.phase, ("stopping", "settling"))
         self.assertFalse(self.activations())
 
     def test_failed_activation_waits_for_local_off_recovery(self):

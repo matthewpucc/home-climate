@@ -34,14 +34,6 @@ def preflight(config: Config, states: dict, executor: Executor):
         signature = states.get(probe_safe, {}).get("attributes", {}).get("configuration_signature")
         if signature != watchdog_signature(config):
             raise ControlFault("HA watchdog mapping differs from this config; regenerate and reload the HA package")
-    for entity in config.climate_entities:
-        state = states.get(entity, {})
-        modes = set(state.get("attributes", {}).get("hvac_modes") or [])
-        required = {"off", "heat"} if entity == config.heater_entity else {"off", "heat", "cool"}
-        if not executor.ready(state):
-            continue
-        if not required <= modes:
-            raise ControlFault(f"Climate entity missing required modes: {entity}")
     if config.heater_entity and executor.ready(states.get(config.heater_entity, {})):
         executor.target(config.heater_entity, config.heater_high_setpoint_f, states, heater=True)
 
@@ -115,7 +107,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         ha.service("input_boolean", "turn_on", entity_id=config.entity("heater_owned"))
                         active = True
                         # Reconcile startup/reenable through a full off barrier, including heater.
-                        failures = executor.shutdown()
+                        failures = executor.shutdown(states)
                         for entity in failures:
                             kind = "Circulation fan" if entity in config.fans.values() else "Climate device"
                             plan.warnings.append(f"{kind} {entity}: startup off command failed; retrying independently")
@@ -137,8 +129,11 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                 elif args.live and states.get(config.entity("heater_owned"), {}).get("state") == "on":
                     # Recover ownership left behind by a previous process, even when disabled.
                     release(ha, executor, event_callback=report)
+                recovery = executor.recovery_status(time.monotonic())
                 report("live" if args.live and enabled else "shadow", timestamp=now.isoformat(), phase=executor.phase,
                        device_issues=dict(executor.device_issues), waiting_devices=executor.waiting_devices,
+                       recovery_details=recovery["devices"],
+                       settle_remaining_seconds=recovery["settle_remaining_seconds"],
                        **plan.as_dict())
                 faults = 0
             except Exception as exc:

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.3
+
+- Accept each head's advertised capabilities: an Off/Cool head can stay idle or cool without faulting the whole controller. Unsupported demand no longer wins shared-system arbitration.
+- Preserve fresh off evidence across retries so a recovered head can resume even when a later, already-off command produces no new report.
+- Wake native control promptly when availability, modes, off confirmation, or shutdown readiness changes.
+- Add per-head Reload integration buttons for explicitly refreshing the owning HA integration, including stale capabilities.
+- Add a readable Recovery status with affected rooms, reported modes, and the remaining settling time.
+- In the native integration, automatically reload the owning Home Assistant integration after a heat-pump recovery issue persists for two minutes. Reloads share a per-integration cooldown, back off after failures, and stop after three attempts during one continuous incident. Shadow and disabled control never initiate reloads.
+- Preserve ownership, genuine off confirmation, and the full configured all-head changeover delay throughout recovery.
+
 ## 0.5.2
 
 - Tolerate temporary climate-device disconnections, API failures, and missing acknowledgements without restarting healthy rooms or dropping controller ownership.

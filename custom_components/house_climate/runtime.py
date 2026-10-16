@@ -11,10 +11,12 @@ from types import SimpleNamespace
 
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import SIGNAL_STATUS
 from .controller.__main__ import run_loop
 from .controller.ha import HAError
+from .recovery import RecoveryManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -159,6 +161,9 @@ class ControllerRuntime:
         self.status = {"event": "waiting_for_home_assistant"}
         self.fault_count = 0
         self.last_fault = {}
+        self._controls_ready = None
+        self._remove_climate_listener = None
+        self.recovery = RecoveryManager(hass, self)
 
     async def async_setup_controls(self, entry_id):
         if not self.config.legacy:
@@ -178,9 +183,38 @@ class ControllerRuntime:
         self.status.update(control_enabled=self.controls.enabled,
                            control_block_reason=self.controls.hint,
                            pending_fans=list(self.controls.pending_fans))
-        if previous != self.controls.enabled:
+        ready = self.controls._snapshot.get("enabled", False)
+        if previous != self.controls.enabled or ready != self._controls_ready:
             self.wake_event.set()
+        self._controls_ready = ready
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
+
+    @callback
+    def _async_recovery_changed(self):
+        self.status["integration_recovery"] = self.recovery.diagnostics
+        self.wake_event.set()
+        async_dispatcher_send(self.hass, SIGNAL_STATUS)
+
+    @callback
+    def _async_climate_changed(self, event):
+        if self.stop_event.is_set():
+            return
+        old, new = event.data.get("old_state"), event.data.get("new_state")
+        unavailable = (None, "unknown", "unavailable")
+        old_state, new_state = old.state if old else None, new.state if new else None
+        old_modes = frozenset(old.attributes.get("hvac_modes") or ()) if old else frozenset()
+        new_modes = frozenset(new.attributes.get("hvac_modes") or ()) if new else frozenset()
+        availability_changed = (old_state in unavailable) != (new_state in unavailable)
+        confirming_off = (
+            new_state == "off"
+            and new.attributes.get("hvac_action") not in ("heating", "cooling")
+            and (event.data["entity_id"] in self.status.get("waiting_devices", ())
+                 or self.status.get("phase") == "stopping")
+        )
+        # Wake for recovery evidence, without turning ordinary temperature and
+        # setpoint updates into extra control cycles.
+        if availability_changed or old_modes != new_modes or confirming_off:
+            self.wake_event.set()
 
     @callback
     def async_start(self, _hass=None):
@@ -188,6 +222,9 @@ class ControllerRuntime:
             return
         if self.controls:
             self.controls.async_start()
+        self._remove_climate_listener = async_track_state_change_event(
+            self.hass, self.config.climate_entities, self._async_climate_changed
+        )
         self.finished = self.hass.loop.create_future()
         self.thread = threading.Thread(
             target=self._run, name="house-climate-controller", daemon=True
@@ -213,6 +250,8 @@ class ControllerRuntime:
             self.status.update(control_enabled=self.controls.enabled,
                                control_block_reason=self.controls.hint,
                                pending_fans=list(self.controls.pending_fans))
+        self.recovery.observe(self.status)
+        self.status["integration_recovery"] = self.recovery.diagnostics
         if event in ("fault", "worker_failed"):
             _LOGGER.error("Controller %s: %s", event, data.get("error"))
         else:
@@ -243,16 +282,26 @@ class ControllerRuntime:
     async def async_stop(self, _event=None):
         self.stop_event.set()
         self.wake_event.set()
+        recovery_closed = await self.recovery.async_close()
         if self.controls:
             await self.controls.async_set_enabled(False)
         if self.finished is None:
             self._async_report("stopped", {})
-            return await self.controls.async_close() if self.controls else True
-        try:
-            await asyncio.wait_for(asyncio.shield(self.finished), timeout=45)
-        except TimeoutError:
-            # Keep the runtime registered; a reload must never start a second worker.
-            self._async_report("worker_failed", {"error": "Controller shutdown timed out"})
-            return False
-        await self.hass.async_add_executor_job(self.thread.join)
-        return await self.controls.async_close() if self.controls else True
+        else:
+            try:
+                await asyncio.wait_for(asyncio.shield(self.finished), timeout=45)
+            except TimeoutError:
+                # Keep the runtime registered; a reload must never start a second worker.
+                self._async_report("worker_failed", {"error": "Controller shutdown timed out"})
+                return False
+            await self.hass.async_add_executor_job(self.thread.join)
+        controls_closed = await self.controls.async_close() if self.controls else True
+        closed = controls_closed and recovery_closed
+        if closed and self._remove_climate_listener:
+            self._remove_climate_listener()
+            self._remove_climate_listener = None
+        if not recovery_closed:
+            self._async_report("worker_failed", {
+                "error": "Owning heat-pump integration reload is still stopping; unload deferred"
+            })
+        return closed

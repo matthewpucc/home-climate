@@ -77,9 +77,8 @@ class LivingDysonTests(unittest.TestCase):
         self.step(plan, 30)
         self.assertEqual(self.ha.data[self.cfg.heater_entity]["state"], "off")
         self.step(plan, 45)
-        self.assertEqual(self.ha.data[self.cfg.heater_entity]["state"], "off")
-        self.step(plan, 60)
         self.assertEqual(self.ha.data[self.cfg.heater_entity]["state"], "fan_only")
+        self.step(plan, 60)
         calls = [call for call in self.ha.calls if call[2]["entity_id"] == self.cfg.heater_entity]
         self.assertEqual([call[2]["hvac_mode"] for call in calls], ["off", "fan_only"])
         self.assertTrue(all(call[1] == "set_hvac_mode" and "temperature" not in call[2] for call in calls))
@@ -96,7 +95,9 @@ class LivingDysonTests(unittest.TestCase):
         self.ha.calls.clear()
         self.step(Plan(auxiliary_fan_only=True), 15)
         self.assertEqual(self.ha.calls[0][2]["hvac_mode"], "off")
-        self.assertFalse(any(call[2].get("hvac_mode") == "fan_only" for call in self.ha.calls))
+        calls = [call[2]["hvac_mode"] for call in self.ha.calls
+                 if call[2]["entity_id"] == self.cfg.heater_entity]
+        self.assertEqual(calls, ["off", "fan_only"])
         self.step(Plan(auxiliary_fan_only=True), 30)
         self.step(Plan(auxiliary_fan_only=True), 45)
         self.assertEqual(self.ha.data[self.cfg.heater_entity]["state"], "fan_only")

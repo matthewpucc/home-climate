@@ -12,7 +12,7 @@ from .configuration import generate_configuration, entry_configuration
 from .const import CONF_LIVE, DOMAIN
 from .runtime import ControllerRuntime
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON]
 
 
 async def async_setup_entry(hass, entry):
