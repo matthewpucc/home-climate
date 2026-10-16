@@ -41,6 +41,12 @@ Tests cover arbitration, shared heads, sensor failures, schedules/DST, room edit
 
 Keep versions aligned in `pyproject.toml`, the integration manifest, and add-on metadata. Update the changelog when behavior or migration requirements change.
 
-The development Container workflow runs tests before building native installation artifacts, source-build add-on bundles, and AMD64/ARM64 GHCR images. Pull requests do not publish images. Version and latest tags may be refreshed; commit tags/digests identify exact builds.
+The Build and release workflow runs tests before building native installation artifacts, source-build add-on bundles, and AMD64/ARM64 GHCR images. Pull requests do not publish images or releases. GHCR version and latest tags may be refreshed; commit tags/digests identify exact container builds.
+
+On the default branch, successful checks publish a GitHub Release named `v<manifest version>` at the checked commit, with changelog notes and the four installation/source bundles. HACS reads these releases for versioned updates. To ship a new version, bump all three version files and add the matching `## <version>` changelog entry before merging. No manual tag push or extra token is needed.
+
+Published releases and their tags/assets are left unchanged on subsequent runs of the same version. Uploads are staged in a draft; rerun the original workflow if an upload fails. A draft can resume only at its original tag's commit. Release publishing has write permission only in the final default-branch job.
+
+Release-publisher tests use Node.js 20+ and mocked GitHub APIs (`node --test tests_release/*.test.cjs`). Archive validation runs these tests alongside the Python suites from the packaged source.
 
 `scripts/package_hacs.py` creates a manual integration ZIP and a public-repository candidate from an explicit file allowlist. The candidate has generic examples, tests, and its own CI. It contains no Git history. Review it before publication; producing the artifact does not publish it.

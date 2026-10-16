@@ -31,6 +31,8 @@ with tempfile.TemporaryDirectory() as directory:
     for folder in ("tests", "tests_homeassistant"):
         subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", folder, "-q"],
                        cwd=root, check=True)
+    subprocess.run(["node", "--test", *[str(p) for p in sorted((root / "tests_release").glob("*.test.cjs"))]],
+                   cwd=root, check=True)
     subprocess.run([sys.executable, "-m", "house_climate", "--config", "config.example.toml",
                     "check-config"], cwd=root, check=True)
 print("Install layout and public-source tests passed.")

@@ -25,6 +25,14 @@ Room IDs stay stable when renamed, preserving entity identity/history. Removing 
 
 Temperatures in HA forms follow HA's configured unit system; stored configuration and diagnostic target attributes use Fahrenheit. Temperature entities are converted by HA for display.
 
+## Updates and version numbers
+
+HACS installs stable GitHub Releases such as `v0.4.2`. Release tags match the integration's manifest version. Each release is published only after controller, native HA, packaging, and container checks pass; installation bundles and changelog notes are attached.
+
+If you installed before the first release, open **HACS → House Climate → ⋮ → Redownload**, choose the latest numbered release instead of `main`, and restart HA. Refresh repository information first if the new release has not appeared yet. Selecting `main` intentionally tracks development commits and may display a commit hash.
+
+For manual upgrades, download `house-climate-integration.zip` from the release and copy its `custom_components/house_climate` directory into HA's config directory.
+
 ## Enable and watchdog package
 
 The HA editor stores comfort settings. A small generated package supplies a separate enable switch, controller lease/status, and, when configured, an auxiliary-heater watchdog.
