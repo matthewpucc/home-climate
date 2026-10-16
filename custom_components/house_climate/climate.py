@@ -1,12 +1,16 @@
 """Room comfort ranges for standard Home Assistant thermostat cards."""
 from __future__ import annotations
 
+from math import isclose, isfinite
+
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACAction, HVACMode
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.temperature import display_temp
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .const import DOMAIN, SIGNAL_STATUS
 
@@ -97,13 +101,36 @@ class RoomClimate(RoomControl, ClimateEntity):
         room = self.runtime.config.zones[room_id]
         self._attr_name = room.name or room_id
 
+    def _presentation_bound(self, value):
+        """Round-trip a limit through the card's display units.
+
+        HA validates service values after converting them to native units. A
+        displayed 23.9°C becomes 75.02°F, so advertise that presentation value
+        while keeping the stored comfort limit at exactly 75°F.
+        """
+        display_unit = self.hass.config.units.temperature_unit
+        if display_unit == self.temperature_unit:
+            return value
+        displayed = display_temp(self.hass, value, self.temperature_unit, self.precision)
+        return TemperatureConverter.convert(displayed, display_unit, self.temperature_unit)
+
     @property
     def min_temp(self):
-        return self.runtime.comfort.bounds(self.room_id)[0]
+        return self._presentation_bound(self.runtime.comfort.bounds(self.room_id)[0])
 
     @property
     def max_temp(self):
-        return self.runtime.comfort.bounds(self.room_id)[1]
+        return self._presentation_bound(self.runtime.comfort.bounds(self.room_id)[1])
+
+    def _native_endpoint(self, value):
+        """Normalize only the exact displayed endpoint to its actual limit."""
+        if (self.hass.config.units.temperature_unit != self.temperature_unit
+                and isinstance(value, (int, float)) and not isinstance(value, bool)
+                and isfinite(value)):
+            for actual in self.runtime.comfort.bounds(self.room_id):
+                if isclose(value, self._presentation_bound(actual), rel_tol=0, abs_tol=1e-6):
+                    return actual
+        return value
 
     @property
     def current_temperature(self):
@@ -163,8 +190,8 @@ class RoomClimate(RoomControl, ClimateEntity):
         comfort = self.comfort
         try:
             await self.runtime.comfort.async_set_range(
-                self.room_id, kwargs.get("target_temp_low", comfort["low_f"]),
-                kwargs.get("target_temp_high", comfort["high_f"]))
+                self.room_id, self._native_endpoint(kwargs.get("target_temp_low", comfort["low_f"])),
+                self._native_endpoint(kwargs.get("target_temp_high", comfort["high_f"])))
         except ValueError as exc:
             raise ServiceValidationError(str(exc)) from exc
 
