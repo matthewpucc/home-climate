@@ -1,12 +1,16 @@
 """Display room comfort separately from the biased physical head call."""
+import asyncio
 from dataclasses import replace
+import time
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from homeassistant.util.unit_system import METRIC_SYSTEM
 
 from custom_components.house_climate.climate import RoomClimate
 from custom_components.house_climate.controller.config import Config
+from custom_components.house_climate.controller.policy import Policy
 from custom_components.house_climate.number import RoomDesiredTemperature
 from custom_components.house_climate.sensor import ControllerStatus, RoomPlan
 from tests_homeassistant import test_native as native_fixtures
@@ -109,6 +113,75 @@ class CallTargetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.status["head_call_targets_f"]["guest"], 72)
         self.assertIn("cool head to 72 °F", self.plan_sensor(entry).native_value)
         self.assertNotIn("head setpoint", self.plan_sensor(entry).native_value)
+
+    async def test_minimum_run_keeps_acknowledged_biased_call_across_comfort_decisions(self):
+        source = Config.from_dict(self.cfg.to_dict())
+        cfg = replace(
+            source, heads={"guest": source.heads["guest"]},
+            zones={"guest": source.zones["guest"]}, fans={}, fan_controls={},
+            heater_entity=None, auxiliary_room=None,
+            poll_seconds=.02, decision_interval_seconds=.06,
+            head_minimum_run_seconds=.4, head_minimum_off_seconds=0,
+            off_settle_seconds=.02, head_heat_call_offset_f=5,
+            head_cool_call_offset_f=5,
+        )
+        for probe in cfg.zones["guest"].probes:
+            old = self.hass.states.get(probe.entity_id)
+            self.hass.states.async_set(probe.entity_id, "74.8", dict(old.attributes))
+        head = cfg.heads["guest"]
+        old = self.hass.states.get(head)
+        self.hass.states.async_set(head, old.state, {
+            **old.attributes, "current_temperature": 74,
+        })
+        decisions = []
+        original = Policy.decide
+
+        def track_decision(policy, *args, **kwargs):
+            decisions.append(time.monotonic())
+            return original(policy, *args, **kwargs)
+
+        tracker = patch.object(Policy, "decide", new=track_decision)
+        tracker.start()
+        self.addCleanup(tracker.stop)
+        runtime, switch = await self.runtime(cfg=cfg, entry_id="biased_run_hold")
+        runtime.async_start()
+        await switch.async_turn_on()
+        await self.until(lambda: (
+            self.hass.states.get(head).state == "cool"
+            and runtime.status.get("head_call_targets_f", {}).get("guest") == 67))
+        # Allow the worker to observe the successful activation before dropping
+        # ordinary demand; minimum-run timing starts from acknowledgement.
+        await asyncio.sleep(.05)
+        for probe in cfg.zones["guest"].probes:
+            old = self.hass.states.get(probe.entity_id)
+            self.hass.states.async_set(probe.entity_id, "72", dict(old.attributes))
+        await self.until(lambda: runtime.status.get("cycle_holds", {}).get(head, {}).get("kind") == "minimum_run")
+        count = len(decisions)
+        heartbeat = runtime.controls.heartbeat_monotonic
+        # A changed onboard reading would request a colder call for new demand.
+        # A retained run must keep its last acknowledged call instead.
+        old = self.hass.states.get(head)
+        self.hass.states.async_set(head, old.state, {
+            **old.attributes, "current_temperature": 64,
+        })
+        async with asyncio.timeout(.22):
+            while len(decisions) < count + 2:
+                self.assertEqual(self.hass.states.get(head).state, "cool")
+                await asyncio.sleep(.005)
+        self.assertEqual(self.hass.states.get(head).attributes["temperature"], 67)
+        self.assertEqual(runtime.status["head_targets_f"]["guest"], 72)
+        self.assertEqual(runtime.status["head_call_targets_f"]["guest"], 67)
+        self.assertEqual(runtime.comfort.effective("guest")["target_f"], 72)
+        self.assertGreater(runtime.controls.heartbeat_monotonic, heartbeat)
+        self.assertTrue(switch.is_on)
+        self.assertTrue(runtime.controls.owned)
+
+        await self.until(lambda: (
+            self.hass.states.get(head).state == "off"
+            and runtime.status.get("mode") == "off"))
+        self.assertTrue(switch.is_on)
+        self.assertTrue(runtime.controls.owned)
+        self.assertEqual(runtime.fault_count, 0)
 
     def shared_plan(self, *, call_target=67):
         cfg = Config.from_dict(self.cfg.to_dict())
