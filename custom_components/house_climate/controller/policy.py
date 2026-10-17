@@ -2,15 +2,55 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import math
 
 from .config import Config, Settings
-from .sensors import Reading, Sensors
+from .sensors import Reading, Sensors, from_f, to_f
+
+
+def native_target(fahrenheit: float, attrs: dict, unit: str) -> float:
+    """Bound and quantize a setpoint in the climate entity's native HA unit."""
+    minimum, maximum = float(attrs["min_temp"]), float(attrs["max_temp"])
+    step = float(attrs.get("target_temp_step", .5 if unit in ("C", "°C") else 1))
+    value = from_f(fahrenheit, unit)
+    if (not all(math.isfinite(number) for number in (minimum, maximum, step, value))
+            or minimum > maximum or step <= 0):
+        raise ValueError("Invalid climate temperature range")
+    value = max(minimum, min(maximum, minimum + round((value - minimum) / step) * step))
+    return round(value, 3)
+
+
+def call_target_f(config: Config, entity: str, mode: str, comfort: float,
+                  states: dict, climate_unit: str) -> float:
+    """An equipment call setpoint; room probes still decide when the call ends."""
+    attrs = states.get(entity, {}).get("attributes", {})
+    offset = config.head_heat_call_offset_f if mode == "heat" else config.head_cool_call_offset_f
+    target = comfort
+    if offset > 0:
+        onboard = attrs.get("current_temperature")
+        try:
+            if isinstance(onboard, bool):
+                raise ValueError("Boolean onboard temperature")
+            onboard = to_f(float(onboard), climate_unit)
+            if not math.isfinite(onboard) or not -40 <= onboard <= 140:
+                raise ValueError("Implausible onboard temperature")
+            target = max(comfort, onboard) if mode == "heat" else min(comfort, onboard)
+        except (TypeError, ValueError, OverflowError):
+            pass
+        target += offset if mode == "heat" else -offset
+    try:
+        return to_f(native_target(target, attrs, climate_unit), climate_unit)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # Disconnected/incomplete heads still get an explainable shadow plan.
+        # The executor retains its activation-time metadata validation.
+        return target
 
 
 @dataclass
 class Plan:
     mode: str = "off"
     head_targets_f: dict[str, float] = field(default_factory=dict)
+    head_call_targets_f: dict[str, float] = field(default_factory=dict)
     inhibited_heads: dict[str, str] = field(default_factory=dict)
     heater_on: bool = False
     auxiliary_fan_only: bool = False
@@ -205,6 +245,10 @@ class Policy:
         self.selected_mode = winner
         plan.mode = winner
         plan.head_targets_f = eligible.get(winner, {})
+        plan.head_call_targets_f = {
+            key: call_target_f(self.config, self.config.heads[key], winner, target, states, climate_unit)
+            for key, target in plan.head_targets_f.items()
+        }
         if winner != "off":
             plan.reasons.append(f"{winner}: " + ", ".join(plan.head_targets_f))
         else:

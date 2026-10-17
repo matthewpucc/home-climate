@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 from .config import Config
 from .ha import HAError
-from .policy import Plan
-from .sensors import from_f
+from .policy import Plan, call_target_f, native_target
+from .sensors import from_f, to_f
 
 
 class ControlFault(RuntimeError):
@@ -48,6 +48,7 @@ class HeadCycle:
     run_since: float | None = None
     off_since: float | None = None
     target_f: float | None = None
+    call_target_f: float | None = None
     target_native: float | None = None
     profile_signature: tuple | None = None
 
@@ -248,16 +249,11 @@ class Executor:
     def target(self, entity: str, fahrenheit: float, states: dict, heater: bool = False) -> float:
         attrs = states.get(entity, {}).get("attributes", {})
         try:
-            minimum, maximum = float(attrs["min_temp"]), float(attrs["max_temp"])
-            step = float(attrs.get("target_temp_step", .5 if self.unit in ("C", "°C") else 1))
-            value = from_f(fahrenheit, self.unit)
-            if not all(math.isfinite(n) for n in (minimum, maximum, step, value)) or minimum > maximum or step <= 0:
-                raise ValueError
-            if heater and not minimum <= value <= maximum:
+            result = native_target(fahrenheit, attrs, self.unit)
+            if heater and not float(attrs["min_temp"]) <= from_f(fahrenheit, self.unit) <= float(attrs["max_temp"]):
                 raise ControlFault("Configured high heater setpoint is outside its supported range")
-            value = max(minimum, min(maximum, minimum + round((value - minimum) / step) * step))
-            return round(value, 3)
-        except (KeyError, ValueError, TypeError):
+            return result
+        except (KeyError, ValueError, TypeError, OverflowError):
             raise ControlFault(f"Missing/invalid climate temperature range: {entity}") from None
 
     def _observe_head_cycles(self, states, now):
@@ -277,17 +273,17 @@ class Executor:
             cycle.off_since = None
             if observed.get("state") != cycle.mode:
                 cycle.mode, cycle.run_since = None, None
-                cycle.target_f, cycle.target_native = None, None
+                cycle.target_f, cycle.call_target_f, cycle.target_native = None, None, None
                 cycle.profile_signature = None
 
-    def _acknowledge_head_run(self, entity, mode, target_f, native_target, now):
+    def _acknowledge_head_run(self, entity, mode, target_f, call_target, native_value, now):
         cycle = self.head_cycles.get(entity)
         if cycle is None:
             return
         if cycle.mode != mode or cycle.run_since is None:
             cycle.mode, cycle.run_since = mode, now
         cycle.off_since = None
-        cycle.target_f, cycle.target_native = target_f, native_target
+        cycle.target_f, cycle.call_target_f, cycle.target_native = target_f, call_target, native_value
         cycle.profile_signature = self._cycle_profiles.get(entity)
 
     def _head_profile_signature(self, key, plan):
@@ -306,7 +302,7 @@ class Executor:
                 or entity in self.capability_blocks
                 or not self.ready(observed) or observed.get("state") != self.direction
                 or cycle.mode != self.direction or cycle.run_since is None
-                or cycle.target_f is None or cycle.profile_signature is None
+                or cycle.target_f is None or cycle.call_target_f is None or cycle.profile_signature is None
                 or cycle.profile_signature != self._head_profile_signature(key, plan)):
             return False
         modes = set(observed.get("attributes", {}).get("hvac_modes") or ())
@@ -363,6 +359,7 @@ class Executor:
                 continue
             plan.mode = self.direction
             plan.head_targets_f[key] = cycle.target_f
+            plan.head_call_targets_f[key] = cycle.call_target_f
             self.cycle_holds[entity] = {
                 "kind": "minimum_run", "remaining_seconds": remaining,
                 "reason": "Finishing minimum heat-pump run",
@@ -410,7 +407,7 @@ class Executor:
         }
         return True
 
-    def climate(self, entity, mode, target_f, states, now, heater=False):
+    def climate(self, entity, mode, target_f, states, now, heater=False, *, comfort_target_f=None):
         state = states.get(entity, {})
         if not self.available(state):
             self._issue(entity, "Entity unavailable; off acknowledgement required", states)
@@ -434,7 +431,8 @@ class Executor:
         acknowledged = self._climate_ensure(
             entity, "set_temperature", {"hvac_mode": mode, "temperature": target}, matches, states, now)
         if acknowledged:
-            self._acknowledge_head_run(entity, mode, target_f, target, now)
+            comfort = target_f if comfort_target_f is None else comfort_target_f
+            self._acknowledge_head_run(entity, mode, comfort, to_f(target, self.unit), target, now)
 
     def begin_stop(self, states, now):
         self.cycle_holds.clear()
@@ -549,6 +547,8 @@ class Executor:
         self.cycle_holds.clear()
         self._observe_head_cycles(states, now)
         self._retain_minimum_runs(plan, states, now)
+        plan.head_call_targets_f = {key: value for key, value in plan.head_call_targets_f.items()
+                                    if key in plan.head_targets_f}
         self._cycle_profiles = {entity: self._head_profile_signature(key, plan)
                                 for key, entity in self.config.heads.items()}
         self._states = states
@@ -617,7 +617,18 @@ class Executor:
                 if key not in plan.head_targets_f:
                     self.off(entity, states, now)
             for key, target in plan.head_targets_f.items():
-                self.climate(self.config.heads[key], plan.mode, target, states, now)
+                entity = self.config.heads[key]
+                call = plan.head_call_targets_f.get(key)
+                if call is None:
+                    call = call_target_f(self.config, entity, plan.mode, target, states, self.unit)
+                try:
+                    # Fresh capability limits may differ from the cached policy
+                    # snapshot; this never recalculates bias from a changing sensor.
+                    call = to_f(native_target(call, states.get(entity, {}).get("attributes", {}), self.unit), self.unit)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    pass
+                plan.head_call_targets_f[key] = call
+                self.climate(entity, plan.mode, call, states, now, comfort_target_f=target)
 
     def shutdown(self, states=None) -> list[str]:
         """Best effort across every device even when one service call fails."""
