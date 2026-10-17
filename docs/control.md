@@ -2,7 +2,11 @@
 
 ## Sensor fusion and priorities
 
-The controller polls every 15 seconds by default. It rejects stale, unavailable, nonfinite, or implausible probe readings, converts units, applies configured offsets, and takes a median across physical sources. Freshness uses `last_reported` where available, falling back to `last_updated`.
+Routine comfort decisions run every 90 seconds by default (`decision_interval_seconds`). Head targets and ordinary circulation fan speeds remain unchanged between those decisions. Availability events and acknowledgement wakeups do not advance that timer. Dashboard edits, resolved schedule changes, and newly confirmed hard-limit violations can trigger an earlier decision.
+
+Safety and recovery checks run every 15 seconds by default (`poll_seconds`). In the native integration these read HA's cached states rather than polling devices over the network. Heartbeat renewal, command acknowledgements, disconnect recovery, and fresh temperature/probe safety checks continue between comfort decisions. A safety stop remains latched until the next comfort decision; a subsequent ordinary probe update cannot immediately restart it. Live control keeps this check interval at 30 seconds or less to support the independent watchdog.
+
+The controller rejects stale, unavailable, nonfinite, or implausible probe readings, converts units, applies configured offsets, and takes a median across physical sources. Freshness uses `last_reported` where available, falling back to `last_updated`.
 
 Single raw extremes immediately inhibit conditioning that could worsen the opposite limit. Extremes persisting for the confirmation interval also contribute to demand. A bounded recent temperature trend provides up to ten minutes of anticipation by default.
 
@@ -21,6 +25,12 @@ An explicit edit enables a temporary comfort profile, preserving the active sche
 Startup, direction change, mixed reported modes, and recovery request all heads off. Every head must report off before the settling timer begins. Selected heads then receive one shared direction. Unacknowledged climate commands enter device recovery and retry off; startup or changeover continues waiting until the required acknowledgements arrive.
 
 Changing active rooms within the same direction does not restart all heads. Device temperature ranges, steps, and fan percentage steps are respected. Fan speed commands use HA-compatible integer percentages and allow one point of reporting rounding on stepped fans. HA-reported state is the available acknowledgement, not proof of the compressor's physical state.
+
+Each heat-pump head has a five-minute minimum run hold (`head_minimum_run_seconds`) and a three-minute minimum off hold (`head_minimum_off_seconds`) by default. A run hold starts only when HA acknowledges the requested mode and setpoint; an off hold starts only when off is confirmed without pending or uncertain activation. Unknown or disconnected time does not count as confirmed off. Changing an active head's target does not restart its run timer.
+
+A run hold can retain the last acknowledged target after ordinary demand subsides, while every attached room remains safely inside its comfort band. Missing readings, opposite temperature limits, unsupported modes, changed room profiles, explicit disable/shutdown, and shared direction changes bypass retention. All rooms sharing a head are checked, including rooms configured for limits only. The auxiliary heater has no minimum run hold: its external cutoff remains immediate.
+
+A head returning within the established direction waits its own off interval without stopping healthy heads. The shared all-off settling barrier still applies at startup and direction changes. With off protection enabled, its effective minimum is the greater of the per-head interval and the all-off settling interval. Setting a per-head run or off interval to zero disables that guard; it does not disable the shared all-off barrier. These are HA head-mode holds; HA feedback does not reveal the compressor's physical cycle.
 
 The provisional settling interval is 180 seconds. Verify it for the equipment. Software timing supplements manufacturer protections.
 

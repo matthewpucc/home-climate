@@ -39,6 +39,8 @@ Existing file-based installations continue to work. See [configuration and migra
 
 The default temperature limits are **66–75°F** and can be changed. Actual limit violations outrank predicted limit pressure, which outranks room comfort priority and demand severity. Counting more rooms never outvotes a temperature limit.
 
+Routine comfort decisions run every **90 seconds** by default. Safety and recovery checks continue every 15 seconds, and dashboard edits and schedule changes apply promptly. Each head also has a five-minute minimum run hold and a three-minute minimum off hold; comfort boundaries and safety checks can stop a run early. These timings are configurable in System settings.
+
 Schedules override a room's base profile during their configured hours. They use HA's timezone, including daylight-saving changes, and may cross midnight. For example, a room can have a high sleep priority and a 60% scheduled fan overnight, then use only the system temperature limits during the day.
 
 Every shared-system direction change follows this sequence:

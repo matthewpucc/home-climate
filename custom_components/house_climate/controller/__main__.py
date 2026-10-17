@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from .cadence import DecisionCadence
 from .config import Config, Probe, Settings, Zone, helper
 from .executor import ControlFault, Executor
 from .ha import HomeAssistant
@@ -81,12 +82,13 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
     config = replace(config, timezone=ha_config["time_zone"])
     unit = ha_config["unit_system"]["temperature"]
     config.validate(live=args.live)
-    policy, executor = Policy(config), Executor(config, ha, unit)
+    cadence, executor = DecisionCadence(config), Executor(config, ha, unit)
     quit_event = stop_event if stop_event is not None else threading.Event()
     if stop_event is None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: quit_event.set())
     active = False
+    previous_enabled = None
     faults = 0
     report("started", live=args.live, timezone=config.timezone, climate_unit=unit)
     try:
@@ -96,9 +98,12 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                 states = ha.states()
                 enabled = states.get(config.entity("enabled"), {}).get("state") == "on"
                 now = datetime.now(timezone.utc)
+                if enabled != previous_enabled:
+                    cadence.reset()
+                    previous_enabled = enabled
                 settings = (settings_provider(states, config, now, strict=args.live and enabled)
                             if settings_provider else Settings.read(states, config, strict=args.live and enabled))
-                plan = policy.decide(states, now, settings, unit)
+                plan = cadence.decide(states, now, settings, unit)
                 if args.live and enabled:
                     preflight(config, states, executor)
                     if plan.heater_on and states.get(config.entity("auxiliary_probe_safe", "binary_sensor"), {}).get("state") != "on":
@@ -113,7 +118,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         for entity in failures:
                             kind = "Circulation fan" if entity in config.fans.values() else "Climate device"
                             plan.warnings.append(f"{kind} {entity}: startup off command failed; retrying independently")
-                        policy = Policy(config)
+                        cadence.reset()
                         # The old snapshot predates shutdown. Read again next cycle.
                         report("arming", message="All-off commands sent; awaiting fresh state")
                     else:
@@ -127,7 +132,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                 elif active:
                     release(ha, executor, event_callback=report)
                     active = False
-                    policy = Policy(config)
+                    cadence.reset()
                 elif args.live and states.get(config.entity("heater_owned"), {}).get("state") == "on":
                     # Recover ownership left behind by a previous process, even when disabled.
                     release(ha, executor, event_callback=report)
@@ -136,14 +141,15 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                        device_issues=dict(executor.device_issues), waiting_devices=executor.waiting_devices,
                        recovery_details=recovery["devices"],
                        settle_remaining_seconds=recovery["settle_remaining_seconds"],
-                       **plan.as_dict())
+                       cycle_holds=recovery["cycle_holds"],
+                       **cadence.status(), **plan.as_dict())
                 faults = 0
             except Exception as exc:
                 report("fault", error=str(exc))
                 if active:
                     release(ha, executor, event_callback=report)
                     active = False
-                policy = Policy(config)
+                cadence.reset()
                 faults += 1
                 if args.once:
                     raise

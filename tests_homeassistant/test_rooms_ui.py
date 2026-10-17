@@ -1,5 +1,6 @@
 """Exercise real HA selectors, room drafts, unit handling, and config-entry storage."""
 import unittest
+import probatio
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
@@ -187,3 +188,44 @@ class RoomUITests(unittest.IsolatedAsyncioTestCase):
                                if marker.schema == field)
                 self.assertIn(virtual.entity_id, control.config["exclude_entities"])
                 self.assertNotIn(physical.entity_id, control.config["exclude_entities"])
+
+    async def test_system_settings_expose_independent_cadence_in_seconds(self):
+        self.hass.config.units = METRIC_SYSTEM
+        flow = await self.flow()
+        flow._begin(configuration())
+        form = await flow.async_step_system()
+        controls = {marker.schema: control for marker, control in form["data_schema"].schema.items()}
+        expected = {
+            "decision_interval_seconds": (60, 120, 90),
+            "head_minimum_run_seconds": (0, 3600, 300),
+            "head_minimum_off_seconds": (0, 3600, 180),
+            "poll_seconds": (1, 30, 15),
+        }
+        defaults = form["data_schema"]({})
+        for name, (minimum, maximum, default) in expected.items():
+            with self.subTest(name=name):
+                self.assertEqual(controls[name].config["min"], minimum)
+                self.assertEqual(controls[name].config["max"], maximum)
+                self.assertEqual(controls[name].config["unit_of_measurement"], "s")
+                self.assertEqual(defaults[name], default)
+        values = form["data_schema"]({
+            "decision_interval_seconds": 120, "head_minimum_run_seconds": 600,
+            "head_minimum_off_seconds": 240, "poll_seconds": 10})
+        result = await flow.async_step_system(values)
+        self.assertEqual(result["type"], "menu")
+        self.assertEqual(flow.draft["decision_interval_seconds"], 120)
+        self.assertEqual(flow.draft["head_minimum_run_seconds"], 600)
+        self.assertEqual(flow.draft["head_minimum_off_seconds"], 240)
+        self.assertEqual(flow.draft["poll_seconds"], 10)
+        self.assertAlmostEqual(flow.draft["low_f"], 66, places=3)
+        self.assertAlmostEqual(flow.draft["high_f"], 75, places=3)
+
+    async def test_system_settings_reject_cadence_outside_recommended_range(self):
+        flow = await self.flow()
+        flow._begin(configuration())
+        form = await flow.async_step_system()
+        for name, value in (("decision_interval_seconds", 59), ("decision_interval_seconds", 121),
+                            ("head_minimum_run_seconds", -1), ("head_minimum_off_seconds", -1),
+                            ("poll_seconds", 31)):
+            with self.subTest(name=name, value=value), self.assertRaises(probatio.Invalid):
+                form["data_schema"]({name: value})
