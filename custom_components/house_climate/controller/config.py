@@ -23,6 +23,7 @@ class Probe:
     attribute: str | None = None
     unit: str | None = None
     offset_f: float = 0
+    report_on_change: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,8 @@ class Config:
             if len({p.entity_id for p in room.probes}) != len(room.probes):
                 raise ValueError("Duplicate probe entity in a room")
             for probe in room.probes:
+                if type(probe.report_on_change) is not bool:
+                    raise ValueError("Probe report_on_change must be a boolean")
                 if not re.fullmatch(r"[a-z0-9_]+\.[a-z0-9_]+", probe.entity_id) or not probe.source:
                     raise ValueError("Invalid probe entity or physical source")
                 if probe.entity_id == self.heater_entity or not math.isfinite(probe.offset_f):

@@ -10,7 +10,8 @@ from .config import Config, NUMBERS, TIMES, TOGGLES, helper
 
 
 def watchdog_signature(config: Config) -> str:
-    mapping = {"watchdog_version": 2, "probes": [asdict(p) for p in config.zones["living"].probes],
+    mapping = {"watchdog_version": 2, "probes": [{key: value for key, value in asdict(p).items() if key != "report_on_change" or value}
+                for p in config.zones["living"].probes],
                "stale": config.sensor_stale_seconds, "cutoff": config.heater_cutoff_f,
                "heater": config.heater_entity}
     return hashlib.sha256(json.dumps(mapping, sort_keys=True).encode()).hexdigest()[:16]
@@ -18,18 +19,22 @@ def watchdog_signature(config: Config) -> str:
 
 def package(config: Config) -> dict:
     probes = [{"entity": p.entity_id, "attribute": p.attribute or "", "unit": p.unit or "",
-               "offset": p.offset_f} for p in config.zones["living"].probes]
+               "offset": p.offset_f, "report_on_change": p.report_on_change} for p in config.zones["living"].probes]
     # Independently recomputed by HA, not a Python-reported temperature/health flag.
     safe = """{% set probes = PROBES %}
 {% set ns = namespace(values=[]) %}
 {% for p in probes %}
   {% set s = states[p.entity] %}
-  {% if s is defined and s is not none and s.state not in ['unavailable', 'unknown'] %}
+  {% if s is defined and s is not none and s.state not in [none, 'unavailable', 'unknown'] %}
     {% set reported = s.last_reported | default(s.last_updated, true) %}
-    {% set age = as_timestamp(now()) - as_timestamp(reported, 0) %}
+    {% set stamp = as_timestamp(reported, none) %}
+    {% set aware = reported is not none and ((reported.tzinfo is defined and reported.tzinfo is not none)
+         or (reported is string and ('+' in reported[10:] or '-' in reported[10:] or reported.endswith('Z')))) %}
+    {% set age = as_timestamp(now()) - stamp if stamp is not none else none %}
     {% set raw = state_attr(p.entity, p.attribute) if p.attribute else s.state %}
     {% set unit = p.unit or state_attr(p.entity, 'unit_of_measurement') %}
-    {% if -60 <= age <= STALE and is_number(raw) and unit in ['°F', 'F', '°C', 'C'] %}
+    {% if aware and age is not none and -60 <= age and (p.report_on_change or age <= STALE)
+          and is_number(raw) and unit in ['°F', 'F', '°C', 'C'] %}
       {% set f = (raw | float * 9 / 5 + 32) if unit in ['°C', 'C'] else raw | float %}
       {% set f = f + p.offset %}
       {% if -40 <= f <= 140 %}{% set ns.values = ns.values + [f] %}{% endif %}
