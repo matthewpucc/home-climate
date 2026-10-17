@@ -269,7 +269,7 @@ class Executor:
                 continue
             pending = self.pending.get(entity)
             if self.reports_off(observed) and pending is None:
-                if cycle.mode != "off":
+                if cycle.mode != "off" or cycle.off_since is None:
                     self.head_cycles[entity] = HeadCycle(mode="off", off_since=now)
                 continue
             # A stale off report during activation, or an off still awaiting

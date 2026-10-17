@@ -266,3 +266,26 @@ class HeadCycleGuardTests(unittest.TestCase):
         self.assertEqual(self.ha.data[self.guest]["state"], "off")
         self.step(781, heads=both)
         self.assertEqual(self.ha.data[self.guest]["state"], "cool")
+
+    def test_fresh_off_before_superseding_command_starts_idle_timer_once(self):
+        self.cfg = replace(self.cfg, head_minimum_run_seconds=0, head_minimum_off_seconds=180)
+        self.executor = Executor(self.cfg, self.ha, "°F")
+        self.executor.phase, self.executor.direction = "running", "cool"
+        both = {"guest": 72, "bonus": 72}
+        self.step(0, heads=both)
+        self.ha.ignore.add(self.guest)
+        self.step(180, heads=both)
+        self.assertIn(self.guest, self.executor.pending)
+        # A genuine newer off report arrives while activation is still pending.
+        # The successful superseding off may reconcile immediately against it.
+        self.ha.data[self.guest]["last_reported"] = "newer_off_after_activation"
+        self.step(195, heads={"bonus": 72})
+        self.assertNotIn(self.guest, self.executor.pending)
+        self.assertNotIn(self.guest, self.executor.recoveries)
+        self.assertEqual(self.executor.head_cycles[self.guest].off_since, 195)
+        self.step(210, heads=both)
+        self.assertEqual(self.executor.head_cycles[self.guest].off_since, 195)
+        self.assertEqual(self.ha.data[self.guest]["state"], "off")
+        self.ha.ignore.remove(self.guest)
+        self.step(375, heads=both)
+        self.assertEqual(self.ha.data[self.guest]["state"], "cool")
