@@ -187,16 +187,24 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         await self.manager._task
         self.assertEqual(self.manager._attempts[self.owner.entry_id], 2)
 
-    async def test_same_entry_heads_are_one_reload_even_if_other_head_is_running(self):
+    async def test_same_entry_reload_waits_until_other_running_head_is_off(self):
         guest = self.cfg.heads["guest"]
         self.register(guest, self.owner)
         self.hass.states.async_set(guest, "cool", {"hvac_modes": ["off", "cool", "heat"]})
-        await self.failed_for()
-        self.reload.assert_awaited_once_with(self.owner.entry_id)
+        status = await self.failed_for()
+        self.reload.assert_not_awaited()
         detail = self.manager.diagnostics["reload_details"][self.owner.entry_id]
         self.assertEqual(set(detail["affected_heads"]), {guest, self.head})
+        self.assertEqual(detail["attempts"], 0)
+        self.assertIn("defer", detail["reason"].lower())
         self.assertEqual(self.hass.states.get(guest).state, "cool")
         self.assertEqual(self.calls, [])
+        self.hass.states.async_set(guest, "off", {"hvac_modes": ["off", "cool", "heat"]})
+        self.manager.observe(status)
+        await self.until(lambda: self.reload.await_count == 1)
+        if self.manager._task is not None:
+            await self.manager._task
+        self.reload.assert_awaited_once_with(self.owner.entry_id)
 
     async def test_unregistered_self_owned_or_busy_entry_is_not_reloaded(self):
         unknown = self.cfg.heads["guest"]

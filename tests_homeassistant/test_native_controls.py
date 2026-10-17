@@ -279,7 +279,7 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
                 return
             await self.handle(call)
 
-        self.hass.services.async_register("fan", "set_percentage", lost_ack)
+        self.hass.services.async_register("fan", "turn_on", lost_ack)
         runtime, switch = await self.runtime(cfg=cfg)
         runtime.async_start()
         await switch.async_turn_on()
@@ -301,7 +301,7 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len([c for c in self.calls if c[0] == "climate"
                               and c[2]["entity_id"] in cfg.heads.values()]), count)
         self.assertEqual(runtime.fault_count, 0)
-        self.hass.services.async_register("fan", "set_percentage", self.handle)
+        self.hass.services.async_register("fan", "turn_on", self.handle)
 
     async def test_native_fan_service_errors_during_startup_do_not_block_climate(self):
         cfg = Config.from_dict(self.cfg.to_dict())
@@ -316,7 +316,7 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
             await self.handle(call)
 
         self.hass.services.async_register("fan", "turn_off", offline)
-        self.hass.services.async_register("fan", "set_percentage", offline)
+        self.hass.services.async_register("fan", "turn_on", offline)
         runtime, switch = await self.runtime(cfg=cfg)
         runtime.async_start()
         await switch.async_turn_on()
@@ -327,4 +327,4 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(switch.is_on)
         self.assertEqual(runtime.fault_count, 0)
         self.hass.services.async_register("fan", "turn_off", self.handle)
-        self.hass.services.async_register("fan", "set_percentage", self.handle)
+        self.hass.services.async_register("fan", "turn_on", self.handle)

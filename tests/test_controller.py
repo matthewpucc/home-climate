@@ -80,12 +80,13 @@ class FakeHA:
             if "temperature" in data:
                 state["attributes"]["temperature"] = data["temperature"]
         elif service == "set_percentage":
-            state["state"] = "on"
             state["attributes"]["percentage"] = data["percentage"]
         elif service == "turn_off":
             state["state"] = "off"
         elif service == "turn_on":
             state["state"] = "on"
+            if "percentage" in data:
+                state["attributes"]["percentage"] = data["percentage"]
         elif service == "set_value":
             state["state"] = data["value"]
         elif service == "set_datetime":

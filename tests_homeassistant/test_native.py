@@ -45,7 +45,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.stops = []
         for domain, services in {
             "climate": ("set_hvac_mode", "set_temperature"),
-            "fan": ("turn_off", "set_percentage"),
+            "fan": ("turn_on", "turn_off", "set_percentage"),
             "input_boolean": ("turn_on", "turn_off"),
             "input_datetime": ("set_datetime",),
             "input_text": ("set_value",),
@@ -84,8 +84,10 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             state = call.data["hvac_mode"]
         elif call.service in ("turn_on", "turn_off"):
             state = "on" if call.service == "turn_on" else "off"
+            if call.domain == "fan" and call.service == "turn_on" and "percentage" in call.data:
+                attrs["percentage"] = call.data["percentage"]
         elif call.service == "set_percentage":
-            state, attrs["percentage"] = "on", call.data["percentage"]
+            attrs["percentage"] = call.data["percentage"]
         elif call.service == "set_datetime":
             attrs["timestamp"] = call.data["timestamp"]
             state = datetime.fromtimestamp(call.data["timestamp"], timezone.utc).isoformat()

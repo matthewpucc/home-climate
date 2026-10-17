@@ -114,7 +114,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         ha.service("input_boolean", "turn_on", entity_id=config.entity("heater_owned"))
                         active = True
                         # Reconcile startup/reenable through a full off barrier, including heater.
-                        failures = executor.shutdown(states)
+                        failures = executor.shutdown(states, reason="Startup all-off reconciliation")
                         for entity in failures:
                             kind = "Circulation fan" if entity in config.fans.values() else "Climate device"
                             plan.warnings.append(f"{kind} {entity}: startup off command failed; retrying independently")
@@ -142,6 +142,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                        recovery_details=recovery["devices"],
                        settle_remaining_seconds=recovery["settle_remaining_seconds"],
                        cycle_holds=recovery["cycle_holds"],
+                       head_stop_reasons=recovery["head_stop_reasons"],
                        **cadence.status(), **plan.as_dict())
                 faults = 0
             except Exception as exc:
