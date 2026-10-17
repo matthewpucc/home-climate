@@ -146,8 +146,8 @@ class RoomEditor:
             probes = []
             for entity_id in user_input["sensors"]:
                 entry = registry.async_get(entity_id)
-                probes.append(old_probes.get(entity_id, {
-                    "entity_id": entity_id, "source": entry.device_id if entry and entry.device_id else entity_id}))
+                probes.append(deepcopy(old_probes.get(entity_id, {
+                    "entity_id": entity_id, "source": entry.device_id if entry and entry.device_id else entity_id})))
             candidate["rooms"][key] = {
                 **room, "name": user_input["name"].strip(), "head": head, "sensors": probes,
                 "profile": self.profile_input(user_input),
@@ -159,6 +159,12 @@ class RoomEditor:
             try:
                 if not candidate["rooms"][key]["name"]:
                     raise ValueError("Give the room a name")
+                if "report_on_change_sensors" in user_input:
+                    report_on_change = set(user_input["report_on_change_sensors"])
+                    if not report_on_change <= set(user_input["sensors"]):
+                        raise ValueError("Also select each sensor that reports only on change under Temperature sensors")
+                    for probe in candidate["rooms"][key]["sensors"]:
+                        probe["report_on_change"] = probe["entity_id"] in report_on_change
                 self.validate(candidate)
             except (ValueError, KeyError, TypeError) as exc:
                 errors, detail = {"base": "invalid_config"}, exc
@@ -171,6 +177,9 @@ class RoomEditor:
             vol.Required("head", **({"default": self.draft["heads"][room["head"]]} if room else {})):
                 self.climate_selector(),
             vol.Required("sensors", default=[p["entity_id"] for p in room.get("sensors", [])]):
+                selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="temperature", multiple=True)),
+            vol.Optional("report_on_change_sensors", default=[
+                p["entity_id"] for p in room.get("sensors", []) if p.get("report_on_change", False)]):
                 selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor", device_class="temperature", multiple=True)),
             **self.profile_schema(room.get("profile", {})),
         }

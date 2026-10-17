@@ -60,7 +60,9 @@ percentage = 60
 name = "Room B"
 head = "shared_a"
 sensors = [
-  {entity_id = "sensor.example_b_1", source = "probe_b_1"},
+  # This example probe reports only when its temperature changes. Its last value
+  # stays usable while available; other probes retain the normal age check.
+  {entity_id = "sensor.example_b_1", source = "probe_b_1", report_on_change = true},
   {entity_id = "sensor.example_b_2", source = "probe_b_2"},
 ]
 [rooms.room_b.profile]

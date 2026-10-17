@@ -76,6 +76,10 @@ class RoomComfort:
             "timezone": self._timezone, "limits": [config.low_f, config.high_f],
             "auxiliary_cutoff": config.heater_cutoff_f if room_id == config.auxiliary_room else None,
         }
+        # Preserve fingerprints stored before report-on-change probes existed.
+        for probe in data["room"]["probes"]:
+            if not probe.get("report_on_change", False):
+                probe.pop("report_on_change", None)
         return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def _states(self):
