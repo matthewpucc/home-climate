@@ -41,6 +41,7 @@ class RecoveryManager:
         self._task = None
         self._active_entry = None
         self._closed = False
+        self._recovery_heads = set()
 
     @property
     def diagnostics(self):
@@ -66,12 +67,49 @@ class RecoveryManager:
             return None
         return (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat()
 
+    def _healthy_active_heads(self, entry_id):
+        """A shared integration must not be restarted under healthy room calls."""
+        registry = er.async_get(self.hass)
+        heads = set(self.runtime.config.heads.values())
+        return sorted(
+            item.entity_id
+            for item in er.async_entries_for_config_entry(registry, entry_id)
+            if item.entity_id in heads and item.entity_id not in self._recovery_heads
+            and (state := self.hass.states.get(item.entity_id)) is not None
+            and state.state in ("heat", "cool")
+        )
+
+    def _room_labels(self, entities):
+        entities = set(entities)
+        return [room.name or key for key, room in self.runtime.config.zones.items()
+                if self.runtime.config.heads[room.head] in entities]
+
+    def _deferred_reason(self, entities):
+        labels = []
+        for entity in entities:
+            rooms = ", ".join(self._room_labels([entity]))
+            labels.append(f"{rooms} ({entity})" if rooms else entity)
+        return "Reload deferred while healthy heads are active: " + "; ".join(labels)
+
+    def _defer(self, entry_id, entities):
+        detail = self._details.get(entry_id)
+        reason = self._deferred_reason(entities)
+        if detail is not None:
+            detail.update(
+                reason=reason, healthy_active_heads=entities,
+                healthy_active_rooms=self._room_labels(entities),
+                attempts=self._attempts.get(entry_id, 0),
+                next_retry_at=self._retry_timestamp(entry_id, self._clock()),
+            )
+        self._summary = reason
+
     @callback
     def observe(self, status):
         """Observe an executor report on HA's loop; enqueue at most one reload."""
         if self._closed:
             return
         if not self._enabled():
+            self._recovery_heads.clear()
             self._first_seen.clear()
             active = self._details.get(self._active_entry)
             if active is not None and self._task is not None and not self._task.done():
@@ -89,6 +127,8 @@ class RecoveryManager:
             for entity, detail in recovery.items()
             if entity in heads and detail.get("kind") == "recovery"
         }
+        if "recovery_details" in status or status.get("event") == "live":
+            self._recovery_heads = set(failed)
         registry = er.async_get(self.hass)
         # A normal live report without a recovery issue confirms the incident
         # ended. A stopped/fault report omitting plan data is not such evidence.
@@ -134,11 +174,15 @@ class RecoveryManager:
                 item.entity_id for item in er.async_entries_for_config_entry(registry, entry_id)
                 if item.entity_id in heads
             )
+            healthy_active = self._healthy_active_heads(entry_id)
             age = max(now - self._first_seen[entity] for entity in entities)
             attempts = self._attempts.get(entry_id, 0)
             detail = {
                 "integration": entry.domain, "title": entry.title,
                 "entities": sorted(entities), "affected_heads": affected,
+                "affected_rooms": self._room_labels(affected),
+                "healthy_active_heads": healthy_active,
+                "healthy_active_rooms": self._room_labels(healthy_active),
                 "attempts": attempts, "last_result": self._last_result.get(entry_id),
                 "next_retry_at": self._retry_timestamp(entry_id, now),
             }
@@ -148,6 +192,8 @@ class RecoveryManager:
                 reason = f"Waiting for sustained failure: {max(1, int(FAILURE_SECONDS - age))}s"
             elif entry.state is not ConfigEntryState.LOADED:
                 reason = f"Owning integration is {entry.state.value}; HA manages setup"
+            elif healthy_active:
+                reason = self._deferred_reason(healthy_active)
             elif attempts >= MAX_ATTEMPTS:
                 reason = "Automatic reload paused after three attempts; check owning integration"
             elif now < self._next_retry.get(entry_id, now):
@@ -158,10 +204,6 @@ class RecoveryManager:
                 reason = "Another integration reload is queued"
             else:
                 scheduled = entry_id
-                self._attempts[entry_id] = attempts + 1
-                self._next_retry[entry_id] = now + RETRY_SECONDS[min(attempts, len(RETRY_SECONDS) - 1)]
-                detail["attempts"] = attempts + 1
-                detail["next_retry_at"] = self._retry_timestamp(entry_id, now)
                 reason = "Reloading owning integration; awaiting device reports"
             detail["reason"] = reason
             details[entry_id] = detail
@@ -225,6 +267,7 @@ class RecoveryManager:
         return True
 
     async def _async_reload(self, entry_id, *, manual=False):
+        deferred = False
         try:
             entry = self.hass.config_entries.async_get_entry(entry_id)
             if (self._closed or self.runtime.stop_event.is_set()
@@ -232,6 +275,23 @@ class RecoveryManager:
                     or entry is None or entry.state is not ConfigEntryState.LOADED):
                 self._last_result[entry_id] = "Reload cancelled before starting"
                 return False
+            if not manual:
+                # State may change after observe queued this task. Recheck on
+                # HA's loop immediately before dispatch, without charging a
+                # deferred attempt or starting its cooldown.
+                healthy_active = self._healthy_active_heads(entry_id)
+                if healthy_active:
+                    deferred = True
+                    self._defer(entry_id, healthy_active)
+                    return False
+                now = self._clock()
+                attempts = self._attempts.get(entry_id, 0)
+                self._attempts[entry_id] = attempts + 1
+                self._next_retry[entry_id] = now + RETRY_SECONDS[min(attempts, len(RETRY_SECONDS) - 1)]
+                detail = self._details.get(entry_id)
+                if detail is not None:
+                    detail["attempts"] = attempts + 1
+                    detail["next_retry_at"] = self._retry_timestamp(entry_id, now)
             _LOGGER.warning(
                 "Reloading %s (%s) for heat-pump recovery; "
                 "other devices attached to that integration may briefly become unavailable",
@@ -262,10 +322,11 @@ class RecoveryManager:
             detail = self._details.get(entry_id)
             if detail is not None:
                 detail["last_result"] = self._last_result.get(entry_id)
-                detail["reason"] = (self._last_result.get(entry_id) if manual else
-                                    "Automatic reload paused after three attempts; check owning integration"
-                                    if self._attempts.get(entry_id, 0) >= MAX_ATTEMPTS
-                                    else "Waiting for integration reload cooldown")
+                if not deferred:
+                    detail["reason"] = (self._last_result.get(entry_id) if manual else
+                                        "Automatic reload paused after three attempts; check owning integration"
+                                        if self._attempts.get(entry_id, 0) >= MAX_ATTEMPTS
+                                        else "Waiting for integration reload cooldown")
                 self._summary = detail["reason"]
             if not self._closed:
                 self._notify()
