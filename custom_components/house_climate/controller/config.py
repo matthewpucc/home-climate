@@ -82,6 +82,8 @@ class Config:
     decision_interval_seconds: float = 90
     head_minimum_run_seconds: float = 300
     head_minimum_off_seconds: float = 180
+    head_heat_call_offset_f: float = 5
+    head_cool_call_offset_f: float = 5
     sensor_stale_seconds: float = 900
     sensor_confirmation_seconds: float = 60
     sensor_disagreement_f: float = 3
@@ -257,6 +259,11 @@ class Config:
                     or (name == "decision_interval_seconds" and value == 0)):
                 requirement = "positive" if name == "decision_interval_seconds" else "nonnegative"
                 raise ValueError(f"{name} must be finite and {requirement}")
+        for name in ("head_heat_call_offset_f", "head_cool_call_offset_f"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not 0 <= value <= 20):
+                raise ValueError(f"{name} must be a finite temperature difference from 0 to 20°F")
         if not 0 <= self.forecast_minutes <= 30:
             raise ValueError("Invalid forecast horizon")
         if self.heater_entity and (not self.low_f < self.heater_cutoff_f < self.high_f or not math.isfinite(self.heater_high_setpoint_f)):

@@ -2,15 +2,55 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import math
 
 from .config import Config, Settings
-from .sensors import Reading, Sensors
+from .sensors import Reading, Sensors, from_f, to_f
+
+
+def native_target(fahrenheit: float, attrs: dict, unit: str) -> float:
+    """Bound and quantize a setpoint in the climate entity's native HA unit."""
+    minimum, maximum = float(attrs["min_temp"]), float(attrs["max_temp"])
+    step = float(attrs.get("target_temp_step", .5 if unit in ("C", "°C") else 1))
+    value = from_f(fahrenheit, unit)
+    if (not all(math.isfinite(number) for number in (minimum, maximum, step, value))
+            or minimum > maximum or step <= 0):
+        raise ValueError("Invalid climate temperature range")
+    value = max(minimum, min(maximum, minimum + round((value - minimum) / step) * step))
+    return round(value, 3)
+
+
+def call_target_f(config: Config, entity: str, mode: str, comfort: float,
+                  states: dict, climate_unit: str) -> float:
+    """An equipment call setpoint; room probes still decide when the call ends."""
+    attrs = states.get(entity, {}).get("attributes", {})
+    offset = config.head_heat_call_offset_f if mode == "heat" else config.head_cool_call_offset_f
+    target = comfort
+    if offset > 0:
+        onboard = attrs.get("current_temperature")
+        try:
+            if isinstance(onboard, bool):
+                raise ValueError("Boolean onboard temperature")
+            onboard = to_f(float(onboard), climate_unit)
+            if not math.isfinite(onboard) or not -40 <= onboard <= 140:
+                raise ValueError("Implausible onboard temperature")
+            target = max(comfort, onboard) if mode == "heat" else min(comfort, onboard)
+        except (TypeError, ValueError, OverflowError):
+            pass
+        target += offset if mode == "heat" else -offset
+    try:
+        return to_f(native_target(target, attrs, climate_unit), climate_unit)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        # Disconnected/incomplete heads still get an explainable shadow plan.
+        # The executor retains its activation-time metadata validation.
+        return target
 
 
 @dataclass
 class Plan:
     mode: str = "off"
     head_targets_f: dict[str, float] = field(default_factory=dict)
+    head_call_targets_f: dict[str, float] = field(default_factory=dict)
     inhibited_heads: dict[str, str] = field(default_factory=dict)
     heater_on: bool = False
     auxiliary_fan_only: bool = False
@@ -53,18 +93,21 @@ class Policy:
         low, high, target = band
         drift = reading.slope_f_per_minute * self.config.forecast_minutes
         future_low, future_high = reading.confirmed_low + drift, reading.confirmed_high + drift
+        # Comfort follows the fused room estimate. Persistent probe extremes
+        # remain independent evidence for system-limit protection below.
+        temperature, future_temperature = reading.temperature, reading.temperature + drift
         heat_edge, cool_edge = max(low, LOW + 1), min(high, HIGH - 1)
         heat_stop = target if low > LOW else LOW + 1.5
         cool_stop = target if high < HIGH else HIGH - 1.5
         heat = self.calls.get((name, "heat"), False)
         cool = self.calls.get((name, "cool"), False)
-        heat = (reading.confirmed_low < heat_stop or future_low < LOW + 1) if heat else (reading.confirmed_low < heat_edge or future_low < LOW + 1)
-        cool = (reading.confirmed_high > cool_stop or future_high > HIGH - 1) if cool else (reading.confirmed_high > cool_edge or future_high > HIGH - 1)
+        heat = (temperature < heat_stop or future_low < LOW + 1) if heat else (temperature < heat_edge or future_low < LOW + 1)
+        cool = (temperature > cool_stop or future_high > HIGH - 1) if cool else (temperature > cool_edge or future_high > HIGH - 1)
         self.calls[name, "heat"], self.calls[name, "cool"] = heat, cool
         output = {}
         for mode, active, amount, violation, guard in (
-            ("heat", heat, heat_stop - min(reading.confirmed_low, future_low), LOW - reading.confirmed_low, LOW + 1 - future_low),
-            ("cool", cool, max(reading.confirmed_high, future_high) - cool_stop, reading.confirmed_high - HIGH, future_high - (HIGH - 1)),
+            ("heat", heat, heat_stop - min(temperature, future_temperature), LOW - reading.confirmed_low, LOW + 1 - future_low),
+            ("cool", cool, max(temperature, future_temperature) - cool_stop, reading.confirmed_high - HIGH, future_high - (HIGH - 1)),
         ):
             amount = max(.05, amount) if active else 0
             output[mode] = {
@@ -205,6 +248,10 @@ class Policy:
         self.selected_mode = winner
         plan.mode = winner
         plan.head_targets_f = eligible.get(winner, {})
+        plan.head_call_targets_f = {
+            key: call_target_f(self.config, self.config.heads[key], winner, target, states, climate_unit)
+            for key, target in plan.head_targets_f.items()
+        }
         if winner != "off":
             plan.reasons.append(f"{winner}: " + ", ".join(plan.head_targets_f))
         else:

@@ -65,6 +65,78 @@ class CadenceTests(unittest.TestCase):
         self.assertIn("second", plan.head_targets_f)
         self.assertEqual(self.cadence.status()["decision_interval_seconds"], 90)
 
+    def test_biased_cooling_stops_at_median_comfort_edge_and_latches(self):
+        self.setup_controller(head_cool_call_offset_f=5)
+        self.assertIn("shared", self.tick(0).head_targets_f)
+        self.cadence.cached_plan.head_call_targets_f["shared"] = 67
+        stopped = self.tick(15, alpha=71.5)
+        self.assertNotIn("shared", stopped.head_targets_f)
+        self.assertNotIn("shared", stopped.head_call_targets_f)
+        self.assertIn("opposite room comfort limit", stopped.inhibited_heads["shared"])
+        self.assertNotIn("shared", self.tick(30, alpha=74).head_targets_f)
+        self.assertEqual(self.policy.decide.call_count, 1)
+        self.assertIn("shared", self.tick(90).head_targets_f)
+
+    def test_biased_heating_stops_at_median_comfort_edge_and_latches(self):
+        self.setup_controller(temperatures={"alpha": 70, "beta": 71, "gamma": 68},
+                              head_heat_call_offset_f=5)
+        self.assertIn("shared", self.tick(0).head_targets_f)
+        stopped = self.tick(15, alpha=72.5)
+        self.assertNotIn("shared", stopped.head_targets_f)
+        self.assertNotIn("shared", stopped.head_call_targets_f)
+        self.assertIn("opposite room comfort limit", stopped.inhibited_heads["shared"])
+        self.assertNotIn("shared", self.tick(30, alpha=70).head_targets_f)
+        self.assertEqual(self.policy.decide.call_count, 1)
+        self.assertIn("shared", self.tick(90).head_targets_f)
+
+    def test_biased_call_checks_every_attached_room_comfort_edge(self):
+        raw = configuration()
+        raw["rooms"]["beta"]["profile"] = {"target_f": 70, "half_band_f": .5}
+        self.setup_controller(raw, temperatures={"alpha": 74, "beta": 70, "gamma": 68},
+                              head_cool_call_offset_f=5)
+        self.assertIn("shared", self.tick(0).head_targets_f)
+        stopped = self.tick(15, beta=69.5)
+        self.assertNotIn("shared", stopped.head_targets_f)
+        self.assertIn("shared", stopped.inhibited_heads)
+        self.assertEqual(self.policy.decide.call_count, 1)
+
+    def test_persistent_outlier_does_not_replace_median_comfort_feedback(self):
+        raw = configuration()
+        raw["rooms"]["alpha"]["sensors"].append({"entity_id": "sensor.test_extra"})
+        self.setup_controller(raw, head_cool_call_offset_f=5)
+        self.assertIn("shared", self.tick(0).head_targets_f)
+        # Two sources agree that the room is at target. A third source is cold
+        # enough to cross the comfort edge, but remains above the hard guard.
+        self.tick(10, alpha=72)
+        probe = self.cfg.zones["alpha"].probes[0].entity_id
+        self.data[probe]["state"] = "71"
+        for stamp in (15, 45, 75):
+            maintained = self.tick(stamp)
+            self.assertIn("shared", maintained.head_targets_f)
+            self.assertEqual(maintained.rooms["alpha"]["temperature"], 72)
+            self.assertEqual(maintained.rooms["alpha"]["low"], 71)
+        self.assertEqual(maintained.rooms["alpha"]["confirmed_low"], 71)
+        self.assertEqual(self.policy.decide.call_count, 1)
+        # Raw global protection still acts immediately, even with that same
+        # comfortable median and before the normal 90-second decision.
+        self.data[probe]["state"] = "66.2"
+        stopped = self.tick(80)
+        self.assertEqual(stopped.rooms["alpha"]["temperature"], 72)
+        self.assertNotIn("shared", stopped.head_targets_f)
+        self.assertIn("opposite temperature limit", stopped.inhibited_heads["shared"])
+        self.assertEqual(self.policy.decide.call_count, 1)
+
+    def test_zero_direction_offset_keeps_existing_slow_comfort_behavior(self):
+        self.setup_controller(head_cool_call_offset_f=0, head_heat_call_offset_f=5)
+        self.tick(0)
+        self.assertIn("shared", self.tick(15, alpha=71.5).head_targets_f)
+        self.assertEqual(self.policy.decide.call_count, 1)
+        self.setup_controller(temperatures={"alpha": 70, "beta": 71, "gamma": 68},
+                              head_heat_call_offset_f=0, head_cool_call_offset_f=5)
+        self.tick(0)
+        self.assertIn("shared", self.tick(15, alpha=72.5).head_targets_f)
+        self.assertEqual(self.policy.decide.call_count, 1)
+
     def test_missing_attached_room_immediately_inhibits_and_latches_head(self):
         self.setup_controller()
         self.assertIn("shared", self.tick(0).head_targets_f)

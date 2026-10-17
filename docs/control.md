@@ -8,7 +8,7 @@ Safety and recovery checks run every 15 seconds by default (`poll_seconds`). In 
 
 The controller rejects stale, unavailable, nonfinite, or implausible probe readings, converts units, applies configured offsets, and takes a median across physical sources. Freshness uses `last_reported` where available, falling back to `last_updated`.
 
-Single raw extremes immediately inhibit conditioning that could worsen the opposite limit. Extremes persisting for the confirmation interval also contribute to demand. A bounded recent temperature trend provides up to ten minutes of anticipation by default.
+Single raw extremes immediately inhibit conditioning that could worsen the opposite limit. Extremes persisting for the confirmation interval contribute to system-limit demand. Ordinary comfort demand, comfort error, and comfort-edge stops use the fused median, so one persistently biased probe cannot create competing comfort calls inside the system limits. A bounded recent temperature trend provides up to ten minutes of anticipation by default.
 
 Heat/cool arbitration compares actual limit violations, forecast limit pressure, configured comfort priority, and severity, in that order. Safety-tier urgency uses the worst room rather than summed votes. Every room attached to a head must have usable readings before that head may run.
 
@@ -33,6 +33,20 @@ A run hold can retain the last acknowledged target after ordinary demand subside
 A head returning within the established direction waits its own off interval without stopping healthy heads. The shared all-off settling barrier still applies at startup and direction changes. With off protection enabled, its effective minimum is the greater of the per-head interval and the all-off settling interval. Setting a per-head run or off interval to zero disables that guard; it does not disable the shared all-off barrier. These are HA head-mode holds; HA feedback does not reveal the compressor's physical cycle.
 
 The provisional settling interval is 180 seconds. Verify it for the equipment. Software timing supplements manufacturer protections.
+
+## Heat-pump call setpoints
+
+Room comfort goals and head call setpoints are separate. The external room probes determine whether a room needs conditioning. During a call, the head receives a more demanding setpoint so its onboard thermostat is less likely to stop conditioning while the occupied area is still outside the desired range.
+
+The default heating and cooling offsets are each 5°F. Heating requests the greater of the room goal and the head's valid onboard temperature, plus the heating offset. Cooling requests the smaller of those temperatures, minus the cooling offset. Missing, invalid, or implausible onboard temperatures fall back to the room goal. Onboard temperature is used to choose the actuator setpoint; it does not replace fused external room feedback.
+
+For example, a 72°F cooling goal normally sends a 67°F head setpoint. If the head already reports 69°F while the external room probes still need cooling, it sends 64°F. The request is clamped and rounded to the head's advertised range and step. The room goal remains 72°F. A device limit can prevent the full offset from being achieved.
+
+System settings exposes separate Heating call offset and Cooling call offset controls as temperature differences. TOML uses `head_heat_call_offset_f` and `head_cool_call_offset_f`, each 0–20°F. Zero disables the offset for that direction and sends the original room goal, ignoring onboard temperature for this calculation.
+
+Biased setpoints change only at normal comfort decisions, explicit profile changes, or safety-triggered decisions. Minimum-run retention uses the last acknowledged room goal and head call setpoint. The fresh fused room temperature at a room's opposite comfort boundary stop a biased call immediately: cooling stops at or below the lower edge, heating at or above the upper edge. Every room sharing a head is checked. Raw opposite system-limit guards and missing-probe checks remain immediate. These stops override run holds and remain latched until the next comfort decision.
+
+Room plans show both the desired room goal and the head setpoint. Dashboard thermostat and Desired temperature controls always refer to room comfort. HA acknowledgement confirms a mode and setpoint, not physical compressor operation or guaranteed conditioning. The independent auxiliary heater retains its separately configured high setpoint and cutoff.
 
 ## Auxiliary heating
 

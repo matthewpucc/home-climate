@@ -24,7 +24,8 @@ NIGHT = datetime(2026, 10, 16, 5, 30, tzinfo=timezone.utc)  # 22:30 PDT
 
 def config():
     return replace(Config.load(ROOT / "tests/fixtures/legacy.toml"),
-                   decision_interval_seconds=.03, head_minimum_run_seconds=0, head_minimum_off_seconds=0)
+                   decision_interval_seconds=.03, head_minimum_run_seconds=0, head_minimum_off_seconds=0,
+                   head_heat_call_offset_f=0, head_cool_call_offset_f=0)
 
 
 def fixture(cfg, now=NIGHT, **temperatures):

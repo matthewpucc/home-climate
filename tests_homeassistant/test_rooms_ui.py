@@ -229,3 +229,47 @@ class RoomUITests(unittest.IsolatedAsyncioTestCase):
                             ("poll_seconds", 31)):
             with self.subTest(name=name, value=value), self.assertRaises(probatio.Invalid):
                 form["data_schema"]({name: value})
+
+    async def test_system_call_offsets_convert_celsius_differences_without_absolute_offset(self):
+        self.hass.config.units = METRIC_SYSTEM
+        flow = await self.flow()
+        flow._begin(configuration())
+        form = await flow.async_step_system()
+        controls = {marker.schema: control for marker, control in form["data_schema"].schema.items()}
+        defaults = form["data_schema"]({})
+        for name in ("head_heat_call_offset_f", "head_cool_call_offset_f"):
+            with self.subTest(name=name):
+                self.assertAlmostEqual(defaults[name], 5 * 5 / 9, places=3)
+                self.assertEqual(controls[name].config["min"], 0)
+                self.assertAlmostEqual(controls[name].config["max"], 20 * 5 / 9, places=3)
+                self.assertEqual(controls[name].config["step"], .1)
+                self.assertEqual(controls[name].config["unit_of_measurement"], "°C")
+        values = form["data_schema"]({"head_heat_call_offset_f": 3, "head_cool_call_offset_f": 2})
+        self.assertEqual((await flow.async_step_system(values))["type"], "menu")
+        self.assertAlmostEqual(flow.draft["head_heat_call_offset_f"], 5.4)
+        self.assertAlmostEqual(flow.draft["head_cool_call_offset_f"], 3.6)
+        # Reopening and saving uses deltas again, without adding 32 or scaling twice.
+        reopened = await flow.async_step_system()
+        saved = reopened["data_schema"]({})
+        self.assertEqual(saved["head_heat_call_offset_f"], 3)
+        self.assertEqual(saved["head_cool_call_offset_f"], 2)
+        self.assertEqual((await flow.async_step_system(saved))["type"], "menu")
+        self.assertAlmostEqual(flow.draft["head_heat_call_offset_f"], 5.4)
+        self.assertAlmostEqual(flow.draft["head_cool_call_offset_f"], 3.6)
+        self.assertEqual(flow.draft["rooms"]["alpha"]["profile"]["target_f"], 72)
+
+    async def test_system_call_offsets_use_fahrenheit_differences_and_allow_zero(self):
+        flow = await self.flow()
+        flow._begin(configuration())
+        form = await flow.async_step_system()
+        defaults = form["data_schema"]({})
+        self.assertEqual(defaults["head_heat_call_offset_f"], 5)
+        self.assertEqual(defaults["head_cool_call_offset_f"], 5)
+        values = form["data_schema"]({"head_heat_call_offset_f": 0, "head_cool_call_offset_f": 20})
+        self.assertEqual((await flow.async_step_system(values))["type"], "menu")
+        self.assertEqual(flow.draft["head_heat_call_offset_f"], 0)
+        self.assertEqual(flow.draft["head_cool_call_offset_f"], 20)
+        self.assertEqual(flow.draft["rooms"]["alpha"]["profile"]["target_f"], 72)
+        for name, value in (("head_heat_call_offset_f", -.1), ("head_cool_call_offset_f", 20.1)):
+            with self.subTest(name=name), self.assertRaises(probatio.Invalid):
+                form["data_schema"]({name: value})

@@ -70,6 +70,7 @@ class DecisionCadence:
 
     def _inhibit(self, head, reason):
         self.cached_plan.head_targets_f.pop(head, None)
+        getattr(self.cached_plan, "head_call_targets_f", {}).pop(head, None)
         self.cached_plan.inhibited_heads[head] = reason
         self._warning(f"{head}: {reason}; waiting for next comfort decision")
 
@@ -85,6 +86,18 @@ class DecisionCadence:
                 self._inhibit(head, "cooling blocked by opposite temperature limit")
             elif plan.mode == "heat" and any(rooms[name].high >= high - .25 for name in names):
                 self._inhibit(head, "heating blocked by opposite temperature limit")
+            elif (plan.mode in ("heat", "cool")
+                  and getattr(self.config, f"head_{plan.mode}_call_offset_f", 0) > 0):
+                # A biased device setpoint deliberately keeps its internal
+                # thermostat calling. External probes must therefore stop it at
+                # the opposite comfort edge even between slow decisions.
+                for name in names:
+                    target = plan.room_targets.get(name, {})
+                    boundary = target.get("low_f" if plan.mode == "cool" else "high_f")
+                    temperature = rooms[name].temperature
+                    if boundary is not None and (temperature <= boundary if plan.mode == "cool" else temperature >= boundary):
+                        self._inhibit(head, f"{plan.mode} stopped at opposite room comfort limit")
+                        break
             modes = states.get(entity, {}).get("attributes", {}).get("hvac_modes") or []
             if plan.mode in ("heat", "cool") and modes and plan.mode not in modes:
                 self._inhibit(head, f"{plan.mode} unavailable (HA modes: {', '.join(modes)})")

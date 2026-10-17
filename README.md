@@ -10,7 +10,7 @@ House Climate runs continuously inside HA as a custom integration. Configure roo
 
 - Any number of named rooms and heads on **one shared heat/cool system**.
 - Multiple rooms sharing one head, without averaging away a hot or cold area.
-- Multiple temperature sources, with freshness checks, median fusion, and persistent extreme detection.
+- Multiple temperature sources, with freshness checks, median comfort control, and persistent extreme detection for system limits.
 - Per-room targets, priorities, daily schedules, and optional HA area assignments.
 - Dashboard thermostat cards for comfort ranges, Desired temperature controls, and temporary holds that resume the schedule automatically.
 - Cooling, conditioning, scheduled, continuous, and inter-room airflow fan rules.
@@ -54,6 +54,8 @@ flowchart LR
 ```
 
 Default direction dwell is 20 minutes, with two minutes of sustained competing demand. Actual limit violations may bypass the software dwell, but never the all-off settling interval. Missing room temperatures inhibit the associated head. A raw cold or hot reading blocks conditioning that would worsen the opposite limit.
+
+During a heat-pump call, separate heating and cooling offsets push the head's setpoint beyond its onboard reading and room goal, while external probes decide when to stop. Defaults are 5°F in each direction and can be adjusted in System settings. Room plans show the room goal and actual head call setpoint separately.
 
 The optional auxiliary heater uses an intentionally high device setpoint to call for heat, then explicit off commands at the external room thermostat's upper band. An independent HA watchdog monitors external probes and the controller heartbeat. A combined heater/fan is controlled through its climate entity alone.
 
