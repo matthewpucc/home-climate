@@ -294,6 +294,9 @@ class RoomEditor:
             candidate.update({key: value for key, value in user_input.items() if key != "live"})
             for key in ("low_f", "high_f"):
                 candidate[key] = to_f(float(candidate[key]), self.unit)
+            for key in ("head_heat_call_offset_f", "head_cool_call_offset_f"):
+                if key in user_input:
+                    candidate[key] = float(user_input[key]) * (9 / 5 if self.unit == "°C" else 1)
             try:
                 self.validate(candidate, live=user_input["live"])
             except (ValueError, KeyError, TypeError) as exc:
@@ -309,6 +312,8 @@ class RoomEditor:
             vol.Required("decision_interval_seconds", default=self.draft.get("decision_interval_seconds", 90)): self.number(60, 120, 1, "s"),
             vol.Required("head_minimum_run_seconds", default=self.draft.get("head_minimum_run_seconds", 300)): self.number(0, 3600, 1, "s"),
             vol.Required("head_minimum_off_seconds", default=self.draft.get("head_minimum_off_seconds", 180)): self.number(0, 3600, 1, "s"),
+            vol.Required("head_heat_call_offset_f", default=self.delta(self.draft.get("head_heat_call_offset_f", 5))): self.number(0, self.delta(20), .1, self.unit),
+            vol.Required("head_cool_call_offset_f", default=self.delta(self.draft.get("head_cool_call_offset_f", 5))): self.number(0, self.delta(20), .1, self.unit),
             vol.Required("poll_seconds", default=self.draft.get("poll_seconds", 15)): self.number(1, 30, 1, "s"),
             vol.Required("equipment_timing_confirmed", default=self.draft.get("equipment_timing_confirmed", False)): bool,
             vol.Required("live", default=self.live): bool,
