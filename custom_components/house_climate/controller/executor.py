@@ -330,8 +330,12 @@ class Executor:
         requested_target = self.head_cycles[entity].target_native
         if requested_target is None:
             requested_target = previous.get("requested_target_temperature")
-        previous_command = dict(previous_pending.command[1]) if previous_pending else {}
-        if previous_pending and previous_pending.command[0] == "set_temperature":
+        command = previous_pending.command if previous_pending else None
+        recovery = self.recoveries.get(entity)
+        if (not command or command[0] != "set_temperature") and recovery and recovery.command:
+            command = recovery.command
+        previous_command = dict(command[1]) if command else {}
+        if command and command[0] == "set_temperature":
             requested_mode = previous_command.get("hvac_mode", requested_mode)
             requested_target = previous_command.get("temperature", requested_target)
         elif entity in self._acknowledged_head_modes:
@@ -344,6 +348,8 @@ class Executor:
                 kind, reason = "safety", f"Off requested: {inhibition}"
             elif entity in self.recoveries:
                 kind, reason = "recovery", f"Off requested to reconcile device state: {self.recoveries[entity].reason}"
+            elif entity in self.capability_blocks:
+                kind, reason = "capability", f"Off requested: {self.capability_blocks[entity]['reason']}"
             elif self._shared_stop_context:
                 kind, reason = self._shared_stop_context
             else:
@@ -612,8 +618,10 @@ class Executor:
                 target = min(100, max(1, math.floor(rung * step + 1e-7)))
                 tolerance = min(1.0, step / 2)
                 # Dyson integrations treat set_percentage as speed-only.
-                # A stable combined command also requests power explicitly.
-                service, data = "turn_on", {"percentage": target}
+                # Request power explicitly when supported; speed-only fans
+                # retain their set_percentage activation contract.
+                service = "turn_on" if attrs["supported_features"] & 32 else "set_percentage"
+                data = {"percentage": target}
 
                 def matches(observed):
                     value = observed.get("attributes", {}).get("percentage")
@@ -649,7 +657,7 @@ class Executor:
             delay = min(300, max(15, self.config.poll_seconds, self.config.command_timeout_seconds)
                         * 2 ** min(attempts - 1, 5))
             observed = states.get(entity, {})
-            requested = dict(command[1])["percentage"] if command and command[0] == "turn_on" else percentage
+            requested = dict(command[1]).get("percentage", percentage) if command else percentage
             target = f"{requested}%" if percentage else "off"
             reason = str(exc).removesuffix(f": {entity}")
             message = (f"{reason}; requested {target}, reported {observed.get('state')} "

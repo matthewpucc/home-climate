@@ -2,6 +2,7 @@
 import unittest
 
 from house_climate.executor import Executor
+from house_climate.ha import HAError
 from house_climate.policy import Plan
 from tests.test_controller import FakeHA, config, fixture
 
@@ -35,12 +36,23 @@ class SeparatePowerFanHA(FakeHA):
             state["state"] = "off"
 
 
+class SpeedOnlyFanHA(FakeHA):
+    """Modern HA rejects turn_on when the fan advertises SET_SPEED only."""
+
+    def service(self, domain, service, **data):
+        if domain == "fan" and service == "turn_on":
+            self.calls.append((domain, service, data))
+            raise HAError("Fan does not support turn_on")
+        return super().service(domain, service, **data)
+
+
 class FanPowerTests(unittest.TestCase):
     def setup_fan(self, *, remembered=20, **kwargs):
         self.cfg = config()
         self.fan = self.cfg.fans["primary"]
         data = fixture(self.cfg)
         data[self.fan]["attributes"]["percentage"] = remembered
+        data[self.fan]["attributes"]["supported_features"] = 1 | 16 | 32
         self.ha = SeparatePowerFanHA(data, self.fan, **kwargs)
         self.executor = Executor(self.cfg, self.ha, "°F")
 
@@ -55,6 +67,20 @@ class FanPowerTests(unittest.TestCase):
     def calls(self):
         return [call for call in self.ha.calls
                 if call[0] == "fan" and call[2]["entity_id"] == self.fan]
+
+    def test_speed_only_fans_keep_set_percentage_without_unsupported_turn_on(self):
+        self.setup_fan()
+        data = fixture(self.cfg)
+        data[self.fan]["attributes"]["supported_features"] = 1
+        self.ha = SpeedOnlyFanHA(data)
+        self.executor = Executor(self.cfg, self.ha, "°F")
+        self.step(0)
+        self.assertEqual(self.calls()[0][1], "set_percentage")
+        self.assertEqual(self.ha.data[self.fan]["state"], "on")
+        self.step(15)
+        self.assertNotIn(self.fan, self.executor.pending)
+        self.assertNotIn(self.fan, self.executor.fan_failures)
+        self.assertEqual(len(self.calls()), 1)
 
     def test_matching_remembered_speed_still_requires_explicit_power_on(self):
         self.setup_fan(remembered=60)

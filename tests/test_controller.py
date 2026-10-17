@@ -40,7 +40,7 @@ def fixture(cfg, now=NIGHT, **temperatures):
         states[entity] = {"state": "off", "attributes": {"hvac_modes": ["off", "heat", "cool"], "min_temp": 60,
                                                        "max_temp": 90, "target_temp_step": 1, "temperature": 72}}
     for entity in cfg.fans.values():
-        states[entity] = {"state": "off", "attributes": {"supported_features": 1, "percentage": 0, "percentage_step": 10}}
+        states[entity] = {"state": "off", "attributes": {"supported_features": 49, "percentage": 0, "percentage_step": 10}}
     states[cfg.heater_entity]["attributes"]["hvac_modes"] = ["off", "heat", "fan_only"]
     return states
 
@@ -80,6 +80,7 @@ class FakeHA:
             if "temperature" in data:
                 state["attributes"]["temperature"] = data["temperature"]
         elif service == "set_percentage":
+            state["state"] = "on" if data["percentage"] else "off"
             state["attributes"]["percentage"] = data["percentage"]
         elif service == "turn_off":
             state["state"] = "off"
