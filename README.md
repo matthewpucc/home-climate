@@ -55,6 +55,8 @@ flowchart LR
 
 Default direction dwell is 20 minutes, with two minutes of sustained competing demand. Actual limit violations may bypass the software dwell, but never the all-off settling interval. Missing room temperatures inhibit the associated head. A raw cold or hot reading blocks conditioning that would worsen the opposite limit.
 
+During a heat-pump call, separate heating and cooling offsets push the head's setpoint beyond its onboard reading and room goal, while external probes decide when to stop. Defaults are 5°F in each direction and can be adjusted in System settings. Room plans show the room goal and actual head call setpoint separately.
+
 The optional auxiliary heater uses an intentionally high device setpoint to call for heat, then explicit off commands at the external room thermostat's upper band. An independent HA watchdog monitors external probes and the controller heartbeat. A combined heater/fan is controlled through its climate entity alone.
 
 Temperature bounds are control objectives, not physical guarantees. Conflicting demands, capacity, airflow, probe error, and communication failure can prevent the system from meeting them. See [control behavior and limitations](docs/control.md).

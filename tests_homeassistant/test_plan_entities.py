@@ -72,10 +72,10 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rendered(Overview(entry)),
                          "Preview only · Would cool North alcove, South nook")
         self.assertEqual(self.rendered(RoomPlan(entry, "alpha")),
-                         "Would cool shared head to 72 °F · comfort 71.5 °F–72.5 °F")
+                         "Would cool shared head toward 72 °F (head setpoint 67 °F) · comfort 71.5 °F–72.5 °F")
         # The second area shares the head's target, not an invented independent target.
         self.assertEqual(self.rendered(RoomPlan(entry, "beta")),
-                         "Would cool shared head to 72 °F · limits only 66 °F–75 °F")
+                         "Would cool shared head toward 72 °F (head setpoint 67 °F) · limits only 66 °F–75 °F")
         self.assertEqual(self.rendered(CurrentIssues(entry)), "None")
         self.assertEqual(ControllerStatus(entry).native_value, "shadow")
         self.assertEqual(self.calls, [])
@@ -85,7 +85,7 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
         entry = self.entry()
         self.decide(entry, {"alpha": 73, "beta": 71, "gamma": 68})
         self.assertEqual(self.rendered(RoomPlan(entry, "alpha")),
-                         "Would cool shared head to 22.2 °C · comfort 21.9 °C–22.5 °C")
+                         "Would cool shared head toward 22.2 °C (head setpoint 19.4 °C) · comfort 21.9 °C–22.5 °C")
         self.assertAlmostEqual(float(self.rendered(RoomTemperature(entry, "alpha"))), 22.8, places=1)
 
     async def test_schedules_use_decision_timezone_and_clear_daytime_fan_plan(self):
