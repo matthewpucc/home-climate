@@ -35,7 +35,7 @@ def probe_value(probe: Probe, states: dict, now: datetime, stale_seconds: float,
     if timestamp is None or timestamp.tzinfo is None:
         raise ValueError("missing timestamp")
     age = (now - timestamp).total_seconds()
-    if age > stale_seconds or age < -60:
+    if age < -60 or (age > stale_seconds and not probe.report_on_change):
         raise ValueError("stale/future reading")
     attrs = state.get("attributes", {})
     raw = attrs.get(probe.attribute) if probe.attribute else state.get("state")

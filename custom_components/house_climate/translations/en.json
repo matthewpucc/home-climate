@@ -35,12 +35,13 @@
       },
       "room": {
         "title": "Room settings",
-        "description": "Choose independent temperature probes where possible. Rooms sharing a heat-pump head must select the same climate entity. Higher comfort priority wins when rooms disagree; temperature limits take precedence.\n\n{detail}",
+        "description": "Choose independent temperature probes where possible. Rooms sharing a heat-pump head must select the same climate entity. Higher comfort priority wins when rooms disagree; temperature limits take precedence.\n\nIf a sensor reports only when its reading changes, select it below as well. Its last value stays usable while Home Assistant shows it available; sensors not selected there still need recent reports. Unknown, unavailable, and invalid readings are always excluded.\n\n{detail}",
         "data": {
           "name": "Room name",
           "area": "Home Assistant area (optional)",
           "head": "Heat-pump head",
           "sensors": "Temperature sensors",
+          "report_on_change_sensors": "Sensors that report only on change",
           "comfort_enabled": "Maintain a comfort target",
           "target_f": "Target temperature",
           "half_band_f": "Half-width of comfort band",
@@ -183,12 +184,13 @@
       },
       "room": {
         "title": "Room settings",
-        "description": "Choose independent temperature probes where possible. Rooms sharing a heat-pump head must select the same climate entity. Higher comfort priority wins when rooms disagree; temperature limits take precedence.\n\n{detail}",
+        "description": "Choose independent temperature probes where possible. Rooms sharing a heat-pump head must select the same climate entity. Higher comfort priority wins when rooms disagree; temperature limits take precedence.\n\nIf a sensor reports only when its reading changes, select it below as well. Its last value stays usable while Home Assistant shows it available; sensors not selected there still need recent reports. Unknown, unavailable, and invalid readings are always excluded.\n\n{detail}",
         "data": {
           "name": "Room name",
           "area": "Home Assistant area (optional)",
           "head": "Heat-pump head",
           "sensors": "Temperature sensors",
+          "report_on_change_sensors": "Sensors that report only on change",
           "comfort_enabled": "Maintain a comfort target",
           "target_f": "Target temperature",
           "half_band_f": "Half-width of comfort band",

@@ -27,6 +27,8 @@ Room IDs stay stable when renamed, preserving entity identity/history. Removing 
 
 **Heating call offset** and **Cooling call offset** control how far the head setpoint is pushed beyond the room goal and its onboard reading during an active call. Each defaults to a 5°F difference (about 2.8°C); zero disables that direction's offset. Room plans show both the room goal and head call setpoint, while thermostat cards keep showing the desired room temperature. The external probes still decide when a call ends.
 
+For sensors that send a temperature only when it changes enough, open **Edit a room → select the room → Room settings** and select them under **Sensors that report only on change**. Their unchanged values remain usable while available in HA. Leave periodic sources out of this selection to retain their age checks.
+
 Temperatures in HA forms follow HA's configured unit system; stored configuration and diagnostic target attributes use Fahrenheit. Temperature entities are converted by HA for display.
 
 ## Adjust temperatures from your dashboard

@@ -34,6 +34,10 @@ Use independent probes where possible. Ordinary comfort control uses their media
 
 TOML probes can specify `source`, `attribute`, `unit`, and `offset_f`. Share a source ID between aliases of the same physical probe. Explicit units are particularly useful for attribute-based probes used by the auxiliary watchdog. Omit unreliable sensors, especially the auxiliary heater's internal temperature.
 
+Periodic probes use the configured maximum report age. Some battery sensors report a temperature only when it changes enough; an old measurement from such a source can still be valid. In **Edit a room → select a room → Room settings**, select those sources under **Sensors that report only on change**. Other sources retain normal age checks. Removing a source from that selection restores its age check.
+
+TOML uses `report_on_change = true` on the individual sensor entry. The default is false. This option accepts the last reported value while HA considers the entity available; it does not infer a new measurement or prove that a silent device is connected. Unknown/unavailable, invalid, implausible, missing-timestamp, and future-dated readings remain rejected. Native and generated auxiliary watchdogs follow the same policy. Standalone/legacy users must regenerate their HA package after changing this setting.
+
 At least one probe must be configured per room. Operation can continue with one valid independent source and a diagnostic warning. If all sources fail, the room's shared head is inhibited.
 
 ## Fans

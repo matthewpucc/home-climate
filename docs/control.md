@@ -8,6 +8,8 @@ Safety and recovery checks run every 15 seconds by default (`poll_seconds`). In 
 
 The controller rejects stale, unavailable, nonfinite, or implausible probe readings, converts units, applies configured offsets, and takes a median across physical sources. Freshness uses `last_reported` where available, falling back to `last_updated`.
 
+Probes explicitly marked `report_on_change` keep their last value usable beyond the periodic report-age limit. Their HA availability, value validity, and timestamp checks still apply; no new measurement is inferred. This policy is shared with auxiliary watchdog checks. Periodic sources continue to expire normally.
+
 Single raw extremes immediately inhibit conditioning that could worsen the opposite limit. Extremes persisting for the confirmation interval contribute to system-limit demand. Ordinary comfort demand, comfort error, and comfort-edge stops use the fused median, so one persistently biased probe cannot create competing comfort calls inside the system limits. A bounded recent temperature trend provides up to ten minutes of anticipation by default.
 
 Heat/cool arbitration compares actual limit violations, forecast limit pressure, configured comfort priority, and severity, in that order. Safety-tier urgency uses the worst room rather than summed votes. Every room attached to a head must have usable readings before that head may run.

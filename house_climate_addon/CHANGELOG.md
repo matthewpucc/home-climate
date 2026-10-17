@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.3
+
+- Add a per-probe “reports only on change” setting so an unchanged but valid reading is not rejected for its age. Periodic probes retain normal age checks.
+- Expose the setting in each room's Home Assistant editor, preserving source identifiers, calibration, and existing selections.
+- Continue rejecting unknown, unavailable, invalid, implausible, missing-timestamp, and future-dated readings. Auxiliary watchdogs honor the same per-probe policy and retain their independent temperature cutoff.
+- Preserve existing dashboard comfort holds and generated watchdog signatures when the new setting is unused. Regenerate standalone/legacy HA packages after opting in a probe.
+
 ## 0.6.2
 
 - Separate desired room temperatures from the setpoints sent to heat-pump heads. External room probes continue deciding demand and shutdown.

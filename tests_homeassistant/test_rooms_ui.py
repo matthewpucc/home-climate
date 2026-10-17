@@ -2,6 +2,7 @@
 import unittest
 import probatio
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
@@ -12,6 +13,7 @@ from custom_components.house_climate import async_migrate_entry, async_setup_ent
 from custom_components.house_climate.config_flow import HouseClimateConfigFlow, HouseClimateOptionsFlow
 from custom_components.house_climate.configuration import validate_actuators
 from custom_components.house_climate.controller.config import Config
+from custom_components.house_climate.controller.sensors import probe_value
 from custom_components.house_climate.sensor import RoomTemperature
 from tests.test_rooms import configuration
 from tests_homeassistant import test_native as fixtures
@@ -273,3 +275,89 @@ class RoomUITests(unittest.IsolatedAsyncioTestCase):
         for name, value in (("head_heat_call_offset_f", -.1), ("head_cool_call_offset_f", 20.1)):
             with self.subTest(name=name), self.assertRaises(probatio.Invalid):
                 form["data_schema"]({name: value})
+
+    async def test_room_selects_report_on_change_probes_individually(self):
+        flow = await self.flow()
+        form = await flow.async_step_add_room()
+        values = form["data_schema"]({
+            "name": "Study", "head": "climate.study",
+            "sensors": ["sensor.study_periodic", "sensor.study_on_change"],
+            "report_on_change_sensors": ["sensor.study_on_change"],
+        })
+        self.assertEqual((await flow.async_step_room(values))["type"], "menu")
+        room = Config.from_dict(flow.draft).zones[flow.room_id]
+        self.assertEqual({probe.entity_id: probe.report_on_change for probe in room.probes},
+                         {"sensor.study_periodic": False, "sensor.study_on_change": True})
+        reopened = await flow.async_step_room()
+        self.assertEqual(reopened["data_schema"]({})["report_on_change_sensors"],
+                         ["sensor.study_on_change"])
+
+    async def test_report_on_change_selection_must_belong_to_the_room(self):
+        flow = await self.flow()
+        flow._begin(configuration())
+        flow.room_id = "alpha"
+        original = deepcopy(flow.draft)
+        form = await flow.async_step_room()
+        values = form["data_schema"]({
+            "name": "Changed name", "report_on_change_sensors": ["sensor.not_selected"],
+        })
+        result = await flow.async_step_room(values)
+        self.assertEqual(result["errors"], {"base": "invalid_config"})
+        self.assertIn("Also select each sensor", result["description_placeholders"]["detail"])
+        self.assertEqual(flow.draft, original)
+
+    async def test_clearing_report_on_change_restores_periodic_age_checks_and_keeps_calibration(self):
+        flow = await self.flow()
+        raw = configuration()
+        raw["rooms"]["alpha"]["sensors"][0].update(
+            report_on_change=True, source="calibrated_probe", attribute="temperature",
+            unit="°F", offset_f=.5)
+        flow._begin(raw)
+        flow.room_id = "alpha"
+        before = Config.from_dict(flow.draft).zones["alpha"].probes[0]
+        now = datetime.now(timezone.utc)
+        old_states = {before.entity_id: {
+            "state": "70", "last_reported": (now - timedelta(hours=1)).isoformat(),
+            "attributes": {"temperature": 70, "unit_of_measurement": "°F"}}}
+        self.assertEqual(probe_value(before, old_states, now, 900), 70.5)
+        form = await flow.async_step_room()
+        values = form["data_schema"]({"report_on_change_sensors": []})
+        self.assertEqual((await flow.async_step_room(values))["type"], "menu")
+        after = Config.from_dict(flow.draft).zones["alpha"].probes[0]
+        self.assertFalse(after.report_on_change)
+        self.assertEqual((after.source, after.attribute, after.unit, after.offset_f),
+                         ("calibrated_probe", "temperature", "°F", .5))
+        with self.assertRaisesRegex(ValueError, "stale"):
+            probe_value(after, old_states, now, 900)
+
+    async def test_rename_and_older_input_preserve_probe_reporting_and_metadata(self):
+        flow = await self.flow()
+        raw = configuration()
+        raw["rooms"]["alpha"]["sensors"][0].update(
+            report_on_change=True, source="shared_physical_probe", attribute="temperature",
+            unit="°C", offset_f=-.75)
+        flow._begin(raw)
+        flow.room_id = "alpha"
+        original_probes = deepcopy(flow.draft["rooms"]["alpha"]["sensors"])
+        form = await flow.async_step_room()
+        values = form["data_schema"]({"name": "Renamed room"})
+        values.pop("report_on_change_sensors")
+        self.assertEqual((await flow.async_step_room(values))["type"], "menu")
+        self.assertEqual(flow.draft["rooms"]["alpha"]["sensors"], original_probes)
+        reopened = await flow.async_step_room()
+        self.assertEqual(reopened["data_schema"]({})["report_on_change_sensors"],
+                         ["sensor.test_a"])
+
+    async def test_room_can_add_new_report_on_change_probe_in_the_same_edit(self):
+        flow = await self.flow()
+        flow._begin(configuration())
+        flow.room_id = "alpha"
+        form = await flow.async_step_room()
+        values = form["data_schema"]({
+            "sensors": ["sensor.test_a", "sensor.new_change_probe"],
+            "report_on_change_sensors": ["sensor.new_change_probe"],
+        })
+        self.assertEqual((await flow.async_step_room(values))["type"], "menu")
+        probes = Config.from_dict(flow.draft).zones["alpha"].probes
+        self.assertEqual({probe.entity_id: probe.report_on_change for probe in probes},
+                         {"sensor.test_a": False, "sensor.new_change_probe": True})
