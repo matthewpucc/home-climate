@@ -141,6 +141,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                        device_issues=dict(executor.device_issues), waiting_devices=executor.waiting_devices,
                        recovery_details=recovery["devices"],
                        settle_remaining_seconds=recovery["settle_remaining_seconds"],
+                       cycle_holds=recovery["cycle_holds"],
                        **cadence.status(), **plan.as_dict())
                 faults = 0
             except Exception as exc:

@@ -95,6 +95,7 @@ class DecisionCadence:
                          plan.room_targets.get(self.config.auxiliary_room, {}).get("high_f", self.config.heater_cutoff_f))
             if plan.heater_on and (not auxiliary or auxiliary.high >= cutoff):
                 plan.heater_on = False
+                self.policy.heater_on = False
                 self._warning("Auxiliary heat stopped by fresh room temperature/probe check; waiting for next comfort decision")
             if plan.auxiliary_fan_only and (not auxiliary or auxiliary.low <= low + .25):
                 plan.auxiliary_fan_only = False
