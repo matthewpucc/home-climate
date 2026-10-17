@@ -11,6 +11,7 @@ from .sensors import Reading, Sensors
 class Plan:
     mode: str = "off"
     head_targets_f: dict[str, float] = field(default_factory=dict)
+    inhibited_heads: dict[str, str] = field(default_factory=dict)
     heater_on: bool = False
     auxiliary_fan_only: bool = False
     fans: dict[str, int] = field(default_factory=dict)

@@ -23,6 +23,8 @@ Use the room thermostats and **Desired temperature** controls for everyday tempe
 
 Room IDs stay stable when renamed, preserving entity identity/history. Removing a room or fan also removes its integration-owned temperature and plan entities. Shared heads and airflow references are validated before saving.
 
+**System settings** includes a **Comfort adjustment interval** (90 seconds by default), **Minimum head run time** (five minutes), and **Minimum head off time** (three minutes). Existing installations pick up these defaults automatically. **Safety and recovery check interval** remains 15 seconds so probe checks, acknowledgements, heartbeat renewal, and device recovery stay responsive. Ordinary state changes do not trigger extra comfort adjustments; dashboard edits and schedule transitions still apply promptly. Run holds yield to comfort boundaries and safety stops. Controller status attributes expose the decision countdown and any head cycle holds.
+
 Temperatures in HA forms follow HA's configured unit system; stored configuration and diagnostic target attributes use Fahrenheit. Temperature entities are converted by HA for display.
 
 ## Adjust temperatures from your dashboard

@@ -1,6 +1,6 @@
 {
   "name": "House Climate",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "slug": "house_climate",
   "description": "Room-based shared heat-pump control, fans, and optional auxiliary heating",
   "url": "https://github.com/matthewpucc/home-climate",

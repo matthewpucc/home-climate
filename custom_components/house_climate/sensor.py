@@ -149,7 +149,8 @@ class ControllerStatus(ControllerEntity):
                  "last_error", "last_fault_at", "fault_count",
                  "control_enabled", "control_block_reason", "pending_fans",
                  "device_issues", "waiting_devices", "recovery_details",
-                 "settle_remaining_seconds", "integration_recovery") if key in status}
+                 "settle_remaining_seconds", "integration_recovery",
+                 "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds") if key in status}
 
 
 class Overview(ControllerEntity):
@@ -226,7 +227,7 @@ class RecoveryStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
-                 "integration_recovery") if key in status}
+                 "integration_recovery", "cycle_holds") if key in status}
 
 
 class CurrentIssues(ControllerEntity):

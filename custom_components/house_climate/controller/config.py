@@ -79,6 +79,9 @@ class Config:
     helper_prefix: str = "house_climate"
     legacy: bool = False
     poll_seconds: float = 15
+    decision_interval_seconds: float = 90
+    head_minimum_run_seconds: float = 300
+    head_minimum_off_seconds: float = 180
     sensor_stale_seconds: float = 900
     sensor_confirmation_seconds: float = 60
     sensor_disagreement_f: float = 3
@@ -247,6 +250,13 @@ class Config:
                      "command_timeout_seconds", "switch_confirmation_seconds"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        for name in ("decision_interval_seconds", "head_minimum_run_seconds", "head_minimum_off_seconds"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0
+                    or (name == "decision_interval_seconds" and value == 0)):
+                requirement = "positive" if name == "decision_interval_seconds" else "nonnegative"
+                raise ValueError(f"{name} must be finite and {requirement}")
         if not 0 <= self.forecast_minutes <= 30:
             raise ValueError("Invalid forecast horizon")
         if self.heater_entity and (not self.low_f < self.heater_cutoff_f < self.high_f or not math.isfinite(self.heater_high_setpoint_f)):
