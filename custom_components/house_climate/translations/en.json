@@ -99,13 +99,16 @@
       },
       "system": {
         "title": "System settings",
-        "description": "After saving, turn on Controller enabled on the House climate controller device. Confirm the off interval against your equipment before enabling live commands.\n\n{detail}",
+        "description": "Comfort adjustments normally run every 60–120 seconds. Safety, heartbeat, and recovery checks run separately at the safety interval. Minimum run/off times apply to each head's requested mode; the Mitsubishi system controls its compressor. Safety can stop a head early. The shared all-off settling interval still applies before changing direction. Confirm equipment timing before enabling live commands, then turn on Controller enabled on the House climate controller device after saving.\n\n{detail}",
         "data": {
           "low_f": "Minimum room temperature",
           "high_f": "Maximum room temperature",
           "off_settle_seconds": "All-off settling interval",
           "mode_hold_seconds": "Minimum heat/cool direction dwell",
-          "poll_seconds": "Control interval",
+          "decision_interval_seconds": "Comfort adjustment interval",
+          "head_minimum_run_seconds": "Minimum head run time",
+          "head_minimum_off_seconds": "Minimum head off time",
+          "poll_seconds": "Safety and recovery check interval",
           "equipment_timing_confirmed": "I have verified the equipment timing",
           "live": "Enable live commands"
         }
@@ -242,13 +245,16 @@
       },
       "system": {
         "title": "System settings",
-        "description": "After saving, turn on Controller enabled on the House climate controller device. Confirm the off interval against your equipment before enabling live commands.\n\n{detail}",
+        "description": "Comfort adjustments normally run every 60–120 seconds. Safety, heartbeat, and recovery checks run separately at the safety interval. Minimum run/off times apply to each head's requested mode; the Mitsubishi system controls its compressor. Safety can stop a head early. The shared all-off settling interval still applies before changing direction. Confirm equipment timing before enabling live commands, then turn on Controller enabled on the House climate controller device after saving.\n\n{detail}",
         "data": {
           "low_f": "Minimum room temperature",
           "high_f": "Maximum room temperature",
           "off_settle_seconds": "All-off settling interval",
           "mode_hold_seconds": "Minimum heat/cool direction dwell",
-          "poll_seconds": "Control interval",
+          "decision_interval_seconds": "Comfort adjustment interval",
+          "head_minimum_run_seconds": "Minimum head run time",
+          "head_minimum_off_seconds": "Minimum head off time",
+          "poll_seconds": "Safety and recovery check interval",
           "equipment_timing_confirmed": "I have verified the equipment timing",
           "live": "Enable live commands"
         }
