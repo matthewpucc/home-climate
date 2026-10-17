@@ -1,5 +1,5 @@
 """Readable plans on the device page; planned actions never imply device feedback."""
-from math import ceil, isclose
+from math import ceil, isclose, isfinite
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.const import EntityCategory, PERCENTAGE, UnitOfTemperature
@@ -77,6 +77,38 @@ def capability_message(detail):
     mode = detail.get("required_mode") or "Requested mode"
     modes = ", ".join(detail.get("available_modes") or []) or "not reported"
     return f"{mode} unavailable (HA modes: {modes})"
+
+
+def cycle_hold_message(hold):
+    """Describe confirmed timing separately from an off still awaiting a report."""
+    remaining = hold.get("remaining_seconds")
+    seconds = (max(0, ceil(remaining))
+               if isinstance(remaining, (int, float)) and isfinite(remaining) else None)
+    kind = hold.get("kind")
+    if kind == "minimum_off":
+        if "acknowledgement" in (hold.get("reason") or "").lower():
+            following = f"minimum off time of {seconds}s follows" if seconds is not None else "minimum off time follows"
+            return f"Waiting for off confirmation; {following}"
+        message = "Waiting for minimum off time"
+    elif kind == "minimum_run":
+        message = "Finishing minimum run"
+    else:
+        message = hold.get("reason") or "Waiting for head cycle timing"
+    return message + (f": {seconds}s remaining" if seconds is not None else "")
+
+
+def cycle_hold_summary(status):
+    """Keep the overview short; Recovery status lists rooms and countdowns."""
+    recovering = {*status.get("device_issues", {}), *status.get("recovery_details", {}),
+                  *status.get("waiting_devices", [])}
+    holds = {entity: hold for entity, hold in status.get("cycle_holds", {}).items()
+             if entity not in recovering}
+    if not holds:
+        return None
+    kinds = {hold.get("kind") for hold in holds.values()}
+    if kinds == {"minimum_run"}:
+        return "Finishing minimum head run"
+    return "Waiting for head cycle timing"
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -171,6 +203,8 @@ class Overview(ControllerEntity):
             prefix += status["control_block_reason"] + " · "
         if not preview and (wait := phase_message(status)):
             prefix += wait + " · "
+        if not preview and (hold := cycle_hold_summary(status)):
+            prefix += hold + " · "
         warnings = plan_warnings(status)
         if warnings:
             prefix += f'{len(warnings)} warning(s) · '
@@ -218,6 +252,9 @@ class RecoveryStatus(ControllerEntity):
                       else detail.get("reason") or issues.get(entity_id)
                       or "Waiting for off confirmation")
             messages.append(f"{climate_label(self.runtime.config, entity_id)}: {reason}")
+        for entity_id, hold in status.get("cycle_holds", {}).items():
+            if entity_id not in waiting:
+                messages.append(f"{climate_label(self.runtime.config, entity_id)}: {cycle_hold_message(hold)}")
         if wait := phase_message(status):
             messages.append(wait)
         return short("; ".join(messages) or "Ready")
@@ -334,6 +371,8 @@ class RoomPlan(RoomEntity):
         shared = sum(zone.head == room.head for zone in config.zones.values()) > 1
         head = "shared head" if shared else "head"
         limits = status["room_targets"][self.room_id]
+        cycle_hold = (status.get("cycle_holds", {}).get(config.heads[room.head])
+                      if status.get("event") == "live" else None)
         waiting = (status.get("event") == "live"
                    and config.heads[room.head] in status.get("device_issues", {}))
         if waiting:
@@ -341,6 +380,12 @@ class RoomPlan(RoomEntity):
             action = (f"keep {head} off; {capability_message(detail)}"
                       if detail.get("kind") == "capability"
                       else f"wait for {head}; off requested")
+        elif cycle_hold and target is not None:
+            timing = cycle_hold_message(cycle_hold).lower()
+            if cycle_hold.get("kind") == "minimum_run":
+                action = f'{head}: {timing}; {status["mode"]} toward {self.temperature(target)}'
+            else:
+                action = f'{head}: {timing}; then request {status["mode"]} toward {self.temperature(target)}'
         elif target is not None:
             call_target = status.get("head_call_targets_f", {}).get(room.head)
             if call_target is not None and not isclose(call_target, target, rel_tol=0, abs_tol=.05):
