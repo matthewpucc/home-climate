@@ -41,6 +41,7 @@ class FanPowerTests(unittest.TestCase):
         self.fan = self.cfg.fans["primary"]
         data = fixture(self.cfg)
         data[self.fan]["attributes"]["percentage"] = remembered
+        data[self.fan]["attributes"]["supported_features"] = 1 | 16 | 32
         self.ha = SeparatePowerFanHA(data, self.fan, **kwargs)
         self.executor = Executor(self.cfg, self.ha, "°F")
 
@@ -55,6 +56,20 @@ class FanPowerTests(unittest.TestCase):
     def calls(self):
         return [call for call in self.ha.calls
                 if call[0] == "fan" and call[2]["entity_id"] == self.fan]
+
+    def test_speed_only_fans_keep_set_percentage_without_unsupported_turn_on(self):
+        self.setup_fan()
+        data = fixture(self.cfg)
+        data[self.fan]["attributes"]["supported_features"] = 1
+        self.ha = FakeHA(data)
+        self.executor = Executor(self.cfg, self.ha, "°F")
+        self.step(0)
+        self.assertEqual(self.calls()[0][1], "set_percentage")
+        self.assertEqual(self.ha.data[self.fan]["state"], "on")
+        self.step(15)
+        self.assertNotIn(self.fan, self.executor.pending)
+        self.assertNotIn(self.fan, self.executor.fan_failures)
+        self.assertEqual(len(self.calls()), 1)
 
     def test_matching_remembered_speed_still_requires_explicit_power_on(self):
         self.setup_fan(remembered=60)
