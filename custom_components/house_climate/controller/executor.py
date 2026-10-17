@@ -373,11 +373,16 @@ class Executor:
         minimum = self.config.head_minimum_off_seconds
         if minimum <= 0 or entity not in self.head_cycles:
             return False
+        required = max(minimum, self.config.off_settle_seconds)
         pending = self.pending.get(entity)
         off_command = ("set_hvac_mode", (("hvac_mode", "off"),))
         if pending and pending.command == off_command:
             self.off(entity, states, now)
             if entity in self.pending or entity in self.recoveries:
+                self.cycle_holds[entity] = {
+                    "kind": "minimum_off", "remaining_seconds": required,
+                    "reason": "Waiting for heat-pump off acknowledgement before timing idle",
+                }
                 return True
             self._observe_head_cycles(states, now)
         # An activation already sent must keep its normal acknowledgement and
@@ -385,11 +390,17 @@ class Executor:
         if entity in self.pending:
             return False
         observed = states.get(entity, {})
+        if self.ready(observed) and observed.get("state") == "off" and not self.reports_off(observed):
+            self.off(entity, states, now)
+            self.cycle_holds[entity] = {
+                "kind": "minimum_off", "remaining_seconds": required,
+                "reason": "Waiting for heat-pump off acknowledgement before timing idle",
+            }
+            return True
         if not self.ready(observed) or not self.reports_off(observed):
             return False
         self._observe_head_cycles(states, now)
         since = self.head_cycles[entity].off_since
-        required = max(minimum, self.config.off_settle_seconds)
         remaining = required if since is None else required - (now - since)
         if remaining <= 0:
             return False

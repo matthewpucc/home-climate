@@ -248,3 +248,21 @@ class HeadCycleGuardTests(unittest.TestCase):
         self.assertEqual(self.ha.data[self.guest]["state"], "off")
         self.step(195)
         self.assertEqual(self.ha.data[self.guest]["state"], "cool")
+
+    def test_off_mode_with_active_hvac_action_cannot_start_idle_time_or_restart(self):
+        both = self.start_two_with_off_guard()
+        self.ha.data[self.guest]["attributes"]["hvac_action"] = "cooling"
+        self.step(225, heads=both)
+        self.assertEqual(self.ha.data[self.guest]["state"], "off")
+        self.assertIsNone(self.executor.head_cycles[self.guest].off_since)
+        self.assertEqual(self.executor.cycle_holds[self.guest]["kind"], "minimum_off")
+        self.step(600, heads=both)
+        self.assertEqual(self.ha.data[self.guest]["state"], "off")
+        self.ha.data[self.guest]["attributes"]["hvac_action"] = "idle"
+        self.ha.data[self.guest]["last_reported"] = "confirmed_idle"
+        self.step(601, heads=both)
+        self.assertEqual(self.executor.head_cycles[self.guest].off_since, 601)
+        self.step(780, heads=both)
+        self.assertEqual(self.ha.data[self.guest]["state"], "off")
+        self.step(781, heads=both)
+        self.assertEqual(self.ha.data[self.guest]["state"], "cool")
