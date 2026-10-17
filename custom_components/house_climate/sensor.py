@@ -1,5 +1,5 @@
 """Readable plans on the device page; planned actions never imply device feedback."""
-from math import ceil
+from math import ceil, isclose
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.const import EntityCategory, PERCENTAGE, UnitOfTemperature
@@ -144,7 +144,7 @@ class ControllerStatus(ControllerEntity):
         # Exclude changing timestamps and raw probes to limit recorder churn.
         status = self.runtime.status
         return {key: status[key] for key in
-                ("mode", "phase", "reasons", "warnings", "head_targets_f",
+                ("mode", "phase", "reasons", "warnings", "head_targets_f", "head_call_targets_f",
                  "heater_on", "auxiliary_fan_only", "fans", "room_targets", "error",
                  "last_error", "last_fault_at", "fault_count",
                  "control_enabled", "control_block_reason", "pending_fans",
@@ -342,7 +342,12 @@ class RoomPlan(RoomEntity):
                       if detail.get("kind") == "capability"
                       else f"wait for {head}; off requested")
         elif target is not None:
-            action = f'{status["mode"]} {head} to {self.temperature(target)}'
+            call_target = status.get("head_call_targets_f", {}).get(room.head)
+            if call_target is not None and not isclose(call_target, target, rel_tol=0, abs_tol=.05):
+                action = (f'{status["mode"]} {head} toward {self.temperature(target)} '
+                          f'(head setpoint {self.temperature(call_target)})')
+            else:
+                action = f'{status["mode"]} {head} to {self.temperature(target)}'
         else:
             action = f"keep {head} off"
             waiting = [mode for mode in ("heat", "cool") if limits[f"{mode}_requested"]]
@@ -363,6 +368,7 @@ class RoomPlan(RoomEntity):
                 "rooms_sharing_head": [room.name or key for key, room in config.zones.items()
                                       if room.head == head],
                 "head_target_f": status.get("head_targets_f", {}).get(head),
+                "head_call_target_f": status.get("head_call_targets_f", {}).get(head),
                 **status.get("room_targets", {}).get(self.room_id, {})}
 
 
