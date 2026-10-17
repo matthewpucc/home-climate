@@ -79,22 +79,24 @@ def capability_message(detail):
     return f"{mode} unavailable (HA modes: {modes})"
 
 
-def cycle_hold_message(hold):
+def cycle_hold_message(hold, last_stop=None):
     """Describe confirmed timing separately from an off still awaiting a report."""
     remaining = hold.get("remaining_seconds")
     seconds = (max(0, ceil(remaining))
                if isinstance(remaining, (int, float)) and isfinite(remaining) else None)
     kind = hold.get("kind")
+    stop_reason = (last_stop or {}).get("reason")
+    stop_message = f"; last stop: {stop_reason}" if kind == "minimum_off" and stop_reason else ""
     if kind == "minimum_off":
         if "acknowledgement" in (hold.get("reason") or "").lower():
             following = f"minimum off time of {seconds}s follows" if seconds is not None else "minimum off time follows"
-            return f"Waiting for off confirmation; {following}"
+            return f"Waiting for off confirmation; {following}" + stop_message
         message = "Waiting for minimum off time"
     elif kind == "minimum_run":
         message = "Finishing minimum run"
     else:
         message = hold.get("reason") or "Waiting for head cycle timing"
-    return message + (f": {seconds}s remaining" if seconds is not None else "")
+    return message + (f": {seconds}s remaining" if seconds is not None else "") + stop_message
 
 
 def cycle_hold_summary(status):
@@ -182,7 +184,8 @@ class ControllerStatus(ControllerEntity):
                  "control_enabled", "control_block_reason", "pending_fans",
                  "device_issues", "waiting_devices", "recovery_details",
                  "settle_remaining_seconds", "integration_recovery",
-                 "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds") if key in status}
+                 "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
+                 "head_stop_reasons") if key in status}
 
 
 class Overview(ControllerEntity):
@@ -254,7 +257,8 @@ class RecoveryStatus(ControllerEntity):
             messages.append(f"{climate_label(self.runtime.config, entity_id)}: {reason}")
         for entity_id, hold in status.get("cycle_holds", {}).items():
             if entity_id not in waiting:
-                messages.append(f"{climate_label(self.runtime.config, entity_id)}: {cycle_hold_message(hold)}")
+                last_stop = status.get("head_stop_reasons", {}).get(entity_id)
+                messages.append(f"{climate_label(self.runtime.config, entity_id)}: {cycle_hold_message(hold, last_stop)}")
         if wait := phase_message(status):
             messages.append(wait)
         return short("; ".join(messages) or "Ready")
@@ -264,7 +268,7 @@ class RecoveryStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
-                 "integration_recovery", "cycle_holds") if key in status}
+                 "integration_recovery", "cycle_holds", "head_stop_reasons") if key in status}
 
 
 class CurrentIssues(ControllerEntity):
@@ -381,7 +385,8 @@ class RoomPlan(RoomEntity):
                       if detail.get("kind") == "capability"
                       else f"wait for {head}; off requested")
         elif cycle_hold and target is not None:
-            timing = cycle_hold_message(cycle_hold).lower()
+            last_stop = status.get("head_stop_reasons", {}).get(config.heads[room.head])
+            timing = cycle_hold_message(cycle_hold, last_stop).lower()
             if cycle_hold.get("kind") == "minimum_run":
                 action = f'{head}: {timing}; {status["mode"]} toward {self.temperature(target)}'
             else:
@@ -414,6 +419,8 @@ class RoomPlan(RoomEntity):
                                       if room.head == head],
                 "head_target_f": status.get("head_targets_f", {}).get(head),
                 "head_call_target_f": status.get("head_call_targets_f", {}).get(head),
+                **({"last_stop": status["head_stop_reasons"][config.heads[head]]}
+                   if config.heads[head] in status.get("head_stop_reasons", {}) else {}),
                 **status.get("room_targets", {}).get(self.room_id, {})}
 
 

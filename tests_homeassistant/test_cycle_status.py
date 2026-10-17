@@ -3,7 +3,7 @@ from copy import deepcopy
 import unittest
 
 from custom_components.house_climate.controller.config import Config
-from custom_components.house_climate.sensor import Overview, RecoveryStatus, RoomPlan
+from custom_components.house_climate.sensor import ControllerStatus, Overview, RecoveryStatus, RoomPlan
 from tests.test_rooms import configuration
 from tests_homeassistant import test_native as fixtures
 from tests_homeassistant import test_plan_entities as plan_fixtures
@@ -117,3 +117,25 @@ class CycleStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.rendered(RecoveryStatus(entry))), 255)
         self.assertEqual(len(self.rendered(Overview(entry))), 255)
         self.assertIn("waiting for minimum off time", self.rendered(RoomPlan(entry, "alpha")))
+
+    async def test_last_stop_explains_off_hold_without_appearing_as_a_current_fault(self):
+        entry = self.live_entry({
+            "climate.test_shared": {"kind": "minimum_off", "remaining_seconds": 120}})
+        previous = {"reason": "Room cooling request ended", "kind": "controller_off", "mode": "cool"}
+        entry.runtime_data.status["head_stop_reasons"] = {"climate.test_shared": previous}
+        recovery = RecoveryStatus(entry)
+        text = self.rendered(recovery)
+        self.assertIn("North alcove, South nook: Waiting for minimum off time: 120s remaining", text)
+        self.assertIn("last stop: Room cooling request ended", text)
+        room = RoomPlan(entry, "alpha")
+        self.assertIn("last stop: room cooling request ended", self.rendered(room))
+        self.assertEqual(room.extra_state_attributes["last_stop"], previous)
+        self.assertEqual(ControllerStatus(entry).extra_state_attributes["head_stop_reasons"],
+                         {"climate.test_shared": previous})
+        self.assertNotIn("fault", text.lower())
+        entry.runtime_data.status["cycle_holds"] = {}
+        self.assertEqual(self.rendered(recovery), "Ready")
+        self.assertNotIn("last stop", self.rendered(room))
+        self.assertIn("cool shared head toward", self.rendered(room))
+        self.assertEqual(room.extra_state_attributes["last_stop"], previous)
+        self.assertEqual(self.calls, [])
