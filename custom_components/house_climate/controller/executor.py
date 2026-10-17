@@ -42,6 +42,16 @@ class FanRetry:
     attempts: int
 
 
+@dataclass
+class HeadCycle:
+    mode: str | None = None
+    run_since: float | None = None
+    off_since: float | None = None
+    target_f: float | None = None
+    target_native: float | None = None
+    profile_signature: tuple | None = None
+
+
 class Executor:
     """Nonblocking, acknowledged all-off barrier before any shared mode change."""
 
@@ -59,6 +69,9 @@ class Executor:
         self._states = {}
         self._wanted_modes = {}
         self._refresh_needed = False
+        self.head_cycles = {entity: HeadCycle() for entity in config.heads.values()}
+        self.cycle_holds: dict[str, dict] = {}
+        self._cycle_profiles: dict[str, tuple | None] = {}
 
     @staticmethod
     def available(state):
@@ -149,7 +162,8 @@ class Executor:
         remaining = (max(0, self.config.off_settle_seconds - (now - self.all_off_since))
                      if self.phase == "settling" and self.all_off_since is not None else None)
         return {"phase": self.phase, "waiting_devices": self.waiting_devices,
-                "settle_remaining_seconds": remaining, "devices": devices}
+                "settle_remaining_seconds": remaining, "devices": devices,
+                "cycle_holds": {entity: dict(hold) for entity, hold in self.cycle_holds.items()}}
 
     def _recovery_off(self, entity, states, now):
         command = ("set_hvac_mode", (("hvac_mode", "off"),))
@@ -246,6 +260,145 @@ class Executor:
         except (KeyError, ValueError, TypeError):
             raise ControlFault(f"Missing/invalid climate temperature range: {entity}") from None
 
+    def _observe_head_cycles(self, states, now):
+        """Timers follow acknowledged head modes, never requested activations."""
+        for entity, cycle in self.head_cycles.items():
+            observed = states.get(entity, {})
+            if not self.ready(observed) or entity in self.recoveries:
+                self.head_cycles[entity] = HeadCycle()
+                continue
+            pending = self.pending.get(entity)
+            if self.reports_off(observed) and pending is None:
+                if cycle.mode != "off":
+                    self.head_cycles[entity] = HeadCycle(mode="off", off_since=now)
+                continue
+            # A stale off report during activation, or an off still awaiting
+            # acknowledgement, cannot establish a new off interval.
+            cycle.off_since = None
+            if observed.get("state") != cycle.mode:
+                cycle.mode, cycle.run_since = None, None
+                cycle.target_f, cycle.target_native = None, None
+                cycle.profile_signature = None
+
+    def _acknowledge_head_run(self, entity, mode, target_f, native_target, now):
+        cycle = self.head_cycles.get(entity)
+        if cycle is None:
+            return
+        if cycle.mode != mode or cycle.run_since is None:
+            cycle.mode, cycle.run_since = mode, now
+        cycle.off_since = None
+        cycle.target_f, cycle.target_native = target_f, native_target
+        cycle.profile_signature = self._cycle_profiles.get(entity)
+
+    def _head_profile_signature(self, key, plan):
+        names = sorted(name for name, room in self.config.zones.items() if room.head == key)
+        if not names or any(name not in plan.room_targets for name in names):
+            return None
+        return tuple((name, tuple(plan.room_targets[name].get(field) for field in
+                                 ("low_f", "high_f", "target_f", "comfort_enabled")))
+                     for name in names)
+
+    def _can_retain_head(self, key, entity, plan, states):
+        cycle = self.head_cycles[entity]
+        observed = states.get(entity, {})
+        if (key in getattr(plan, "inhibited_heads", {})
+                or entity in self.pending or entity in self.recoveries
+                or entity in self.capability_blocks
+                or not self.ready(observed) or observed.get("state") != self.direction
+                or cycle.mode != self.direction or cycle.run_since is None
+                or cycle.target_f is None or cycle.profile_signature is None
+                or cycle.profile_signature != self._head_profile_signature(key, plan)):
+            return False
+        modes = set(observed.get("attributes", {}).get("hvac_modes") or ())
+        if not {"off", self.direction} <= modes:
+            return False
+        action = observed.get("attributes", {}).get("hvac_action")
+        if action == ("heating" if self.direction == "cool" else "cooling"):
+            return False
+        try:
+            target = float(observed.get("attributes", {}).get("temperature"))
+            if not math.isfinite(target) or abs(target - cycle.target_native) >= .05:
+                return False
+        except (TypeError, ValueError):
+            return False
+        names = [name for name, room in self.config.zones.items() if room.head == key]
+        comfort_enabled = False
+        for name in names:
+            reading, comfort = plan.rooms.get(name), plan.room_targets.get(name)
+            if not reading or not comfort:
+                return False
+            comfort_enabled = comfort_enabled or comfort.get("comfort_enabled") is True
+            try:
+                low, high = float(reading["low"]), float(reading["high"])
+                lower, upper = float(comfort["low_f"]), float(comfort["high_f"])
+                confirmed_low = float(reading.get("confirmed_low", reading.get("temperature", low)))
+                confirmed_high = float(reading.get("confirmed_high", reading.get("temperature", high)))
+                if not all(math.isfinite(value) for value in
+                           (low, high, lower, upper, confirmed_low, confirmed_high)):
+                    return False
+                if self.direction == "cool" and (confirmed_low <= lower or low <= self.config.low_f + .25):
+                    return False
+                if self.direction == "heat" and (confirmed_high >= upper or high >= self.config.high_f - .25):
+                    return False
+            except (KeyError, TypeError, ValueError):
+                return False
+        return bool(names) and comfort_enabled
+
+    def _retain_minimum_runs(self, plan, states, now):
+        minimum = self.config.head_minimum_run_seconds
+        if (minimum <= 0 or self.phase != "running" or self.direction not in ("heat", "cool")
+                or plan.mode not in ("off", self.direction)):
+            return
+        incompatible = any(self.available(states.get(entity, {}))
+                           and states[entity]["state"] not in ("off", self.direction)
+                           for entity in self.config.heads.values())
+        if incompatible:
+            return
+        for key, entity in self.config.heads.items():
+            cycle = self.head_cycles[entity]
+            if key in plan.head_targets_f or not self._can_retain_head(key, entity, plan, states):
+                continue
+            remaining = minimum - (now - cycle.run_since)
+            if remaining <= 0:
+                continue
+            plan.mode = self.direction
+            plan.head_targets_f[key] = cycle.target_f
+            self.cycle_holds[entity] = {
+                "kind": "minimum_run", "remaining_seconds": remaining,
+                "reason": "Finishing minimum heat-pump run",
+            }
+
+    def _head_off_guard(self, entity, states, now):
+        """Return True while this head must remain off; other heads can run."""
+        minimum = self.config.head_minimum_off_seconds
+        if minimum <= 0 or entity not in self.head_cycles:
+            return False
+        pending = self.pending.get(entity)
+        off_command = ("set_hvac_mode", (("hvac_mode", "off"),))
+        if pending and pending.command == off_command:
+            self.off(entity, states, now)
+            if entity in self.pending or entity in self.recoveries:
+                return True
+            self._observe_head_cycles(states, now)
+        # An activation already sent must keep its normal acknowledgement and
+        # timeout path. Do not turn its stale off report into a new idle timer.
+        if entity in self.pending:
+            return False
+        observed = states.get(entity, {})
+        if not self.ready(observed) or not self.reports_off(observed):
+            return False
+        self._observe_head_cycles(states, now)
+        since = self.head_cycles[entity].off_since
+        required = max(minimum, self.config.off_settle_seconds)
+        remaining = required if since is None else required - (now - since)
+        if remaining <= 0:
+            return False
+        self.cycle_holds[entity] = {
+            "kind": "minimum_off", "remaining_seconds": remaining,
+            "reason": "Waiting for minimum heat-pump off time",
+        }
+        return True
+
     def climate(self, entity, mode, target_f, states, now, heater=False):
         state = states.get(entity, {})
         if not self.available(state):
@@ -257,6 +410,8 @@ class Executor:
         if not self._supports(entity, mode, states):
             self.off(entity, states, now, preserve_capability=True)
             return
+        if not heater and self._head_off_guard(entity, states, now):
+            return
         target = self.target(entity, target_f, states, heater)
 
         def matches(observed):
@@ -265,9 +420,13 @@ class Executor:
             except (ValueError, TypeError):
                 return False
 
-        self._climate_ensure(entity, "set_temperature", {"hvac_mode": mode, "temperature": target}, matches, states, now)
+        acknowledged = self._climate_ensure(
+            entity, "set_temperature", {"hvac_mode": mode, "temperature": target}, matches, states, now)
+        if acknowledged:
+            self._acknowledge_head_run(entity, mode, target_f, target, now)
 
     def begin_stop(self, states, now):
+        self.cycle_holds.clear()
         self.phase, self.direction, self.all_off_since = "stopping", None, None
         self.stop_started = now
         for entity in self.config.heads.values():
@@ -376,6 +535,11 @@ class Executor:
             plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
 
     def step(self, plan: Plan, states: dict, now: float):
+        self.cycle_holds.clear()
+        self._observe_head_cycles(states, now)
+        self._retain_minimum_runs(plan, states, now)
+        self._cycle_profiles = {entity: self._head_profile_signature(key, plan)
+                                for key, entity in self.config.heads.items()}
         self._states = states
         self._wanted_modes = {entity: plan.mode if key in plan.head_targets_f else "off"
                               for key, entity in self.config.heads.items()}
@@ -392,7 +556,13 @@ class Executor:
             self._states = refreshed
             self._refresh_needed = False
             self.auxiliary(plan, refreshed, now)
+            self._observe_head_cycles(refreshed, now)
             self.shared(plan, refreshed, now)
+        self._observe_head_cycles(self._states, now)
+        for entity, hold in self.cycle_holds.items():
+            message = f"{entity}: {hold['reason']}; {math.ceil(hold['remaining_seconds'])}s remaining"
+            if message not in plan.reasons:
+                plan.reasons.append(message)
         for entity, percentage in plan.fans.items():
             self.fan(entity, percentage, plan, self._states, now)
         for entity, issue in self.device_issues.items():
@@ -452,6 +622,8 @@ class Executor:
             except Exception:
                 failures.append(entity)
         self.phase, self.direction = "new", None
+        self.head_cycles = {entity: HeadCycle() for entity in self.config.heads.values()}
+        self.cycle_holds.clear()
         self.pending.clear()
         self.fan_failures.clear()
         self.device_issues.clear()
