@@ -330,8 +330,12 @@ class Executor:
         requested_target = self.head_cycles[entity].target_native
         if requested_target is None:
             requested_target = previous.get("requested_target_temperature")
-        previous_command = dict(previous_pending.command[1]) if previous_pending else {}
-        if previous_pending and previous_pending.command[0] == "set_temperature":
+        command = previous_pending.command if previous_pending else None
+        recovery = self.recoveries.get(entity)
+        if (not command or command[0] != "set_temperature") and recovery and recovery.command:
+            command = recovery.command
+        previous_command = dict(command[1]) if command else {}
+        if command and command[0] == "set_temperature":
             requested_mode = previous_command.get("hvac_mode", requested_mode)
             requested_target = previous_command.get("temperature", requested_target)
         elif entity in self._acknowledged_head_modes:
@@ -344,6 +348,8 @@ class Executor:
                 kind, reason = "safety", f"Off requested: {inhibition}"
             elif entity in self.recoveries:
                 kind, reason = "recovery", f"Off requested to reconcile device state: {self.recoveries[entity].reason}"
+            elif entity in self.capability_blocks:
+                kind, reason = "capability", f"Off requested: {self.capability_blocks[entity]['reason']}"
             elif self._shared_stop_context:
                 kind, reason = self._shared_stop_context
             else:

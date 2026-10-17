@@ -137,3 +137,33 @@ class StopReasonTests(unittest.TestCase):
         details = self.executor.recovery_status(75)["devices"][self.guest]
         self.assertEqual(details["pending_command"],
                          {"service": "set_hvac_mode", "data": {"hvac_mode": "off"}})
+
+    def test_missing_requested_mode_is_recorded_as_capability_stop_not_no_demand(self):
+        self.start()
+        self.ha.data[self.guest]["attributes"]["hvac_modes"] = ["off", "heat"]
+        self.step(30)
+        reason = deepcopy(self.executor.head_stop_reasons[self.guest])
+        self.assertEqual(reason["kind"], "capability")
+        self.assertIn("Requested cool unavailable", reason["reason"])
+        self.assertIn("missing cool", reason["reason"])
+        self.assertEqual(reason["requested_mode"], "cool")
+        self.assertEqual(reason["observed_mode"], "cool")
+        self.assertEqual(self.ha.data[self.guest]["state"], "off")
+        self.step(45)
+        self.assertEqual(self.executor.head_stop_reasons[self.guest], reason)
+
+    def test_recovery_off_retries_preserve_original_mode_and_target_as_a_pair(self):
+        self.start()
+        self.assertEqual(self.executor._acknowledged_head_modes[self.guest], "cool")
+        self.ha.data[self.guest]["state"] = "heat"
+        self.ha.data[self.guest]["attributes"]["temperature"] = 79
+        self.ha.ignore.add(self.guest)
+        self.executor.climate(self.guest, "heat", 80, self.ha.states(), 30)
+        self.executor.climate(self.guest, "heat", 80, self.ha.states(), 75)
+        self.assertIn(self.guest, self.executor.recoveries)
+        for now in (90, 105):
+            self.executor.off(self.guest, self.ha.states(), now)
+            reason = self.executor.head_stop_reasons[self.guest]
+            self.assertEqual(reason["requested_mode"], "heat")
+            self.assertEqual(reason["requested_target_temperature"], 80)
+            self.assertEqual(reason["observed_mode"], "heat")
