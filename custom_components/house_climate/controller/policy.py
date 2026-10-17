@@ -93,18 +93,21 @@ class Policy:
         low, high, target = band
         drift = reading.slope_f_per_minute * self.config.forecast_minutes
         future_low, future_high = reading.confirmed_low + drift, reading.confirmed_high + drift
+        # Comfort follows the fused room estimate. Persistent probe extremes
+        # remain independent evidence for system-limit protection below.
+        temperature, future_temperature = reading.temperature, reading.temperature + drift
         heat_edge, cool_edge = max(low, LOW + 1), min(high, HIGH - 1)
         heat_stop = target if low > LOW else LOW + 1.5
         cool_stop = target if high < HIGH else HIGH - 1.5
         heat = self.calls.get((name, "heat"), False)
         cool = self.calls.get((name, "cool"), False)
-        heat = (reading.confirmed_low < heat_stop or future_low < LOW + 1) if heat else (reading.confirmed_low < heat_edge or future_low < LOW + 1)
-        cool = (reading.confirmed_high > cool_stop or future_high > HIGH - 1) if cool else (reading.confirmed_high > cool_edge or future_high > HIGH - 1)
+        heat = (temperature < heat_stop or future_low < LOW + 1) if heat else (temperature < heat_edge or future_low < LOW + 1)
+        cool = (temperature > cool_stop or future_high > HIGH - 1) if cool else (temperature > cool_edge or future_high > HIGH - 1)
         self.calls[name, "heat"], self.calls[name, "cool"] = heat, cool
         output = {}
         for mode, active, amount, violation, guard in (
-            ("heat", heat, heat_stop - min(reading.confirmed_low, future_low), LOW - reading.confirmed_low, LOW + 1 - future_low),
-            ("cool", cool, max(reading.confirmed_high, future_high) - cool_stop, reading.confirmed_high - HIGH, future_high - (HIGH - 1)),
+            ("heat", heat, heat_stop - min(temperature, future_temperature), LOW - reading.confirmed_low, LOW + 1 - future_low),
+            ("cool", cool, max(temperature, future_temperature) - cool_stop, reading.confirmed_high - HIGH, future_high - (HIGH - 1)),
         ):
             amount = max(.05, amount) if active else 0
             output[mode] = {
