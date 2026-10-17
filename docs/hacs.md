@@ -113,4 +113,6 @@ A temporary disconnect is handled per device. Healthy heads can continue in the 
 
 With live control enabled, a heat-pump recovery problem persisting for two minutes can make House Climate reload the HA integration that owns that head. If several heads share the entry, all of them can briefly disappear together. Attempts use a per-integration cooldown and stop after three attempts in one continuous incident. No extra automation is needed. Missing Heat on a valid Off/Cool head produces a capability warning when needed, rather than a reload loop.
 
+Automatic recovery defers a shared-integration reload while another healthy head on that integration is heating or cooling. Local retries continue for the failing head.
+
 Each configured head also has a **Reload integration** button on the House Climate device. It reloads the HA entry that owns that head, including any other heads on the same entry. This explicit action also works while control is disabled or previewing, and can refresh stale capabilities without waiting for automatic recovery. It does not enable House Climate or change its safety checks.

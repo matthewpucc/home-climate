@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .config import Config
 from .ha import HAError
@@ -32,6 +33,7 @@ class ClimateRecovery:
     reason: str
     off_receipt: bool = False
     last_attempt: float | None = None
+    command: tuple | None = None
 
 
 @dataclass
@@ -73,6 +75,12 @@ class Executor:
         self.head_cycles = {entity: HeadCycle() for entity in config.heads.values()}
         self.cycle_holds: dict[str, dict] = {}
         self._cycle_profiles: dict[str, tuple | None] = {}
+        self.head_stop_reasons: dict[str, dict] = {}
+        self._observed_head_modes: dict[str, str | None] = {}
+        self._acknowledged_head_modes: dict[str, str] = {}
+        self._off_requested_since_activation: set[str] = set()
+        self._diagnostic_plan: Plan | None = None
+        self._shared_stop_context: tuple[str, str] | None = None
 
     @staticmethod
     def available(state):
@@ -109,11 +117,13 @@ class Executor:
             return True
         if not force and pending and pending.command == command:
             if now - pending.since >= self.config.command_timeout_seconds:
-                raise CommandTimeout(f"Command acknowledgement timed out: {entity}")
+                raise CommandTimeout(self._command_timeout_message(entity, service, data, observed))
             return False
         # A transport exception may occur after dispatch. Preserve the command
         # before calling HA so a later off supersedes the uncertain activation.
         self.pending[entity] = Pending(command, now, self.marker(observed), fresh)
+        if service == "set_hvac_mode" and data.get("hvac_mode") == "off":
+            self._record_controller_head_stop(entity, states, previous_pending=pending)
         self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
         self.pending[entity].receipt = True
         return False
@@ -138,7 +148,7 @@ class Executor:
             is_off = bool(pending and pending.command == ("set_hvac_mode", (("hvac_mode", "off"),)))
             recovery = ClimateRecovery(
                 baseline, reason, receipt or bool(is_off and pending.receipt),
-                pending.since if is_off else None)
+                pending.since if is_off else None, pending.command if pending else None)
             self.recoveries[entity] = recovery
         self._sync_issue(entity)
 
@@ -158,13 +168,19 @@ class Executor:
                 "required_mode": self._wanted_modes.get(entity),
                 "kind": "recovery" if entity in self.recoveries else "capability",
             }
+            pending = self.pending.get(entity)
+            recovery = self.recoveries.get(entity)
+            command = recovery.command if recovery and recovery.command else pending.command if pending else None
+            if command:
+                devices[entity]["pending_command"] = {"service": command[0], "data": dict(command[1])}
             if block:
                 devices[entity]["missing_modes"] = block["missing_modes"]
         remaining = (max(0, self.config.off_settle_seconds - (now - self.all_off_since))
                      if self.phase == "settling" and self.all_off_since is not None else None)
         return {"phase": self.phase, "waiting_devices": self.waiting_devices,
                 "settle_remaining_seconds": remaining, "devices": devices,
-                "cycle_holds": {entity: dict(hold) for entity, hold in self.cycle_holds.items()}}
+                "cycle_holds": {entity: dict(hold) for entity, hold in self.cycle_holds.items()},
+                "head_stop_reasons": {entity: dict(reason) for entity, reason in self.head_stop_reasons.items()}}
 
     def _recovery_off(self, entity, states, now):
         command = ("set_hvac_mode", (("hvac_mode", "off"),))
@@ -256,6 +272,108 @@ class Executor:
         except (KeyError, ValueError, TypeError, OverflowError):
             raise ControlFault(f"Missing/invalid climate temperature range: {entity}") from None
 
+    def _command_timeout_message(self, entity, service, data, observed):
+        message = f"Command acknowledgement timed out: {entity}"
+        if not entity.startswith("climate."):
+            return message
+        attrs = observed.get("attributes", {})
+        wanted = self._finite_temperature(data.get("temperature"))
+        actual = self._finite_temperature(attrs.get("temperature"))
+        desired = f"{wanted:g}{self.unit}" if wanted is not None else "unchanged"
+        reported = f"{actual:g}{self.unit}" if actual is not None else "unknown"
+        message += (f"; requested service={service} mode={data.get('hvac_mode')} target={desired}"
+                    f"; reported mode={observed.get('state')} target={reported}")
+        stamp = observed.get("last_reported") or observed.get("last_updated")
+        if stamp:
+            message += f"; last report={stamp}"
+            try:
+                instant = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+                if instant.utcoffset() is not None:
+                    age = (datetime.now(timezone.utc) - instant).total_seconds()
+                    message += f" ({age:.0f}s ago)"
+            except (TypeError, ValueError, OverflowError):
+                pass
+        else:
+            message += "; last report=unknown"
+        return message
+
+    @staticmethod
+    def _finite_temperature(value):
+        try:
+            number = float(value)
+            return number if not isinstance(value, bool) and math.isfinite(number) else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _record_head_stop(self, entity, kind, reason, states, requested_mode, requested_target=None):
+        observed = states.get(entity, {})
+        attrs = observed.get("attributes", {})
+        reported = observed.get("last_reported") or observed.get("last_updated")
+        self.head_stop_reasons[entity] = {
+            "kind": kind, "reason": reason, "requested_mode": requested_mode,
+            "requested_target_temperature": self._finite_temperature(requested_target),
+            "observed_mode": observed.get("state"),
+            "observed_target_temperature": self._finite_temperature(attrs.get("temperature")),
+            "observed_current_temperature": self._finite_temperature(attrs.get("current_temperature")),
+            "temperature_unit": self.unit,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "reported_at": str(reported) if reported is not None else None,
+        }
+
+    def _record_controller_head_stop(self, entity, states, *, reason=None, kind=None, previous_pending=None):
+        if entity not in self.head_cycles:
+            return
+        plan = self._diagnostic_plan
+        key = next(key for key, candidate in self.config.heads.items() if candidate == entity)
+        requested_mode = plan.mode if plan and key in plan.head_targets_f else "off"
+        previous = self.head_stop_reasons.get(entity, {})
+        requested_target = self.head_cycles[entity].target_native
+        if requested_target is None:
+            requested_target = previous.get("requested_target_temperature")
+        command = previous_pending.command if previous_pending else None
+        recovery = self.recoveries.get(entity)
+        if (not command or command[0] != "set_temperature") and recovery and recovery.command:
+            command = recovery.command
+        previous_command = dict(command[1]) if command else {}
+        if command and command[0] == "set_temperature":
+            requested_mode = previous_command.get("hvac_mode", requested_mode)
+            requested_target = previous_command.get("temperature", requested_target)
+        elif entity in self._acknowledged_head_modes:
+            requested_mode = self._acknowledged_head_modes[entity]
+        elif previous.get("requested_mode") in ("heat", "cool"):
+            requested_mode = previous["requested_mode"]
+        if reason is None:
+            inhibition = plan.inhibited_heads.get(key) if plan else None
+            if inhibition:
+                kind, reason = "safety", f"Off requested: {inhibition}"
+            elif entity in self.recoveries:
+                kind, reason = "recovery", f"Off requested to reconcile device state: {self.recoveries[entity].reason}"
+            elif entity in self.capability_blocks:
+                kind, reason = "capability", f"Off requested: {self.capability_blocks[entity]['reason']}"
+            elif self._shared_stop_context:
+                kind, reason = self._shared_stop_context
+            else:
+                kind, reason = "no_demand", "Off requested: room no longer needs the shared heat-pump call"
+        self._off_requested_since_activation.add(entity)
+        self._record_head_stop(entity, kind or "controller", reason, states, requested_mode, requested_target)
+
+    def _observe_head_stops(self, plan, states):
+        """Retain unexplained off observations without attributing their cause."""
+        for key, entity in self.config.heads.items():
+            observed = states.get(entity, {})
+            mode = observed.get("state") if self.ready(observed) else None
+            previous = self._observed_head_modes.get(entity)
+            requested = plan.mode if key in plan.head_targets_f else "off"
+            if (previous in ("heat", "cool") and self.reports_off(observed)
+                    and requested == previous
+                    and self._acknowledged_head_modes.get(entity) == previous
+                    and entity not in self.pending and entity not in self.recoveries
+                    and entity not in self._off_requested_since_activation):
+                self._record_head_stop(entity, "reported_off",
+                    f"Head reported off while {previous} was still requested",
+                    states, requested, self.head_cycles[entity].target_native)
+            self._observed_head_modes[entity] = mode
+
     def _observe_head_cycles(self, states, now):
         """Timers follow acknowledged head modes, never requested activations."""
         for entity, cycle in self.head_cycles.items():
@@ -282,6 +400,8 @@ class Executor:
             return
         if cycle.mode != mode or cycle.run_since is None:
             cycle.mode, cycle.run_since = mode, now
+            self._off_requested_since_activation.discard(entity)
+        self._acknowledged_head_modes[entity] = mode
         cycle.off_since = None
         cycle.target_f, cycle.call_target_f, cycle.target_native = target_f, call_target, native_value
         cycle.profile_signature = self._cycle_profiles.get(entity)
@@ -433,7 +553,8 @@ class Executor:
             comfort = target_f if comfort_target_f is None else comfort_target_f
             self._acknowledge_head_run(entity, mode, comfort, to_f(target, self.unit), target, now)
 
-    def begin_stop(self, states, now):
+    def begin_stop(self, states, now, *, reason="Shared-system all-off reconciliation", kind="reconciliation"):
+        self._shared_stop_context = (kind, reason)
         self.cycle_holds.clear()
         self.phase, self.direction, self.all_off_since = "stopping", None, None
         self.stop_started = now
@@ -496,7 +617,11 @@ class Executor:
                 rung = max(1, round(percentage / step))
                 target = min(100, max(1, math.floor(rung * step + 1e-7)))
                 tolerance = min(1.0, step / 2)
-                service, data = "set_percentage", {"percentage": target}
+                # Dyson integrations treat set_percentage as speed-only.
+                # Request power explicitly when supported; speed-only fans
+                # retain their set_percentage activation contract.
+                service = "turn_on" if attrs["supported_features"] & 32 else "set_percentage"
+                data = {"percentage": target}
 
                 def matches(observed):
                     value = observed.get("attributes", {}).get("percentage")
@@ -532,7 +657,7 @@ class Executor:
             delay = min(300, max(15, self.config.poll_seconds, self.config.command_timeout_seconds)
                         * 2 ** min(attempts - 1, 5))
             observed = states.get(entity, {})
-            requested = dict(command[1])["percentage"] if command and command[0] == "set_percentage" else percentage
+            requested = dict(command[1]).get("percentage", percentage) if command else percentage
             target = f"{requested}%" if percentage else "off"
             reason = str(exc).removesuffix(f": {entity}")
             message = (f"{reason}; requested {target}, reported {observed.get('state')} "
@@ -543,6 +668,8 @@ class Executor:
             plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
 
     def step(self, plan: Plan, states: dict, now: float):
+        self._diagnostic_plan = plan
+        self._observe_head_stops(plan, states)
         self.cycle_holds.clear()
         self._observe_head_cycles(states, now)
         self._retain_minimum_runs(plan, states, now)
@@ -564,12 +691,16 @@ class Executor:
         if self._refresh_needed:
             refreshed = self.ha.states()
             self._states = refreshed
+            self._observe_head_stops(plan, refreshed)
             self._refresh_needed = False
             self.auxiliary(plan, refreshed, now)
             self._observe_head_cycles(refreshed, now)
             self.shared(plan, refreshed, now)
         self._observe_head_cycles(self._states, now)
         for entity, hold in self.cycle_holds.items():
+            if entity in self.head_stop_reasons:
+                hold['stop_reason'] = self.head_stop_reasons[entity]['reason']
+                hold['stop_kind'] = self.head_stop_reasons[entity]['kind']
             message = f"{entity}: {hold['reason']}; {math.ceil(hold['remaining_seconds'])}s remaining"
             if message not in plan.reasons:
                 plan.reasons.append(message)
@@ -582,14 +713,20 @@ class Executor:
 
     def shared(self, plan: Plan, states: dict, now: float):
         if self.phase == "new":
-            self.begin_stop(states, now)
+            self.begin_stop(states, now, reason="Startup all-off reconciliation", kind="startup")
             return
         if self.phase == "running":
             incompatible = any(self.available(states.get(entity, {}))
                                and states[entity]["state"] not in ("off", self.direction)
                                for entity in self.config.heads.values())
             if plan.mode != self.direction or incompatible:
-                self.begin_stop(states, now)
+                if incompatible:
+                    kind, reason = "reconciliation", "Shared system reported a conflicting HVAC mode"
+                elif plan.mode == "off":
+                    kind, reason = "no_demand", "Off requested: no eligible shared-system demand"
+                else:
+                    kind, reason = "changeover", f"Shared direction changing from {self.direction} to {plan.mode}"
+                self.begin_stop(states, now, reason=reason, kind=kind)
                 return
         if self.phase == "stopping":
             for entity in self.config.heads.values():
@@ -605,11 +742,12 @@ class Executor:
         if self.phase == "settling":
             if any(not self.ready(states.get(entity, {})) or not self.reports_off(states.get(entity, {}))
                    for entity in self.config.heads.values()):
-                self.begin_stop(states, now)
+                self.begin_stop(states, now, reason="Shared head changed state during off settling")
                 return
             if plan.mode == "off" or now - self.all_off_since < self.config.off_settle_seconds:
                 return
             self.phase, self.direction = "running", plan.mode
+            self._shared_stop_context = None
         if self.phase == "running":
             # Off commands first; every active head is then set to the same direction.
             for key, entity in self.config.heads.items():
@@ -629,7 +767,7 @@ class Executor:
                 plan.head_call_targets_f[key] = call
                 self.climate(entity, plan.mode, call, states, now, comfort_target_f=target)
 
-    def shutdown(self, states=None) -> list[str]:
+    def shutdown(self, states=None, *, reason="Controller shutdown") -> list[str]:
         """Best effort across every device even when one service call fails."""
         failures = []
         snapshot = self._states if states is None else states
@@ -637,6 +775,8 @@ class Executor:
         for entity in [*([self.config.heater_entity] if self.config.heater_entity else []), *self.config.heads.values(), *self.config.fans.values()]:
             try:
                 if entity.startswith("climate."):
+                    self._record_controller_head_stop(entity, snapshot, reason=reason, kind="shutdown",
+                                                      previous_pending=old_pending.get(entity))
                     self.ha.service("climate", "set_hvac_mode", entity_id=entity, hvac_mode="off")
                 else:
                     self.ha.service("fan", "turn_off", entity_id=entity)

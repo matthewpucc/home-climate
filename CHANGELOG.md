@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.4
+
+- Defer automatic reloads of a shared device integration while another healthy head on that integration is heating or cooling. Keep local recovery retries running without consuming a reload attempt.
+- Power circulation fans on explicitly when requesting a positive percentage, fixing Dyson devices that stored a speed while remaining off.
+- Show per-head run/off holds and countdowns in Recovery status, Plan summary, and room plans instead of reporting Ready during a blocked activation.
+- Retain each head's latest stop cause. Climate acknowledgement errors now identify the exact requested service, mode, and setpoint plus reported state, target, and report age; recovery details preserve the original uncertain command.
+- Preserve strict climate acknowledgements, off confirmation, shared changeover barriers, and independent safety checks.
+
 ## 0.6.3
 
 - Add a per-probe “reports only on change” setting so an unchanged but valid reading is not rejected for its age. Periodic probes retain normal age checks.

@@ -150,7 +150,7 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(fan, saved["devices"])
         self.assertNotIn(fan, saved.get("pending_fans", []))
         before = len([c for c in self.calls if c[1] == "turn_off" and c[2]["entity_id"] == fan])
-        await asyncio.to_thread(runtime.api.service, "fan", "set_percentage",
+        await asyncio.to_thread(runtime.api.service, "fan", "turn_on",
                                 entity_id=fan, percentage=60)
         await runtime.controls.async_check()
         self.assertEqual(len([c for c in self.calls if c[1] == "turn_off"
