@@ -1,5 +1,7 @@
 """One failed head must not reload a bridge under healthy room calls."""
+import asyncio
 import unittest
+from unittest.mock import patch
 
 from homeassistant.config_entries import ConfigEntryState
 
@@ -96,15 +98,28 @@ class ReloadIsolationTests(unittest.IsolatedAsyncioTestCase):
     async def test_head_starting_after_task_queued_defers_without_charging_attempt(self):
         self.primary_state("off")
         status = self.status(self.head)
-        self.manager.observe(status)
-        self.clock.return_value = 120
-        self.manager.observe(status)
-        task = self.manager._task
-        self.assertIsNotNone(task)
-        # No await occurs between queueing and this state change, so the task
-        # must recheck current HA states when it begins dispatch.
-        self.primary_state("cool")
-        await task
+        entered, resume = asyncio.Event(), asyncio.Event()
+        dispatch = self.manager._async_reload
+
+        async def queued_reload(*args, **kwargs):
+            entered.set()
+            await resume.wait()
+            return await dispatch(*args, **kwargs)
+
+        # HA starts background tasks eagerly. Pause before the real dispatch
+        # implementation so this specifically tests state changing after the
+        # observe guard, rather than after an already-completed reload.
+        with patch.object(self.manager, "_async_reload", new=queued_reload):
+            self.manager.observe(status)
+            self.clock.return_value = 120
+            self.manager.observe(status)
+            task = self.manager._task
+            self.assertIsNotNone(task)
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertFalse(task.done())
+            self.primary_state("cool")
+            resume.set()
+            await task
         self.assert_deferred_without_budget()
         self.assertIsNone(self.manager._active_entry)
         self.primary_state("off")
