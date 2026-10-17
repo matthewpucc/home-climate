@@ -6,6 +6,7 @@
 - Add independent heating and cooling call offsets, defaulting to 5°F, to keep a head's onboard thermostat from ending a room call prematurely. Active calls account for the head's reported temperature and respect device limits and steps; zero restores direct room targets.
 - Keep call setpoints stable between ordinary 90-second decisions and retain the last acknowledged setpoint during minimum-run holds.
 - Stop biased calls promptly at the opposite comfort boundary, missing readings, or system limits. Safety stops remain latched until the next comfort decision.
+- Use fused room temperatures for ordinary comfort demand and run holds, preventing a persistently biased probe from creating competing comfort calls. Confirmed extremes still drive temperature-limit protection.
 - Show room goals and head call setpoints separately in room plans. Configure call offsets in System settings using Home Assistant's temperature units.
 
 ## 0.6.1

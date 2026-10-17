@@ -94,8 +94,8 @@ class DecisionCadence:
                 for name in names:
                     target = plan.room_targets.get(name, {})
                     boundary = target.get("low_f" if plan.mode == "cool" else "high_f")
-                    confirmed = rooms[name].confirmed_low if plan.mode == "cool" else rooms[name].confirmed_high
-                    if boundary is not None and (confirmed <= boundary if plan.mode == "cool" else confirmed >= boundary):
+                    temperature = rooms[name].temperature
+                    if boundary is not None and (temperature <= boundary if plan.mode == "cool" else temperature >= boundary):
                         self._inhibit(head, f"{plan.mode} stopped at opposite room comfort limit")
                         break
             modes = states.get(entity, {}).get("attributes", {}).get("hvac_modes") or []

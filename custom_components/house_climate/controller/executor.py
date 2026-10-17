@@ -327,14 +327,13 @@ class Executor:
             try:
                 low, high = float(reading["low"]), float(reading["high"])
                 lower, upper = float(comfort["low_f"]), float(comfort["high_f"])
-                confirmed_low = float(reading.get("confirmed_low", reading.get("temperature", low)))
-                confirmed_high = float(reading.get("confirmed_high", reading.get("temperature", high)))
+                temperature = float(reading["temperature"])
                 if not all(math.isfinite(value) for value in
-                           (low, high, lower, upper, confirmed_low, confirmed_high)):
+                           (low, high, lower, upper, temperature)):
                     return False
-                if self.direction == "cool" and (confirmed_low <= lower or low <= self.config.low_f + .25):
+                if self.direction == "cool" and (temperature <= lower or low <= self.config.low_f + .25):
                     return False
-                if self.direction == "heat" and (confirmed_high >= upper or high >= self.config.high_f - .25):
+                if self.direction == "heat" and (temperature >= upper or high >= self.config.high_f - .25):
                     return False
             except (KeyError, TypeError, ValueError):
                 return False

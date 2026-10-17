@@ -10,7 +10,7 @@ House Climate runs continuously inside HA as a custom integration. Configure roo
 
 - Any number of named rooms and heads on **one shared heat/cool system**.
 - Multiple rooms sharing one head, without averaging away a hot or cold area.
-- Multiple temperature sources, with freshness checks, median fusion, and persistent extreme detection.
+- Multiple temperature sources, with freshness checks, median comfort control, and persistent extreme detection for system limits.
 - Per-room targets, priorities, daily schedules, and optional HA area assignments.
 - Dashboard thermostat cards for comfort ranges, Desired temperature controls, and temporary holds that resume the schedule automatically.
 - Cooling, conditioning, scheduled, continuous, and inter-room airflow fan rules.

@@ -30,7 +30,7 @@ TOML stores these as `head_heat_call_offset_f` and `head_cool_call_offset_f` in 
 
 ## Sensors
 
-Use independent probes where possible. The HA editor assigns a common source identifier to entities from the same registered device, so aliases are not counted twice. Existing imported probe source IDs, unit overrides, attributes, and offsets are preserved when reselecting them.
+Use independent probes where possible. Ordinary comfort control uses their median; confirmed extremes still protect system limits. Prefer probes that measure occupied room air, and omit or calibrate consistently biased readings. The HA editor assigns a common source identifier to entities from the same registered device, so aliases are not counted twice. Existing imported probe source IDs, unit overrides, attributes, and offsets are preserved when reselecting them.
 
 TOML probes can specify `source`, `attribute`, `unit`, and `offset_f`. Share a source ID between aliases of the same physical probe. Explicit units are particularly useful for attribute-based probes used by the auxiliary watchdog. Omit unreliable sensors, especially the auxiliary heater's internal temperature.
 
