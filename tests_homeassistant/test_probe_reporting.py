@@ -1,9 +1,12 @@
 """On-change probe readings stay usable without bypassing native heat safeguards."""
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import unittest
 
 from custom_components.house_climate.controls import NativeControls
+from custom_components.house_climate.comfort import RoomComfort
 from custom_components.house_climate.controller.config import Config, Probe, Settings
 from custom_components.house_climate.controller.policy import Policy
 from tests_homeassistant import test_native as native_fixtures
@@ -126,6 +129,41 @@ class ProbeReportingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fallback.rooms["guest"]["temperature"], 68)
         self.assertEqual(fallback.rooms["guest"]["sources"], 1)
         self.assertTrue(any(external.entity_id in warning for warning in fallback.warnings))
+
+    async def test_default_reporting_policy_preserves_pre_upgrade_comfort_hold(self):
+        cfg = Config.from_dict(self.cfg.to_dict())
+        room_id = "guest"
+        room = cfg.zones[room_id]
+        old_room = asdict(room)
+        for probe in old_room["probes"]:
+            probe.pop("report_on_change", None)
+        old_payload = {
+            "room": old_room, "head": cfg.heads[room.head],
+            "timezone": self.hass.config.time_zone,
+            "limits": [cfg.low_f, cfg.high_f],
+            "auxiliary_cutoff": cfg.heater_cutoff_f if room_id == cfg.auxiliary_room else None,
+        }
+        fingerprint = hashlib.sha256(json.dumps(
+            old_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        manager = RoomComfort(self.hass, cfg, "probe_saved_hold", lambda: None)
+        try:
+            self.assertEqual(manager._fingerprint(room_id), fingerprint)
+            await manager.store.async_save({"rooms": {room_id: {
+                "low_f": 73, "high_f": 74, "target_f": 73.5,
+                "expires_at": None, "fingerprint": fingerprint,
+            }}})
+            await manager.async_load()
+            restored = manager.effective(room_id)
+            self.assertTrue(restored["hold"])
+            self.assertEqual(restored["target_f"], 73.5)
+            self.assertEqual((restored["low_f"], restored["high_f"]), (73, 74))
+
+            changed_room = replace(room, probes=(
+                replace(room.probes[0], report_on_change=True), *room.probes[1:]))
+            changed = replace(cfg, zones={**cfg.zones, room_id: changed_room})
+            self.assertNotEqual(manager._fingerprint(room_id, changed), fingerprint)
+        finally:
+            await manager.async_close()
 
 
 if __name__ == "__main__":
