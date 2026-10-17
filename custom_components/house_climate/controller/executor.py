@@ -611,7 +611,9 @@ class Executor:
                 rung = max(1, round(percentage / step))
                 target = min(100, max(1, math.floor(rung * step + 1e-7)))
                 tolerance = min(1.0, step / 2)
-                service, data = "set_percentage", {"percentage": target}
+                # Dyson integrations treat set_percentage as speed-only.
+                # A stable combined command also requests power explicitly.
+                service, data = "turn_on", {"percentage": target}
 
                 def matches(observed):
                     value = observed.get("attributes", {}).get("percentage")
@@ -647,7 +649,7 @@ class Executor:
             delay = min(300, max(15, self.config.poll_seconds, self.config.command_timeout_seconds)
                         * 2 ** min(attempts - 1, 5))
             observed = states.get(entity, {})
-            requested = dict(command[1])["percentage"] if command and command[0] == "set_percentage" else percentage
+            requested = dict(command[1])["percentage"] if command and command[0] == "turn_on" else percentage
             target = f"{requested}%" if percentage else "off"
             reason = str(exc).removesuffix(f": {entity}")
             message = (f"{reason}; requested {target}, reported {observed.get('state')} "
