@@ -47,7 +47,8 @@ class CallTargetTests(unittest.IsolatedAsyncioTestCase):
         await self.until(lambda: (
             runtime.status.get("event") == "live"
             and self.hass.states.get(head).state == "cool"
-            and "guest" in runtime.status.get("head_call_targets_f", {})))
+            and "guest" in runtime.status.get("head_call_targets_f", {})
+            and head not in runtime.status.get("pending_head_commands", {})))
         entry = SimpleNamespace(entry_id="biased_calls", runtime_data=runtime)
         return runtime, switch, entry
 
