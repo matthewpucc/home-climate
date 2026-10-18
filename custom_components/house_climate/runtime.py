@@ -164,6 +164,10 @@ class ControllerRuntime:
         self.last_fault = {}
         self._controls_ready = None
         self._remove_climate_listener = None
+        self._logged_fault = None
+        self._logged_stop = None
+        self._logged_stop_failures = None
+        self._logged_unload_blockers = None
         self.recovery = RecoveryManager(hass, self)
 
     async def async_setup_controls(self, entry_id):
@@ -267,9 +271,34 @@ class ControllerRuntime:
         self.recovery.observe(self.status)
         self.status["integration_recovery"] = self.recovery.diagnostics
         if event in ("fault", "worker_failed"):
-            _LOGGER.error("Controller %s: %s", event, data.get("error"))
+            incident = (event, data.get("error"))
+            if incident != self._logged_fault:
+                # An active-loop fault is immediately followed by a reasoned
+                # all-device stop request. Log that complete context once.
+                log = _LOGGER.debug if data.get("shutdown_requested") else _LOGGER.error
+                log("Controller %s: %s", event, data.get("error"))
+                self._logged_fault = incident
+        elif event == "stopping" and data.get("stop_scope") == "all_configured_devices":
+            entities = data.get("stop_entities") or []
+            incident = (data.get("stop_cause"), data.get("reason"), tuple(entities))
+            if incident != self._logged_stop:
+                log = _LOGGER.error if data.get("forced_stop") else _LOGGER.info
+                log("Controller-wide Off requested: %s; cause=%s; all %d configured devices: %s",
+                    data.get("reason"), data.get("stop_cause"), len(entities), ", ".join(entities))
+                self._logged_stop = incident
+        elif event == "stopped" and data.get("failures"):
+            incident = (data.get("reason"), tuple(data["failures"]))
+            if incident != self._logged_stop_failures:
+                _LOGGER.warning(
+                    "Controller shutdown incomplete: %s; cause: %s",
+                    ", ".join(data["failures"]), data.get("reason", "Controller shutdown"))
+                self._logged_stop_failures = incident
         else:
             _LOGGER.debug("Controller %s: %s", event, data)
+        if event in ("live", "shadow"):
+            self._logged_fault = None
+        if event == "live":
+            self._logged_stop = self._logged_stop_failures = None
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
 
     def _run(self):
@@ -288,11 +317,40 @@ class ControllerRuntime:
     @callback
     def _async_finished(self, error):
         if self.controls and error:
-            self.controls.pause("Control paused: controller worker stopped")
+            self.controls.pause(f"Control paused: controller worker stopped: {error}")
         self._async_report("worker_failed" if error else "stopped",
-                           {"error": error} if error else {})
+                           {"error": error} if error else {"reason": "Controller worker exited"})
         if not self.finished.done():
             self.finished.set_result(None)
+
+    def _warn_unload_deferred(self, *, worker_pending=False, recovery_pending=False):
+        # Diagnostic collection/delivery cannot change cleanup or its outcome.
+        try:
+            controls = self.controls
+            owned = tuple(controls.owned) if controls else ()
+            waiting = []
+            for entity in owned:
+                if not entity.startswith("climate."):
+                    continue
+                state = self.hass.states.get(entity)
+                if (state is None or state.state != "off"
+                        or state.attributes.get("hvac_action") in ("heating", "cooling")):
+                    waiting.append(entity)
+            inflight = controls.inflight if controls else 0
+            problem = controls.problem if controls else None
+            incident = (tuple(waiting), owned, inflight, worker_pending, recovery_pending, problem)
+            if incident == self._logged_unload_blockers:
+                return
+            self._logged_unload_blockers = incident
+            _LOGGER.warning(
+                "Controller unload deferred; waiting for Off acknowledgement: %s; "
+                "in-flight activations=%d; owning integration reload pending=%s; "
+                "worker still stopping=%s; retained ownership: %s; shutdown issue: %s",
+                ", ".join(waiting) or "none", inflight, recovery_pending, worker_pending,
+                ", ".join(owned) or "none", problem or "none",
+            )
+        except Exception:
+            pass
 
     async def async_stop(self, _event=None):
         self.stop_event.set()
@@ -309,11 +367,16 @@ class ControllerRuntime:
                 await asyncio.wait_for(asyncio.shield(self.finished), timeout=45)
             except TimeoutError:
                 # Keep the runtime registered; a reload must never start a second worker.
+                self._warn_unload_deferred(worker_pending=True, recovery_pending=not recovery_closed)
                 self._async_report("worker_failed", {"error": "Controller shutdown timed out"})
                 return False
             await self.hass.async_add_executor_job(self.thread.join)
         controls_closed = await self.controls.async_close() if self.controls else True
         closed = controls_closed and recovery_closed
+        if closed:
+            self._logged_unload_blockers = None
+        else:
+            self._warn_unload_deferred(recovery_pending=not recovery_closed)
         if closed and self._remove_climate_listener:
             self._remove_climate_listener()
             self._remove_climate_listener = None

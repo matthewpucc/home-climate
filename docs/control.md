@@ -76,6 +76,16 @@ The native integration serializes its worker lifecycle and refuses a second load
 
 The native watchdog pauses control and stops all owned devices when the worker heartbeat expires after 120 seconds; probe cutoffs independently stop auxiliary heating. The standalone package watches only the auxiliary heater, so shared heads can retain setpoints if its process stops. While HA or the host is down, neither watchdog can run. Native ownership recovery resumes after HA starts.
 
+## Stop logs
+
+Home Assistant's **Settings → System → Logs** records controller-wide failures separately from individual device recovery. A worker fault logs an ERROR explaining why Off was requested for every configured climate device and circulation fan. Heartbeat expiry logs a WARNING with the heartbeat age, the 120-second lease limit, and every owned device included in the stop request. Worker pauses and shutdown-storage failures also identify the cause and owned-device scope.
+
+Routine startup reconciliation, explicit disable, saved-ownership cleanup, and normal shutdown use INFO. Enable INFO logging for `custom_components.house_climate` to include these lifecycle messages. Identical stop causes are logged once per incident rather than on every retry; a later control session can log the same cause again. Local climate/fan failures and auxiliary probe cutoffs do not imply a controller-wide shutdown.
+
+When an unload/reload cannot finish, a deduplicated WARNING lists unconfirmed owned climate devices, in-flight activations, retained ownership, and any worker or integration-reload blocker. Pending circulation-fan cleanup alone does not block unload.
+
+These messages describe Off requests, not physical stop confirmation. A failed request names the affected device, while ownership and retries continue under the existing safety rules. The standalone/add-on engine emits structured `stopping` and `stopped` events with the reason, cause, configured-device scope, and any dispatch failures.
+
 ## Climate connectivity recovery
 
 An unavailable or unknown climate state is not an off acknowledgement. Missing capability metadata is treated as initialization in progress. Known capabilities are respected per device: an Off/Cool head can cool or stay off while other heads heat. Demand for an unavailable mode is excluded from arbitration and reported as a warning. Capability changes are used automatically.
