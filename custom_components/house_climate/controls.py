@@ -14,11 +14,13 @@ from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 from homeassistant.helpers.storage import Store
 
-from .controller.ha import HAError
+from .controller.ha import HAActivationDeferred, HAError
 from .controller.ha_package import watchdog_signature
 from .controller.sensors import probe_value
 
 _LOGGER = logging.getLogger(__name__)
+
+HEARTBEAT_LEASE_SECONDS = 120
 
 
 class NativeControls:
@@ -34,6 +36,7 @@ class NativeControls:
         self.heartbeat = 0.0
         self.heartbeat_monotonic = 0.0
         self.inflight = 0
+        self.ownership_generation = 0
         self.problem = None
         self._auxiliary_off_error = None
         self._stop_log_reason = None
@@ -91,6 +94,8 @@ class NativeControls:
             "enabled": self.enabled and not self.recovering and not self._claiming,
             "owned": bool(self.owned) and not self.recovering, "active": self.active,
             "heartbeat": self.heartbeat,
+            "heartbeat_monotonic": self.heartbeat_monotonic,
+            "generation": self.ownership_generation,
         }
         self.notify()
 
@@ -182,6 +187,7 @@ class NativeControls:
     def pause(self, reason=None):
         self._log_stop(logging.WARNING, reason or "Controller pause requested")
         self.enabled = False
+        self.ownership_generation += 1
         self.recovering = bool(self.owned)
         if reason:
             self.problem = reason
@@ -204,6 +210,8 @@ class NativeControls:
             self._shutdown_save_error = None
         elif self.owned:
             self._log_stop(logging.INFO, "Controller disabled")
+        if enabled != self.enabled:
+            self.ownership_generation += 1
         self.enabled = enabled
         if not enabled and self.owned:
             self.recovering = True
@@ -253,6 +261,7 @@ class NativeControls:
                                     self._publish()
                                     raise
                                 self.owned = devices
+                                self.ownership_generation += 1
                                 self.pending_fans = pending
                                 self.recovering = not self.enabled
                             self.heartbeat = datetime.now(timezone.utc).timestamp()
@@ -267,19 +276,34 @@ class NativeControls:
                 await self._clear_if_off()
                 self._schedule_check()
         elif domain == "input_datetime":
-            if not self.enabled or self.recovering or self._closing:
-                raise HAError("Control is disabled or still stopping")
-            self.heartbeat = datetime.now(timezone.utc).timestamp()
-            self.heartbeat_monotonic = time.monotonic()
-            self._publish()
+            self.confirm_heartbeat()
         # The old input_text is only a CLI diagnostic sink; native sensors expose it.
 
-    def check_activation(self, entity, data):
+    @callback
+    def confirm_heartbeat(self, *, generation=None):
+        """Renew only a still-valid ownership lease, on Home Assistant's loop."""
+        if generation is not None and generation != self.ownership_generation:
+            raise HAActivationDeferred("Heartbeat belongs to an earlier controller lease")
+        if (not self.active or not self.live or not self.enabled or not self.owned
+                or self.recovering or self._claiming or self._closing):
+            raise HAActivationDeferred("Controller is disabled or stopping; heartbeat ignored")
+        instant = time.monotonic()
+        age = instant - self.heartbeat_monotonic
+        if not 0 <= age <= HEARTBEAT_LEASE_SECONDS:
+            self.pause(f"Control paused: controller heartbeat expired (age {age:.1f}s; lease limit 120s)")
+            raise HAActivationDeferred("Controller heartbeat lease expired")
+        self.heartbeat = datetime.now(timezone.utc).timestamp()
+        self.heartbeat_monotonic = instant
+        self._publish()
+
+    def check_activation(self, entity, data, *, generation=None):
+        if generation is not None and generation != self.ownership_generation:
+            raise HAActivationDeferred("Command belongs to an earlier controller lease")
         if (not self.active or not self.live or not self.enabled or self.recovering
                 or self._claiming or self._closing
                 or entity not in self.owned):
             raise HAError("Controller is disabled or stopping; activation blocked")
-        if not 0 <= time.monotonic() - self.heartbeat_monotonic <= 120:
+        if not 0 <= time.monotonic() - self.heartbeat_monotonic <= HEARTBEAT_LEASE_SECONDS:
             raise HAError("Controller heartbeat expired; activation blocked")
         if (entity == self.config.heater_entity and data.get("hvac_mode") == "heat"
                 and not self.probes_safe(self._probe_states())):
@@ -303,6 +327,7 @@ class NativeControls:
                 # Persist the retry obligation before releasing critical ownership.
                 await self._save((), pending)
                 self.owned = ()
+                self.ownership_generation += 1
                 self.pending_fans = pending
                 self.recovering = False
                 if self.problem and self.problem.startswith(
@@ -370,7 +395,7 @@ class NativeControls:
             attempted = set()
             if self.owned:
                 heartbeat_age = time.monotonic() - self.heartbeat_monotonic
-                expired = not 0 <= heartbeat_age <= 120
+                expired = not 0 <= heartbeat_age <= HEARTBEAT_LEASE_SECONDS
                 if self.recovering or not self.enabled or expired:
                     if self.enabled and expired:
                         self._log_stop(
@@ -379,6 +404,7 @@ class NativeControls:
                             "lease limit 120s); disabling control",
                         )
                         self.enabled = False
+                        self.ownership_generation += 1
                         self.problem = "Control paused: controller heartbeat expired"
                     self.recovering = True
                     self._publish()

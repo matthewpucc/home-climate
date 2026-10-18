@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timezone
+from dataclasses import dataclass, replace
 import logging
 import threading
 import time
@@ -15,13 +16,31 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import SIGNAL_STATUS
 from .controller.__main__ import run_loop
-from .controller.ha import HAError
+from .controller.ha import HAActivationDeferred, HAError
 from .recovery import RecoveryManager
 
 _LOGGER = logging.getLogger(__name__)
 
 UNLOAD_ACK_TIMEOUT_SECONDS = 120
 SHUTDOWN_RECHECK_SECONDS = 15
+NATIVE_HEARTBEAT_DISPATCH_SECONDS = 5
+HEARTBEAT_WAIT_REASON = "Waiting for Home Assistant to confirm the controller heartbeat; new activations are deferred"
+
+
+@dataclass(frozen=True)
+class HeartbeatRequest:
+    token: int
+    generation: int
+    queued_at: float
+    deadline: float
+
+
+@dataclass(frozen=True)
+class HeartbeatState:
+    state: str = "idle"
+    request: HeartbeatRequest | None = None
+    blocked: bool = False
+    reason: str | None = None
 
 
 def controller_entity_ids(config):
@@ -51,8 +70,14 @@ class NativeAPI:
         self.live = live
         self.stop_event = stop_event
         self.ownership_entity = config.entity("heater_owned")
+        self.heartbeat_entity = config.entity("heartbeat", "input_datetime")
+        self.status_entity = config.entity("status", "input_text")
         self.entity_ids = controller_entity_ids(config)
         self.controls = None
+        self.heartbeat_notify = None
+        self._heartbeat_lock = threading.Lock()
+        self._heartbeat = HeartbeatState()
+        self._heartbeat_token = 0
 
     def request(self, path, body=None):
         if body is not None and not self.live:
@@ -61,16 +86,133 @@ class NativeAPI:
             raise RuntimeError("NativeAPI synchronous methods must run in the worker")
         if path == "states" and body is None:
             return self._read_states()
+        if self.controls is not None and body is not None:
+            if path == "services/input_text/set_value" and body.get("entity_id") == self.status_entity:
+                # Native sensors already receive the worker's report. This sink
+                # has no operation and must not queue a synchronous round trip.
+                return []
+            if (path == "services/input_datetime/set_datetime"
+                    and body.get("entity_id") == self.heartbeat_entity):
+                if self.stop_event.is_set():
+                    raise HAError("Controller is stopping; heartbeat ignored")
+                self._queue_heartbeat()
+                return []
+        activation = self._is_activation(path, body)
+        generation = None
+        if self.controls is not None and activation:
+            issue = self.heartbeat_issue
+            if issue:
+                raise HAActivationDeferred(issue)
+            generation = self.controls._snapshot["generation"]
         timeout = 2 if self.stop_event.is_set() else 10
         deadline = time.monotonic() + timeout
         future = asyncio.run_coroutine_threadsafe(
-            self._async_request(path, body, deadline), self.hass.loop
+            self._async_request(path, body, deadline, generation=generation), self.hass.loop
         )
         try:
             return future.result(timeout=timeout + 1)
         except FutureTimeout:
             future.cancel()
             raise HAError(f"Home Assistant native operation timed out: {path}") from None
+
+    @staticmethod
+    def _is_activation(path, body):
+        if body is None:
+            return False
+        pieces = path.split("/")
+        return (len(pieces) == 3 and pieces[0] == "services"
+                and pieces[1] in ("climate", "fan")
+                and not (pieces[2] == "turn_off"
+                         or (pieces[2] == "set_hvac_mode" and body.get("hvac_mode") == "off")
+                         or (pieces[2] == "set_percentage" and body.get("percentage") == 0)))
+
+    def _expire_heartbeat_locked(self, now):
+        state = self._heartbeat
+        if state.request and now >= state.request.deadline:
+            state = replace(state, state="overdue", blocked=True, reason=HEARTBEAT_WAIT_REASON)
+            self._heartbeat = state
+        return state
+
+    @property
+    def heartbeat_diagnostics(self):
+        instant = time.monotonic()
+        with self._heartbeat_lock:
+            state = self._expire_heartbeat_locked(instant)
+        controls = self.controls
+        snapshot = controls._snapshot if controls else {}
+        lease = snapshot.get("heartbeat_monotonic", 0)
+        remaining = max(0.0, 120 - (instant - lease)) if snapshot.get("owned") else None
+        return {
+            "state": state.state, "blocked": state.blocked, "reason": state.reason,
+            "pending_seconds": max(0.0, instant - state.request.queued_at) if state.request else None,
+            "lease_remaining_seconds": remaining,
+        }
+
+    @property
+    def heartbeat_issue(self):
+        state = self.heartbeat_diagnostics
+        return state["reason"] if state["blocked"] else None
+
+    def _queue_heartbeat(self):
+        """Coalesce worker pulses without granting or extending a lease here."""
+        controls = self.controls
+        generation = controls._snapshot["generation"]
+        instant = time.monotonic()
+        with self._heartbeat_lock:
+            state = self._expire_heartbeat_locked(instant)
+            if state.request and state.request.generation == generation:
+                return  # An overdue request keeps its original immutable deadline.
+            self._heartbeat_token += 1
+            request = HeartbeatRequest(
+                self._heartbeat_token, generation, instant,
+                instant + NATIVE_HEARTBEAT_DISPATCH_SECONDS)
+            self._heartbeat = replace(state, state="pending", request=request)
+        try:
+            self.hass.loop.call_soon_threadsafe(self._async_confirm_heartbeat, request)
+        except RuntimeError:
+            with self._heartbeat_lock:
+                if self._heartbeat.request is request:
+                    self._heartbeat = HeartbeatState("overdue", blocked=True, reason=HEARTBEAT_WAIT_REASON)
+
+    @callback
+    def _async_confirm_heartbeat(self, request):
+        """Only this HA-loop callback may acknowledge the queued worker pulse."""
+        with self._heartbeat_lock:
+            state = self._expire_heartbeat_locked(time.monotonic())
+            if state.request is not request:
+                return
+        controls = self.controls
+        error = None
+        if time.monotonic() >= request.deadline:
+            error = HEARTBEAT_WAIT_REASON
+        elif self.stop_event.is_set() or controls is None:
+            error = "stopped"
+        else:
+            try:
+                controls.confirm_heartbeat(generation=request.generation)
+            except HAActivationDeferred as exc:
+                error = str(exc)
+            except Exception:
+                # Do not strand an unacknowledged request if a custom callback
+                # or notification fails. Retry remains blocked and bounded by
+                # the last HA-confirmed ownership lease.
+                error = HEARTBEAT_WAIT_REASON
+                _LOGGER.debug("Native heartbeat confirmation failed", exc_info=True)
+        with self._heartbeat_lock:
+            if self._heartbeat.request is not request:
+                return
+            if error is None:
+                self._heartbeat = HeartbeatState("confirmed")
+            elif self.stop_event.is_set() or not controls or not controls.enabled:
+                self._heartbeat = HeartbeatState("stopped", blocked=True)
+            else:
+                self._heartbeat = HeartbeatState(
+                    "overdue", blocked=True, reason=HEARTBEAT_WAIT_REASON)
+        if self.heartbeat_notify is not None:
+            try:
+                self.heartbeat_notify()
+            except Exception:
+                _LOGGER.debug("Native heartbeat status notification failed", exc_info=True)
 
     def _read_states(self):
         # StateMachine.get is HA's synchronous, direct cached-state accessor.
@@ -93,7 +235,7 @@ class NativeAPI:
             return [{"entity_id": entity, **state} for entity, state in states.items()]
         return result
 
-    async def _async_request(self, path, body, deadline):
+    async def _async_request(self, path, body, deadline, *, generation=None):
         # Cancelling the worker's future is not enough: a queued coroutine can
         # start before its cancellation callback when the loop resumes.
         remaining = deadline - time.monotonic()
@@ -128,7 +270,12 @@ class NativeAPI:
                                or (service == "set_hvac_mode" and body.get("hvac_mode") == "off")
                                or (service == "set_percentage" and body.get("percentage") == 0)))
         if controls and activation:
-            controls.check_activation(body.get("entity_id"), body)
+            issue = self.heartbeat_issue
+            with self._heartbeat_lock:
+                confirming = self._heartbeat.request is not None
+            if issue or confirming:
+                raise HAActivationDeferred(issue or HEARTBEAT_WAIT_REASON)
+            controls.check_activation(body.get("entity_id"), body, generation=generation)
             controls.inflight += 1
         try:
             async with asyncio.timeout(remaining):
@@ -160,6 +307,7 @@ class ControllerRuntime:
         self.controls = None
         self.comfort = None
         self.api = NativeAPI(hass, live, self.stop_event, config)
+        self.api.heartbeat_notify = self._async_heartbeat_changed
         self.thread = None
         self.finished = None
         self.status = {"event": "waiting_for_home_assistant"}
@@ -171,6 +319,7 @@ class ControllerRuntime:
         self._logged_stop = None
         self._logged_stop_failures = None
         self._logged_unload_blockers = None
+        self._logged_heartbeat_issue = None
         self._stop_lock = asyncio.Lock()
         self._shutdown_progress = asyncio.Event()
         self._options_reload_task = None
@@ -194,6 +343,25 @@ class ControllerRuntime:
             await self.comfort.async_close()
             raise
 
+    def _update_heartbeat_status(self):
+        diagnostics = self.api.heartbeat_diagnostics
+        self.status["heartbeat"] = diagnostics
+        issue = diagnostics["reason"] if diagnostics["blocked"] else None
+        if issue and issue != self._logged_heartbeat_issue:
+            _LOGGER.warning("Controller heartbeat confirmation delayed: %s", issue)
+            self._logged_heartbeat_issue = issue
+        elif diagnostics["state"] == "confirmed" and self._logged_heartbeat_issue:
+            _LOGGER.info("Controller heartbeat confirmation recovered")
+            self._logged_heartbeat_issue = None
+            self.wake_event.set()
+        elif diagnostics["state"] == "stopped":
+            self._logged_heartbeat_issue = None
+
+    @callback
+    def _async_heartbeat_changed(self):
+        self._update_heartbeat_status()
+        async_dispatcher_send(self.hass, SIGNAL_STATUS)
+
     @callback
     def _async_comfort_changed(self):
         self.wake_event.set()
@@ -214,6 +382,7 @@ class ControllerRuntime:
         if previous != self.controls.enabled or ready != self._controls_ready:
             self.wake_event.set()
         self._controls_ready = ready
+        self._update_heartbeat_status()
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
 
     @callback
@@ -278,6 +447,7 @@ class ControllerRuntime:
                                control_block_reason=self.controls.hint,
                                pending_fans=list(self.controls.pending_fans))
         self._update_reload_status()
+        self._update_heartbeat_status()
         self.recovery.observe(self.status)
         self.status["integration_recovery"] = self.recovery.diagnostics
         if event in ("fault", "worker_failed"):
