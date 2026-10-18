@@ -58,7 +58,7 @@ The heater's internal thermostat is bypassed operationally by requesting a verif
 
 Heating and fan-only are mutually exclusive. A heat-to-fan transition first commands off and confirms it on a subsequent poll. Fan-only never sends the high heating setpoint.
 
-The HA watchdog acts while the controller owns the equipment. Every 15 seconds and on relevant state/startup events, it commands off when disabled or when the heartbeat is older than 120 seconds. When heating is possible, no valid external probe or any valid probe at the independent cutoff also triggers off. Confirmed fan-only operation is allowed above the heating cutoff unless the device reports heating.
+The HA watchdog acts while the controller owns the equipment. Every 15 seconds and on relevant state/startup events, it commands off when disabled or when the applicable heartbeat lease expires. When heating is possible, no valid external probe or any valid probe at the independent cutoff also triggers off. Confirmed fan-only operation is allowed above the heating cutoff unless the device reports heating.
 
 The native integration supplies its watchdog automatically, using the saved configuration. Standalone/add-on and legacy file installations use the generated HA package, whose mapping signature prevents live control with stale watchdog settings. Both watchdogs run independently of the control worker and depend on HA and the device integration continuing to work.
 
@@ -74,7 +74,7 @@ Invalid configuration, invalid temperature ranges, or a controller-wide failure 
 
 The native integration serializes its worker lifecycle and refuses a second loaded instance. Reload waits for shutdown; a stuck worker blocks successful reload. The standalone CLI additionally has a host-local process lock. Neither provides a distributed lock across separate hosts.
 
-The native watchdog pauses control and stops all owned devices when the worker heartbeat expires after 120 seconds; probe cutoffs independently stop auxiliary heating. The standalone package watches only the auxiliary heater, so shared heads can retain setpoints if its process stops. While HA or the host is down, neither watchdog can run. Native ownership recovery resumes after HA starts.
+The native watchdog pauses control and requests all owned devices off when the last confirmed heartbeat exceeds the configured main lease. Auxiliary heating has its own shorter heartbeat lease and independent probe cutoffs. The standalone package retains its 120-second auxiliary-heater watchdog and does not watch shared heads, so those heads can retain setpoints if its process stops. While HA or the host is down, neither watchdog can run. Native ownership recovery resumes after HA starts.
 
 ## Native heartbeat delivery
 
@@ -82,7 +82,11 @@ The native integration queues one coalesced heartbeat callback on Home Assistant
 
 A brief pending pulse is normal. When confirmation becomes overdue, **Plan summary**, **Recovery status**, and **Current issues** explain that new activations are deferred. Already acknowledged calls are not stopped solely because one heartbeat callback was delayed. Fresh room-safety checks, Off requests, command acknowledgements, and existing timeout deadlines continue. Heartbeat confirmation clears this temporary block without restarting shared-head settling or minimum-run timing.
 
-The HA-loop watchdog still expires the last confirmed ownership lease after 120 seconds. Heartbeat delivery does not extend that deadline from the worker or bypass disable, unload, persisted ownership recovery, auxiliary probe cutoffs, or failed-command recovery. If HA's event loop itself is stalled, queued actuator calls and the watchdog cannot run until that loop resumes. Native status-helper writes are handled locally because normal integration sensors already publish status; standalone and legacy helper-service behavior is unchanged.
+Configure the native **Controller heartbeat timeout** and **Auxiliary heater heartbeat timeout** in System settings. Their defaults are 300 seconds for the controller and 120 seconds for auxiliary heating. The main timeout accepts 60–900 seconds; the auxiliary timeout accepts 30 seconds up to the main timeout. These settings apply to the native integration; standalone and legacy generated packages keep their existing auxiliary watchdog behavior.
+
+The main HA-loop watchdog expires the last confirmed ownership lease at the configured timeout. The shorter auxiliary lease stops heating independently while healthy heat-pump heads retain the main lease. A late pulse cannot cancel an auxiliary Off obligation: the heater must confirm Off after any in-flight activation, followed by a new confirmed heartbeat, before heating can resume. Confirmed fan-only operation without heating does not trigger this auxiliary heating cutoff.
+
+Heartbeat delivery does not extend either deadline from the worker or bypass disable, unload, persisted ownership recovery, auxiliary probe cutoffs, or failed-command recovery. If HA's event loop itself is stalled, queued actuator calls and the watchdog cannot run until that loop resumes. Native status-helper writes are handled locally because normal integration sensors already publish status; standalone and legacy helper-service behavior is unchanged.
 
 Controller and recovery attributes expose heartbeat state, whether activations are blocked, and the reason. Frequently changing heartbeat ages are omitted from these recorder-facing attributes.
 
@@ -96,7 +100,7 @@ An explicit unload or reload requested outside this options-save path allows 45 
 
 ## Stop logs
 
-Home Assistant's **Settings → System → Logs** records controller-wide failures separately from individual device recovery. A worker fault logs an ERROR explaining why Off was requested for every configured climate device and circulation fan. Heartbeat expiry logs a WARNING with the heartbeat age, the 120-second lease limit, and every owned device included in the stop request. Worker pauses and shutdown-storage failures also identify the cause and owned-device scope.
+Home Assistant's **Settings → System → Logs** records controller-wide failures separately from individual device recovery. A worker fault logs an ERROR explaining why Off was requested for every configured climate device and circulation fan. Main heartbeat expiry logs a WARNING with the heartbeat age, the configured lease limit, and every owned device included in the stop request. The shorter auxiliary lease reports its heater-only stop separately. Worker pauses and shutdown-storage failures also identify the cause and owned-device scope.
 
 Routine startup reconciliation, explicit disable, saved-ownership cleanup, and normal shutdown use INFO. Enable INFO logging for `custom_components.house_climate` to include these lifecycle messages. Identical stop causes are logged once per incident rather than on every retry; a later control session can log the same cause again. Local climate/fan failures and auxiliary probe cutoffs do not imply a controller-wide shutdown.
 

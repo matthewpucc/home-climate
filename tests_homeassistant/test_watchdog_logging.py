@@ -1,10 +1,13 @@
 """Forced global shutdown causes must be visible once in ordinary HA logs."""
 import logging
+from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from homeassistant.helpers.storage import Store
+
+from custom_components.house_climate.controller.config import Config
 
 from tests_homeassistant import test_native as fixtures
 from tests_homeassistant import test_native_controls as control_fixtures
@@ -17,7 +20,15 @@ class WatchdogLoggingTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixtures.NativeTests.asyncSetUp
     asyncTearDown = fixtures.NativeTests.asyncTearDown
     handle = fixtures.NativeTests.handle
-    runtime = control_fixtures.NativeControlTests.runtime
+    async def runtime(self, live=True, cfg=None, entry_id="native"):
+        # These tests deliberately exercise a configurable 120-second lease.
+        cfg = cfg or Config.from_dict(self.cfg.to_dict())
+        cfg = replace(cfg, heartbeat_timeout_seconds=120,
+                      auxiliary_heartbeat_timeout_seconds=120)
+        return await control_fixtures.NativeControlTests.runtime(
+            self, live=live, cfg=cfg, entry_id=entry_id,
+        )
+
     claim = control_fixtures.NativeControlTests.claim
     settle_watchdog = control_fixtures.NativeControlTests.settle_watchdog
 
@@ -207,7 +218,8 @@ class WatchdogLoggingTests(unittest.IsolatedAsyncioTestCase):
             for room in runtime.config.zones.values() for probe in room.probes
         }
         self.calls.clear()
-        clock = SimpleNamespace(monotonic=lambda: 1000)
+        instant = runtime.controls.heartbeat_monotonic + 1
+        clock = SimpleNamespace(monotonic=lambda: instant)
         with self.assertNoLogs(LOGGER, level="WARNING"):
             with patch("custom_components.house_climate.controls.time", clock):
                 await runtime.controls.async_service(

@@ -3,8 +3,10 @@ from copy import deepcopy
 import unittest
 
 from custom_components.house_climate.sensor import (
-    ControllerStatus, CurrentIssues, Overview, RecoveryStatus,
+    AuxiliaryPlan, ControllerStatus, CurrentIssues, Overview, RecoveryStatus,
 )
+from custom_components.house_climate.controller.config import Config
+from tests.test_rooms import configuration
 from tests_homeassistant import test_native as fixtures
 from tests_homeassistant import test_plan_entities as plan_fixtures
 
@@ -86,4 +88,33 @@ class HeartbeatStatusTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("lease_remaining_seconds", attributes["heartbeat"])
         status["heartbeat"].update(pending_seconds=21, lease_remaining_seconds=99)
         self.assertEqual([entity.extra_state_attributes for entity in entities], before)
+        self.assertEqual(self.calls, [])
+
+    async def test_auxiliary_lease_block_is_visible_without_pausing_healthy_heads(self):
+        raw = configuration()
+        raw.update(heater_entity="climate.test_auxiliary", auxiliary_room="alpha")
+        raw["rooms"]["alpha"]["profile"] = {"target_f": 68, "half_band_f": .5}
+        entry = self.entry(Config.from_dict(raw))
+        self.decide(entry, {"alpha": 67, "beta": 68, "gamma": 76})
+        reason = "Auxiliary heartbeat expired; waiting for Off confirmation and a new heartbeat"
+        status = entry.runtime_data.status
+        status.update(
+            event="live", phase="running", control_enabled=True,
+            heartbeat={"state": "confirmed", "blocked": False, "reason": None,
+                       "auxiliary_blocked": True, "auxiliary_reason": reason,
+                       "auxiliary_lease_remaining_seconds": 0})
+        summary = self.rendered(Overview(entry))
+        self.assertIn("cool Quiet space", summary)
+        self.assertIn("auxiliary heating held off", summary)
+        self.assertNotIn("auxiliary heat requested", summary)
+        self.assertEqual(self.rendered(RecoveryStatus(entry)), reason)
+        self.assertTrue(self.rendered(CurrentIssues(entry)).startswith(reason))
+        self.assertEqual(self.rendered(AuxiliaryPlan(entry)), "Heater kept off · " + reason)
+        attributes = RecoveryStatus(entry).extra_state_attributes["heartbeat"]
+        self.assertTrue(attributes["auxiliary_blocked"])
+        self.assertEqual(attributes["auxiliary_reason"], reason)
+        self.assertNotIn("auxiliary_lease_remaining_seconds", attributes)
+        status["heartbeat"].update(auxiliary_blocked=False, auxiliary_reason=None)
+        self.assertEqual(self.rendered(AuxiliaryPlan(entry)), "Plan: heat using room probes")
+        self.assertEqual(self.rendered(RecoveryStatus(entry)), "Ready")
         self.assertEqual(self.calls, [])

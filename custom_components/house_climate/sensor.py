@@ -16,10 +16,22 @@ def short(text):
     return text if len(text) <= 255 else text[:254] + "…"
 
 
+def auxiliary_heartbeat_issue(status):
+    """Keep the shorter auxiliary lease separate from the shared-head lease."""
+    heartbeat = status.get("heartbeat") or {}
+    if (status.get("event") == "live" and status.get("control_enabled") is not False
+            and heartbeat.get("auxiliary_blocked")):
+        return heartbeat.get("auxiliary_reason") or "Auxiliary heating held off until fresh Off confirmation and heartbeat"
+    return None
+
+
 def plan_warnings(status):
-    return [*status.get("warnings", []),
-            *(f"Circulation fan {entity}: waiting for off; retrying independently"
-              for entity in status.get("pending_fans", []))]
+    warnings = [*status.get("warnings", []),
+                *(f"Circulation fan {entity}: waiting for off; retrying independently"
+                  for entity in status.get("pending_fans", []))]
+    if (issue := auxiliary_heartbeat_issue(status)) and issue not in warnings:
+        warnings.insert(0, issue)
+    return warnings
 
 
 def heartbeat_issue(status):
@@ -37,7 +49,8 @@ def heartbeat_attributes(status):
     heartbeat = status.get("heartbeat")
     if heartbeat is None:
         return {}
-    return {"heartbeat": {key: heartbeat[key] for key in ("state", "blocked", "reason")
+    return {"heartbeat": {key: heartbeat[key] for key in
+                          ("state", "blocked", "reason", "auxiliary_blocked", "auxiliary_reason")
                           if key in heartbeat}}
 
 
@@ -281,7 +294,9 @@ class Overview(ControllerEntity):
             text = ("Would " if preview else "") + action + " " + ", ".join(active)
         else:
             text = "Heat pumps would stay off" if preview else "Heat pumps off requested"
-        if status.get("heater_on"):
+        if auxiliary_heartbeat_issue(status):
+            text += "; auxiliary heating held off"
+        elif status.get("heater_on"):
             text += "; auxiliary heat " + ("would be on" if preview else "requested")
         elif status.get("auxiliary_fan_only"):
             text += "; auxiliary fan-only " + ("would be on" if preview else "requested")
@@ -316,6 +331,8 @@ class RecoveryStatus(ControllerEntity):
         issues = status.get("device_issues", {})
         waiting = dict.fromkeys([*details, *issues, *status.get("waiting_devices", [])])
         messages = [reload_message] if reload_message else []
+        if issue := auxiliary_heartbeat_issue(status):
+            messages.append(issue)
         for entity_id in waiting:
             detail = details.get(entity_id, {})
             reason = (capability_message(detail) if detail.get("kind") == "capability"
@@ -548,6 +565,8 @@ class AuxiliaryPlan(ControllerEntity):
         if not self.available:
             return None
         status = self.runtime.status
+        if issue := auxiliary_heartbeat_issue(status):
+            return short("Heater kept off · " + issue)
         if (status.get("event") == "live"
                 and self.runtime.config.heater_entity in status.get("device_issues", {})):
             detail = status.get("recovery_details", {}).get(self.runtime.config.heater_entity, {})

@@ -13,7 +13,7 @@ from homeassistant.helpers import entity_registry as er, selector
 
 from .configuration import entry_configuration, load_configuration, validate_actuators
 from .const import DOMAIN
-from .controller.config import Config, Settings
+from .controller.config import Config, HeartbeatTimeoutError, Settings
 from .controller.sensors import from_f, to_f
 
 PROFILE_FIELDS = ("target_f", "half_band_f", "priority", "comfort_enabled", "fan_percentage", "low_f", "high_f")
@@ -438,6 +438,8 @@ class RoomEditor:
                     candidate[key] = float(user_input[key]) * (9 / 5 if self.unit == "°C" else 1)
             try:
                 self.validate(candidate, live=user_input["live"])
+            except HeartbeatTimeoutError as exc:
+                errors, detail = {exc.field: exc.code}, exc
             except (ValueError, KeyError, TypeError) as exc:
                 errors, detail = {"base": "invalid_config"}, exc
             else:
@@ -452,6 +454,8 @@ class RoomEditor:
             vol.Required("head_minimum_run_seconds", default=self.draft.get("head_minimum_run_seconds", 300)): self.number(0, 3600, 1, "s"),
             vol.Required("head_minimum_off_seconds", default=self.draft.get("head_minimum_off_seconds", 180)): self.number(0, 3600, 1, "s"),
             vol.Required("head_activation_timeout_seconds", default=self.draft.get("head_activation_timeout_seconds", 120)): self.number(1, 300, 1, "s"),
+            vol.Required("heartbeat_timeout_seconds", default=self.draft.get("heartbeat_timeout_seconds", 300)): self.number(60, 900, 1, "s"),
+            vol.Required("auxiliary_heartbeat_timeout_seconds", default=self.draft.get("auxiliary_heartbeat_timeout_seconds", 120)): self.number(30, 900, 1, "s"),
             vol.Required("head_heat_call_offset_f", default=self.delta(self.draft.get("head_heat_call_offset_f", 5))): self.number(0, self.delta(20), .1, self.unit),
             vol.Required("head_cool_call_offset_f", default=self.delta(self.draft.get("head_cool_call_offset_f", 5))): self.number(0, self.delta(20), .1, self.unit),
             vol.Required("poll_seconds", default=self.draft.get("poll_seconds", 15)): self.number(1, 30, 1, "s"),

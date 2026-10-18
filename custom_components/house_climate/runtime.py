@@ -141,11 +141,16 @@ class NativeAPI:
         controls = self.controls
         snapshot = controls._snapshot if controls else {}
         lease = snapshot.get("heartbeat_monotonic", 0)
-        remaining = max(0.0, 120 - (instant - lease)) if snapshot.get("owned") else None
+        remaining = max(0.0, controls.config.heartbeat_timeout_seconds - (instant - lease)) if snapshot.get("owned") else None
+        auxiliary_remaining = (max(0.0, controls.config.auxiliary_heartbeat_timeout_seconds - (instant - lease))
+                               if snapshot.get("owned") and controls.config.heater_entity else None)
         return {
             "state": state.state, "blocked": state.blocked, "reason": state.reason,
             "pending_seconds": max(0.0, instant - state.request.queued_at) if state.request else None,
             "lease_remaining_seconds": remaining,
+            "auxiliary_lease_remaining_seconds": auxiliary_remaining,
+            "auxiliary_blocked": snapshot.get("auxiliary_heartbeat_blocked", False),
+            "auxiliary_reason": snapshot.get("auxiliary_heartbeat_reason"),
         }
 
     @property
@@ -277,6 +282,13 @@ class NativeAPI:
                 raise HAActivationDeferred(issue or HEARTBEAT_WAIT_REASON)
             controls.check_activation(body.get("entity_id"), body, generation=generation)
             controls.inflight += 1
+            if body.get("entity_id") == controls.config.heater_entity:
+                controls.auxiliary_activation_started(body)
+        auxiliary_off = bool(
+            controls and body.get("entity_id") == controls.config.heater_entity
+            and service == "set_hvac_mode" and body.get("hvac_mode") == "off")
+        if auxiliary_off:
+            controls.auxiliary_off_started()
         try:
             async with asyncio.timeout(remaining):
                 await self.hass.services.async_call(domain, service, body, blocking=True)
@@ -284,9 +296,14 @@ class NativeAPI:
             raise
         except Exception as exc:
             raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
+        else:
+            if auxiliary_off:
+                controls.auxiliary_off_finished()
         finally:
             if controls and activation:
                 controls.inflight -= 1
+                if body.get("entity_id") == controls.config.heater_entity:
+                    controls.auxiliary_activation_finished()
                 controls._schedule_check()
         return []
 

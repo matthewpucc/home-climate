@@ -1,10 +1,12 @@
 """Native heartbeat delivery remains safe without a synchronous helper round trip."""
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from custom_components.house_climate.controller.config import Config
 from custom_components.house_climate.controller.ha import HAActivationDeferred, HAError
 from tests_homeassistant import test_native as fixtures
 from tests_homeassistant import test_native_controls as native
@@ -18,6 +20,21 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
     runtime = native.NativeControlTests.runtime
     claim = native.NativeControlTests.claim
     settle_watchdog = native.NativeControlTests.settle_watchdog
+
+
+    async def timed_runtime(self, *, timeout=300, auxiliary_timeout=120, no_auxiliary=False):
+        cfg = replace(
+            Config.from_dict(self.cfg.to_dict()),
+            heartbeat_timeout_seconds=timeout,
+            auxiliary_heartbeat_timeout_seconds=auxiliary_timeout,
+        )
+        if no_auxiliary:
+            cfg = replace(cfg, heater_entity=None, auxiliary_room=None)
+        return await self.runtime(cfg=cfg)
+
+    def set_device_mode(self, entity, mode):
+        state = self.hass.states.get(entity)
+        self.hass.states.async_set(entity, mode, dict(state.attributes) if state else {})
 
     def controlled_clock(self, instant=100):
         clock = SimpleNamespace(value=instant)
@@ -132,7 +149,7 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.fault_count, 0)
 
     async def test_delivery_inside_request_deadline_cannot_revive_expired_ownership(self):
-        runtime, _ = await self.runtime()
+        runtime, _ = await self.timed_runtime(timeout=120)
         clock = self.controlled_clock()
         await self.claim(runtime)
         guest = runtime.config.heads["guest"]
@@ -281,3 +298,276 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.controls.enabled)
         self.assertEqual(runtime.fault_count, 0)
         self.assertEqual(runtime.status["event"], "live")
+
+    async def test_heads_without_auxiliary_keep_five_minute_lease_and_expire_independently(self):
+        runtime, _ = await self.timed_runtime(no_auxiliary=True)
+        clock = self.controlled_clock()
+        await self.claim(runtime)
+        guest = runtime.config.heads["guest"]
+        fan = runtime.config.fans["office"]
+        self.set_device_mode(guest, "cool")
+        self.hass.states.async_set(fan, "on", {"percentage": 60, "supported_features": 49})
+        await self.settle_watchdog(runtime.controls)
+        baseline = len(self.calls)
+        clock.value = 221
+        await runtime.controls.async_check()
+        self.assertTrue(runtime.controls.enabled)
+        self.assertEqual(self.hass.states.get(guest).state, "cool")
+        self.assertEqual(self.hass.states.get(fan).state, "on")
+        self.assertEqual(runtime.controls.heartbeat_monotonic, 100)
+        self.assertEqual(runtime.api.heartbeat_diagnostics["lease_remaining_seconds"], 179)
+        self.assertEqual(self.calls[baseline:], [])
+        clock.value = 400  # Exactly the configured 300-second lease remains valid.
+        await runtime.controls.async_check()
+        self.assertTrue(runtime.controls.enabled)
+        clock.value = 401
+        await runtime.controls.async_check()
+        await self.settle_watchdog(runtime.controls)
+        self.assertFalse(runtime.controls.enabled)
+        self.assertEqual(self.hass.states.get(guest).state, "off")
+        self.assertEqual(self.hass.states.get(fan).state, "off")
+        self.assertIn("heartbeat expired", runtime.controls.hint)
+
+    async def test_short_auxiliary_lease_stops_heat_without_releasing_healthy_heads(self):
+        runtime, _ = await self.timed_runtime()
+        clock = self.controlled_clock()
+        await self.claim(runtime)
+        guest, heater = runtime.config.heads["guest"], runtime.config.heater_entity
+        self.set_device_mode(guest, "cool")
+        self.set_device_mode(heater, "heat")
+        await self.settle_watchdog(runtime.controls)
+        baseline = len(self.calls)
+        clock.value = 221
+        await runtime.controls.async_check()
+        await self.settle_watchdog(runtime.controls)
+        self.assertTrue(runtime.controls.enabled)
+        self.assertEqual(self.hass.states.get(guest).state, "cool")
+        self.assertEqual(self.hass.states.get(heater).state, "off")
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        self.assertFalse(any(
+            data["entity_id"] in runtime.config.heads.values()
+            for _, _, data in self.calls[baseline:]
+        ))
+        # Fresh Off alone does not allow another high-setpoint heater command.
+        before_heat = len(self.calls)
+        with self.assertRaises(HAActivationDeferred):
+            await asyncio.to_thread(
+                runtime.api.service, "climate", "set_temperature",
+                entity_id=heater, hvac_mode="heat", temperature=86,
+            )
+        self.assertEqual(len(self.calls), before_heat)
+        # Head control still uses the separately configured longer lease.
+        await asyncio.to_thread(
+            runtime.api.service, "climate", "set_temperature",
+            entity_id=guest, hvac_mode="cool", temperature=73,
+        )
+        self.assertEqual(self.hass.states.get(guest).attributes["temperature"], 73)
+        clock.value = 222
+        self.queue_heartbeat(runtime)()
+        self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
+        await asyncio.to_thread(
+            runtime.api.service, "climate", "set_temperature",
+            entity_id=heater, hvac_mode="heat", temperature=86,
+        )
+        self.assertEqual(self.hass.states.get(heater).state, "heat")
+        self.assertTrue(runtime.controls.enabled)
+        self.assertEqual(runtime.fault_count, 0)
+
+    async def test_late_heartbeat_preserves_auxiliary_off_obligation_until_ack_then_new_pulse(self):
+        runtime, _ = await self.timed_runtime()
+        clock = self.controlled_clock()
+        await self.claim(runtime)
+        guest, heater = runtime.config.heads["guest"], runtime.config.heater_entity
+        self.set_device_mode(guest, "cool")
+        self.set_device_mode(heater, "heat")
+        await self.settle_watchdog(runtime.controls)
+        clock.value = 219
+        callback = self.queue_heartbeat(runtime)
+        off_started, release_off = asyncio.Event(), asyncio.Event()
+        original_call = self.hass.services.async_call
+        async def held_off(domain, service, service_data=None, *args, **kwargs):
+            if (domain == "climate" and service == "set_hvac_mode"
+                    and service_data.get("entity_id") == heater
+                    and service_data.get("hvac_mode") == "off"):
+                off_started.set()
+                await release_off.wait()
+            return await original_call(domain, service, service_data, *args, **kwargs)
+        with patch.object(self.hass.services, "async_call", side_effect=held_off):
+            clock.value = 221
+            callback()  # Head lease is valid; the shorter heater lease is expired.
+            self.assertEqual(runtime.controls.heartbeat_monotonic, 221)
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            await asyncio.wait_for(off_started.wait(), 1)
+            self.assertTrue(runtime.controls.enabled)
+            self.assertEqual(self.hass.states.get(guest).state, "cool")
+            self.assertEqual(self.hass.states.get(heater).state, "heat")
+            with self.assertRaises(HAActivationDeferred):
+                await asyncio.to_thread(
+                    runtime.api.service, "climate", "set_temperature",
+                    entity_id=heater, hvac_mode="heat", temperature=86,
+                )
+            release_off.set()
+            await self.settle_watchdog(runtime.controls)
+        self.assertEqual(self.hass.states.get(heater).state, "off")
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        self.assertEqual(self.hass.states.get(guest).state, "cool")
+        # The callback delivered before Off cannot serve as the rearm pulse.
+        with self.assertRaises(HAActivationDeferred):
+            await asyncio.to_thread(
+                runtime.api.service, "climate", "set_temperature",
+                entity_id=heater, hvac_mode="heat", temperature=86,
+            )
+        clock.value = 222
+        self.queue_heartbeat(runtime)()
+        self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
+        self.assertEqual(runtime.controls.heartbeat_monotonic, 222)
+        self.assertTrue(runtime.controls.enabled)
+
+    async def test_unknown_or_missing_auxiliary_metadata_retains_stop_obligation(self):
+        runtime, _ = await self.timed_runtime()
+        clock = self.controlled_clock()
+        await self.claim(runtime)
+        guest, heater = runtime.config.heads["guest"], runtime.config.heater_entity
+        self.set_device_mode(guest, "cool")
+        await self.settle_watchdog(runtime.controls)
+        clock.value = 221
+        original_call = self.hass.services.async_call
+        attempted_off = []
+        async def unacknowledged_off(domain, service, service_data=None, *args, **kwargs):
+            if (domain == "climate" and service == "set_hvac_mode"
+                    and service_data.get("entity_id") == heater
+                    and service_data.get("hvac_mode") == "off"):
+                attempted_off.append(dict(service_data))
+                return None
+            return await original_call(domain, service, service_data, *args, **kwargs)
+        with patch.object(self.hass.services, "async_call", side_effect=unacknowledged_off):
+            for state in ("unknown", "unavailable", None):
+                with self.subTest(state=state):
+                    before = len(attempted_off)
+                    if state is None:
+                        self.hass.states.async_remove(heater)
+                    else:
+                        self.hass.states.async_set(heater, state, {})
+                    await runtime.controls.async_check()
+                    await self.settle_watchdog(runtime.controls)
+                    self.assertGreater(len(attempted_off), before)
+                    self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+                    self.assertTrue(runtime.controls.enabled)
+                    self.assertEqual(self.hass.states.get(guest).state, "cool")
+            clock.value = 222
+            self.queue_heartbeat(runtime)()
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            self.assertEqual(self.hass.states.get(guest).state, "cool")
+        await runtime.controls.async_check()
+        await self.settle_watchdog(runtime.controls)
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        clock.value = 223
+        self.queue_heartbeat(runtime)()
+        self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
+
+    async def test_late_auxiliary_activation_requires_another_fresh_off_before_rearming(self):
+        runtime, _ = await self.timed_runtime()
+        clock = self.controlled_clock()
+        await self.claim(runtime)
+        guest, heater = runtime.config.heads["guest"], runtime.config.heater_entity
+        self.set_device_mode(guest, "cool")
+        await self.settle_watchdog(runtime.controls)
+        started, finish = asyncio.Event(), asyncio.Event()
+        async def delayed_activation(call):
+            started.set()
+            await finish.wait()
+            # The transport completes, but the device has not reported a new state.
+            self.calls.append((call.domain, call.service, dict(call.data)))
+        self.hass.services.async_register("climate", "set_temperature", delayed_activation)
+        original_call = self.hass.services.async_call
+        hold_off_report = False
+        late_off_attempts = []
+        async def stale_off(domain, service, service_data=None, *args, **kwargs):
+            if (hold_off_report and domain == "climate" and service == "set_hvac_mode"
+                    and service_data.get("entity_id") == heater
+                    and service_data.get("hvac_mode") == "off"):
+                late_off_attempts.append(dict(service_data))
+                return None
+            return await original_call(domain, service, service_data, *args, **kwargs)
+        with patch.object(self.hass.services, "async_call", side_effect=stale_off):
+            command = asyncio.create_task(asyncio.to_thread(
+                runtime.api.service, "climate", "set_temperature",
+                entity_id=heater, hvac_mode="heat", temperature=86,
+            ))
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                self.assertEqual(runtime.controls.auxiliary_inflight, 1)
+                clock.value = 221
+                await runtime.controls.async_check()
+                self.assertEqual(self.hass.states.get(heater).state, "off")
+                self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+                self.queue_heartbeat(runtime)()
+                self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+                hold_off_report = True
+            finally:
+                finish.set()
+                await command
+            self.assertEqual(runtime.controls.auxiliary_inflight, 0)
+            await runtime.controls.async_check()
+            self.assertTrue(late_off_attempts)
+            self.assertEqual(self.hass.states.get(heater).state, "off")
+            # This is the old Off report from before activation completion.
+            clock.value = 222
+            self.queue_heartbeat(runtime)()
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            self.assertTrue(runtime.controls.enabled)
+            self.assertEqual(self.hass.states.get(guest).state, "cool")
+            hold_off_report = False
+            await runtime.controls.async_check()
+            await self.settle_watchdog(runtime.controls)
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        clock.value = 223
+        self.queue_heartbeat(runtime)()
+        self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
+        self.assertEqual(self.hass.states.get(guest).state, "cool")
+
+    async def test_completed_heat_call_with_cached_off_still_requires_auxiliary_lease_cleanup(self):
+        runtime, _ = await self.timed_runtime()
+        clock = self.controlled_clock()
+        await self.claim(runtime)
+        guest, heater = runtime.config.heads["guest"], runtime.config.heater_entity
+        self.set_device_mode(guest, "cool")
+        await self.settle_watchdog(runtime.controls)
+        async def ignored_heat(call):
+            self.calls.append((call.domain, call.service, dict(call.data)))
+        self.hass.services.async_register("climate", "set_temperature", ignored_heat)
+        await asyncio.to_thread(
+            runtime.api.service, "climate", "set_temperature",
+            entity_id=heater, hvac_mode="heat", temperature=86,
+        )
+        self.assertEqual(runtime.controls.auxiliary_inflight, 0)
+        self.assertEqual(self.hass.states.get(heater).state, "off")
+        clock.value = 219
+        callback = self.queue_heartbeat(runtime)
+        original_call = self.hass.services.async_call
+        off_attempts = []
+        async def ignored_off(domain, service, service_data=None, *args, **kwargs):
+            if (domain == "climate" and service == "set_hvac_mode"
+                    and service_data.get("entity_id") == heater
+                    and service_data.get("hvac_mode") == "off"):
+                off_attempts.append(dict(service_data))
+                return None
+            return await original_call(domain, service, service_data, *args, **kwargs)
+        with patch.object(self.hass.services, "async_call", side_effect=ignored_off):
+            clock.value = 221
+            callback()
+            self.assertEqual(runtime.controls.heartbeat_monotonic, 221)
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            await runtime.controls.async_check()
+            self.assertTrue(off_attempts)
+            clock.value = 222
+            self.queue_heartbeat(runtime)()
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            self.assertTrue(runtime.controls.enabled)
+            self.assertEqual(self.hass.states.get(guest).state, "cool")
+        await runtime.controls.async_check()
+        await self.settle_watchdog(runtime.controls)
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        clock.value = 223
+        self.queue_heartbeat(runtime)()
+        self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)

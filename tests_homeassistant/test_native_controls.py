@@ -125,7 +125,9 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         await self.settle_watchdog(runtime.controls)
 
     async def test_watchdog_stops_owned_devices_without_a_running_worker(self):
-        runtime, _ = await self.runtime()
+        cfg = replace(Config.from_dict(self.cfg.to_dict()), heartbeat_timeout_seconds=120,
+                      auxiliary_heartbeat_timeout_seconds=120)
+        runtime, _ = await self.runtime(cfg=cfg)
         await self.claim(runtime)
         heater = self.hass.states.get(self.cfg.heater_entity)
         self.hass.states.async_set(heater.entity_id, "heat", dict(heater.attributes))
