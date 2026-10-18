@@ -39,15 +39,29 @@ def preflight(config: Config, states: dict, executor: Executor):
         executor.target(config.heater_entity, config.heater_high_setpoint_f, states, heater=True)
 
 
-def release(ha, executor, event_callback=None):
-    failures = executor.shutdown()
+def stop_context(config, reason, cause, forced=False):
+    """Describe requested shutdown scope without implying physical acknowledgement."""
+    return {
+        "reason": reason, "stop_cause": cause, "forced_stop": forced,
+        "stop_scope": "all_configured_devices",
+        "stop_entities": [*([config.heater_entity] if config.heater_entity else []),
+                          *config.heads.values(), *config.fans.values()],
+    }
+
+
+def release(ha, executor, event_callback=None, *, reason="Controller shutdown",
+            cause="shutdown", forced=False):
+    report = event_callback or emit
+    context = stop_context(executor.config, reason, cause, forced)
+    report("stopping", **context)
+    failures = executor.shutdown(reason=reason)
     # Leave ownership armed if the off command was not acknowledged. HA keeps retrying.
     try:
         if not executor.config.heater_entity or ha.states().get(executor.config.heater_entity, {}).get("state") == "off":
             ha.service("input_boolean", "turn_off", entity_id=executor.config.entity("heater_owned"))
     except Exception:
         failures.append("heater ownership release")
-    (event_callback or emit)("stopped", failures=failures)
+    report("stopped", failures=failures, **context)
 
 
 def run(args, config: Config):
@@ -114,13 +128,16 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         ha.service("input_boolean", "turn_on", entity_id=config.entity("heater_owned"))
                         active = True
                         # Reconcile startup/reenable through a full off barrier, including heater.
-                        failures = executor.shutdown(states, reason="Startup all-off reconciliation")
+                        context = stop_context(config, "Startup all-off reconciliation", "startup")
+                        report("stopping", **context)
+                        failures = executor.shutdown(states, reason=context["reason"])
                         for entity in failures:
                             kind = "Circulation fan" if entity in config.fans.values() else "Climate device"
                             plan.warnings.append(f"{kind} {entity}: startup off command failed; retrying independently")
                         cadence.reset()
                         # The old snapshot predates shutdown. Read again next cycle.
-                        report("arming", message="All-off commands sent; awaiting fresh state")
+                        report("arming", message="All-off commands sent; awaiting fresh state",
+                               failures=failures, **context)
                     else:
                         if states[config.entity("heater_owned")]["state"] != "on":
                             raise ControlFault("Heater ownership was removed; refusing further activation")
@@ -130,12 +147,15 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         if states.get(config.entity("status", "input_text"), {}).get("state") != status:
                             ha.service("input_text", "set_value", entity_id=config.entity("status", "input_text"), value=status)
                 elif active:
-                    release(ha, executor, event_callback=report)
+                    release(ha, executor, event_callback=report,
+                            reason="Controller disabled", cause="disabled")
                     active = False
                     cadence.reset()
                 elif args.live and states.get(config.entity("heater_owned"), {}).get("state") == "on":
                     # Recover ownership left behind by a previous process, even when disabled.
-                    release(ha, executor, event_callback=report)
+                    release(ha, executor, event_callback=report,
+                            reason="Recovering ownership left by a previous controller",
+                            cause="ownership_recovery")
                 recovery = executor.recovery_status(time.monotonic())
                 report("live" if args.live and enabled else "shadow", timestamp=now.isoformat(), phase=executor.phase,
                        device_issues=dict(executor.device_issues), waiting_devices=executor.waiting_devices,
@@ -147,9 +167,10 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                        **cadence.status(), **plan.as_dict())
                 faults = 0
             except Exception as exc:
-                report("fault", error=str(exc))
+                report("fault", error=str(exc), shutdown_requested=active)
                 if active:
-                    release(ha, executor, event_callback=report)
+                    release(ha, executor, event_callback=report,
+                            reason=f"Controller fault: {exc}", cause="fault", forced=True)
                     active = False
                 cadence.reset()
                 faults += 1

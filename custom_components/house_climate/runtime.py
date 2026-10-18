@@ -164,6 +164,9 @@ class ControllerRuntime:
         self.last_fault = {}
         self._controls_ready = None
         self._remove_climate_listener = None
+        self._logged_fault = None
+        self._logged_stop = None
+        self._logged_stop_failures = None
         self.recovery = RecoveryManager(hass, self)
 
     async def async_setup_controls(self, entry_id):
@@ -267,9 +270,34 @@ class ControllerRuntime:
         self.recovery.observe(self.status)
         self.status["integration_recovery"] = self.recovery.diagnostics
         if event in ("fault", "worker_failed"):
-            _LOGGER.error("Controller %s: %s", event, data.get("error"))
+            incident = (event, data.get("error"))
+            if incident != self._logged_fault:
+                # An active-loop fault is immediately followed by a reasoned
+                # all-device stop request. Log that complete context once.
+                log = _LOGGER.debug if data.get("shutdown_requested") else _LOGGER.error
+                log("Controller %s: %s", event, data.get("error"))
+                self._logged_fault = incident
+        elif event == "stopping" and data.get("stop_scope") == "all_configured_devices":
+            entities = data.get("stop_entities") or []
+            incident = (data.get("stop_cause"), data.get("reason"), tuple(entities))
+            if incident != self._logged_stop:
+                log = _LOGGER.error if data.get("forced_stop") else _LOGGER.info
+                log("Controller-wide Off requested: %s; cause=%s; all %d configured devices: %s",
+                    data.get("reason"), data.get("stop_cause"), len(entities), ", ".join(entities))
+                self._logged_stop = incident
+        elif event == "stopped" and data.get("failures"):
+            incident = (data.get("reason"), tuple(data["failures"]))
+            if incident != self._logged_stop_failures:
+                _LOGGER.warning(
+                    "Controller-wide Off requests failed for %s; cause: %s; off confirmation still required",
+                    ", ".join(data["failures"]), data.get("reason", "Controller shutdown"))
+                self._logged_stop_failures = incident
         else:
             _LOGGER.debug("Controller %s: %s", event, data)
+        if event in ("live", "shadow"):
+            self._logged_fault = None
+        if event == "live":
+            self._logged_stop = self._logged_stop_failures = None
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
 
     def _run(self):
@@ -288,9 +316,9 @@ class ControllerRuntime:
     @callback
     def _async_finished(self, error):
         if self.controls and error:
-            self.controls.pause("Control paused: controller worker stopped")
+            self.controls.pause(f"Control paused: controller worker stopped: {error}")
         self._async_report("worker_failed" if error else "stopped",
-                           {"error": error} if error else {})
+                           {"error": error} if error else {"reason": "Controller worker exited"})
         if not self.finished.done():
             self.finished.set_result(None)
 
