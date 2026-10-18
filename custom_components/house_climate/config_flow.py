@@ -31,6 +31,7 @@ class RoomEditor:
         self.room_id = None
         self.schedule_index = None
         self.fan_index = None
+        self.head_entity_id = None
 
     @property
     def unit(self):
@@ -105,15 +106,30 @@ class RoomEditor:
                 raise ValueError("The auxiliary heater must use external probes and its climate entity alone")
         return cfg
 
+    def _sync_heads(self, candidate):
+        """Drop unused head mappings and limits belonging to removed equipment."""
+        used = {room["head"] for room in candidate["rooms"].values()}
+        candidate["heads"] = {key: entity for key, entity in candidate["heads"].items() if key in used}
+        if "head_cool_min_f" in candidate:
+            entities = set(candidate["heads"].values())
+            candidate["head_cool_min_f"] = {
+                entity: value for entity, value in candidate["head_cool_min_f"].items() if entity in entities}
+        return candidate
+
     def normalized(self, candidate):
-        result = deepcopy(candidate)
-        used = {room["head"] for room in result["rooms"].values()}
-        result["heads"] = {key: entity for key, entity in result["heads"].items() if key in used}
+        return self._sync_heads(deepcopy(candidate))
+
+    def head_choices(self):
+        result = []
+        for key, entity in self.draft["heads"].items():
+            names = [room.get("name") or room_id for room_id, room in self.draft["rooms"].items()
+                     if room["head"] == key]
+            result.append((entity, f"{', '.join(names) or key} ({entity})"))
         return result
 
     async def async_step_menu(self, user_input=None):
         return self.async_show_menu(step_id="menu", menu_options=[
-            "add_room", "select_room", "system", "auxiliary", "import_file", "finish"])
+            "add_room", "select_room", "system", "head_limits", "auxiliary", "import_file", "finish"])
 
     async def async_step_add_room(self, user_input=None):
         self.room_id = None
@@ -328,6 +344,57 @@ class RoomEditor:
             vol.Required("equipment_timing_confirmed", default=self.draft.get("equipment_timing_confirmed", False)): bool,
             vol.Required("live", default=self.live): bool,
         }, errors, detail)
+
+    async def async_step_head_limits(self, user_input=None):
+        choices = self.head_choices()
+        if not choices:
+            return await self.async_step_add_room()
+        errors, detail = {}, None
+        if user_input is not None:
+            if user_input.get("head") not in {entity for entity, _ in choices}:
+                errors, detail = {"base": "invalid_config"}, "Choose a configured heat-pump head"
+            else:
+                self.head_entity_id = user_input["head"]
+                return await self.async_step_head_limit()
+        return self.form("head_limits", {vol.Required("head"): self.choice(choices)}, errors, detail)
+
+    async def async_step_head_limit(self, user_input=None):
+        choices = dict(self.head_choices())
+        if self.head_entity_id not in choices:
+            return await self.async_step_head_limits()
+        current = self.draft.get("head_cool_min_f", {}).get(self.head_entity_id)
+        errors, detail = {}, choices[self.head_entity_id]
+        if user_input is not None:
+            candidate = deepcopy(self.draft)
+            limits = dict(candidate.get("head_cool_min_f", {}))
+            entities = (set(candidate["heads"].values()) if user_input.get("apply_to_all", False)
+                        else {self.head_entity_id})
+            try:
+                if user_input["override_enabled"]:
+                    value = user_input["cool_min_f"]
+                    if isinstance(value, bool):
+                        raise ValueError("Cooling minimum must be a temperature")
+                    fahrenheit = to_f(float(value), self.unit)
+                    limits.update({entity: fahrenheit for entity in entities})
+                else:
+                    for entity in entities:
+                        limits.pop(entity, None)
+                candidate["head_cool_min_f"] = limits
+                self.validate(candidate)
+            except (ValueError, KeyError, TypeError) as exc:
+                errors, detail = {"base": "invalid_config"}, exc
+            else:
+                self.draft = candidate
+                return await self.async_step_menu()
+        schema = {
+            vol.Required("override_enabled", default=current is not None): bool,
+            vol.Required("cool_min_f", default=self.temperature(current if current is not None else 65)):
+                self.number(self.temperature(-40), self.temperature(140), .1, self.unit),
+            vol.Required("apply_to_all", default=False): bool,
+        }
+        if user_input is not None:
+            schema = self.add_suggested_values_to_schema(vol.Schema(schema), user_input).schema
+        return self.form("head_limit", schema, errors, detail)
 
     async def async_step_auxiliary(self, user_input=None):
         errors, detail = {}, None

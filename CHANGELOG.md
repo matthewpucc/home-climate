@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6
+
+- Add optional minimum cooling setpoints per physical head, editable in Home Assistant with an explicit apply-to-all option.
+- Honor configured minima in planned and dispatched calls, combining them with the device's advertised range and original temperature grid. Room targets, heating, auxiliary control, and exact command acknowledgements remain unchanged.
+- Exclude infeasible cooling calls from shared-mode arbitration and stop/report only the affected head, without requesting an integration reload.
+
 ## 0.6.5
 
 - Keep transfer fans running at their configured speed when their shared head is selected to condition the destination room, even before a useful room-temperature gradient develops. Fast safety checks remove head-dependent assistance when the head is inhibited.

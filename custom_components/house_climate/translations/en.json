@@ -9,6 +9,7 @@
           "add_room": "Add room",
           "select_room": "Edit a room",
           "system": "System settings",
+          "head_limits": "Heat-pump head limits",
           "auxiliary": "Auxiliary heater",
           "import_file": "Import TOML configuration",
           "finish": "Review and save"
@@ -143,6 +144,22 @@
       "finish": {
         "title": "Review and save",
         "description": "{detail}\n\nSaving applies all edits and reloads the controller. Owned devices are stopped, and the Controller enabled switch starts off. Turn it on from the device page when ready for live control."
+      },
+      "head_limits": {
+        "title": "Choose a heat-pump head",
+        "description": "Choose the head whose lowest cooling setpoint you want to configure. Rooms sharing a head share this setting.\n\n{detail}",
+        "data": {
+          "head": "Heat-pump head"
+        }
+      },
+      "head_limit": {
+        "title": "Cooling setpoint limit",
+        "description": "{detail}\n\nEnable this only when you know the lowest cooling setpoint your equipment accepts. Active cooling calls stay at or above this temperature even if Home Assistant reports a lower device minimum. Room comfort targets stay unchanged. Leave it disabled to use the device's reported range. Applying to all updates every configured heat-pump head in this draft.",
+        "data": {
+          "override_enabled": "Use a minimum cooling setpoint",
+          "cool_min_f": "Lowest cooling setpoint",
+          "apply_to_all": "Apply this setting to all heat-pump heads"
+        }
       }
     },
     "error": {
@@ -162,6 +179,7 @@
           "add_room": "Add room",
           "select_room": "Edit a room",
           "system": "System settings",
+          "head_limits": "Heat-pump head limits",
           "auxiliary": "Auxiliary heater",
           "import_file": "Import TOML configuration",
           "finish": "Review and save"
@@ -296,6 +314,22 @@
       "finish": {
         "title": "Review and save",
         "description": "{detail}\n\nSaving applies all edits and reloads the controller. Owned devices are stopped, and the Controller enabled switch starts off. Turn it on from the device page when ready for live control."
+      },
+      "head_limits": {
+        "title": "Choose a heat-pump head",
+        "description": "Choose the head whose lowest cooling setpoint you want to configure. Rooms sharing a head share this setting.\n\n{detail}",
+        "data": {
+          "head": "Heat-pump head"
+        }
+      },
+      "head_limit": {
+        "title": "Cooling setpoint limit",
+        "description": "{detail}\n\nEnable this only when you know the lowest cooling setpoint your equipment accepts. Active cooling calls stay at or above this temperature even if Home Assistant reports a lower device minimum. Room comfort targets stay unchanged. Leave it disabled to use the device's reported range. Applying to all updates every configured heat-pump head in this draft.",
+        "data": {
+          "override_enabled": "Use a minimum cooling setpoint",
+          "cool_min_f": "Lowest cooling setpoint",
+          "apply_to_all": "Apply this setting to all heat-pump heads"
+        }
       }
     },
     "error": {

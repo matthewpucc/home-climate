@@ -28,6 +28,21 @@ HA forms use the configured temperature units. TOML and saved config-entry field
 
 TOML stores these as `head_heat_call_offset_f` and `head_cool_call_offset_f` in Fahrenheit differences, each from 0 to 20. Existing configurations receive the defaults automatically. See [control behavior](control.md#heat-pump-call-setpoints) for bounds, rounding, and comfort stops.
 
+## Head cooling limits
+
+Some integrations advertise a generic temperature range even when a head has a higher minimum in cooling mode. Set the equipment's actual limit in **Configure → Heat-pump head limits**: choose a head, enable its minimum cooling setpoint, enter the value, then submit the form and save the configuration. **Apply to all heads** copies that setting to every configured head; use it only when their limits match. Disabling the override clears it for the selected head, or all heads when that option is selected.
+
+These limits apply to physical heads, including all rooms sharing one head. They do not change room comfort targets or schedules. HA forms use local temperature units. No override is assumed by default.
+
+TOML uses a map keyed by quoted climate entity IDs, with absolute temperatures in Fahrenheit:
+
+```toml
+[head_cool_min_f]
+"climate.example_head_a" = 65
+```
+
+The controller combines this floor with the head's advertised range and temperature step. It rounds up to an allowed device setpoint when needed, so a 65°F floor on a 0.5°C grid may produce an 18.5°C call. If no supported setpoint satisfies the floor, that head is stopped and its configuration issue is reported while other heads can continue. Changing this setting does not loosen acknowledgement checks or trigger an integration reload.
+
 ## Heat-pump acknowledgement wait
 
 **System settings → Heat-pump acknowledgement wait** defaults to 120 seconds. A head can briefly report its old setpoint after accepting a command. The controller waits for the exact requested mode and temperature before acknowledging activation; changes to an unconfirmed target do not restart the overall wait. The TOML setting is `head_activation_timeout_seconds` (1–300 seconds). Off commands, auxiliary-heater commands, fan commands, safety polling, and the watchdog retain their existing timing.

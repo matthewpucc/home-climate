@@ -37,6 +37,12 @@ heater_setpoint_confirmed = false
 shared_a = "climate.example_head_a"
 shared_b = "climate.example_head_b"
 
+# Optional physical cooling minima when HA advertises incomplete equipment limits.
+# Confirm these in the device app/manual; omit the table when no override is needed.
+# Keys are quoted physical climate entity IDs, not the logical head keys above.
+[head_cool_min_f]
+"climate.example_head_a" = 65
+
 # IDs remain stable when display names change. Multiple rooms may share one head.
 [rooms.room_a]
 name = "Room A"
