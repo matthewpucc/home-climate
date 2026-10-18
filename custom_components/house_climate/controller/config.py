@@ -93,6 +93,7 @@ class Config:
     switch_confirmation_seconds: float = 120
     off_settle_seconds: float = 180
     command_timeout_seconds: float = 45
+    head_activation_timeout_seconds: float = 120
     equipment_timing_confirmed: bool = False
     heater_high_setpoint_f: float = 86
     heater_setpoint_confirmed: bool = False
@@ -262,6 +263,10 @@ class Config:
                     or (name == "decision_interval_seconds" and value == 0)):
                 requirement = "positive" if name == "decision_interval_seconds" else "nonnegative"
                 raise ValueError(f"{name} must be finite and {requirement}")
+        value = self.head_activation_timeout_seconds
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 1 <= value <= 300):
+            raise ValueError("head_activation_timeout_seconds must be from 1 to 300 seconds")
         for name in ("head_heat_call_offset_f", "head_cool_call_offset_f"):
             value = getattr(self, name)
             if (isinstance(value, bool) or not isinstance(value, (int, float))

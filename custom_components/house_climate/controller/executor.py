@@ -25,6 +25,7 @@ class Pending:
     baseline: tuple | None = None
     fresh: bool = False
     receipt: bool = False
+    activation_since: float | None = None
 
 
 @dataclass
@@ -110,18 +111,48 @@ class Executor:
         command = (service, tuple(sorted(data.items())))
         pending = self.pending.get(entity)
         observed = states.get(entity, {})
+        head_activation = (entity in self.head_cycles and service == "set_temperature"
+                           and data.get("hvac_mode") in ("heat", "cool"))
+        same_activation = (head_activation and pending is not None
+                           and pending.command[0] == "set_temperature"
+                           and dict(pending.command[1]).get("hvac_mode") == data["hvac_mode"])
+        activation_since = now if head_activation else None
+        if same_activation:
+            # A new target must not renew the budget for an activation that
+            # still has not been confirmed. A previous target arriving on this
+            # same poll does complete that command and earns a new budget.
+            previous_data = dict(pending.command[1])
+            try:
+                previous_matches = (
+                    observed.get("state") == previous_data["hvac_mode"]
+                    and abs(float(observed.get("attributes", {}).get("temperature"))
+                            - float(previous_data["temperature"])) < .05
+                    and (not pending.fresh or self.marker(observed) != pending.baseline))
+            except (KeyError, ValueError, TypeError, OverflowError):
+                previous_matches = False
+            if pending.command == command or not previous_matches:
+                activation_since = (pending.activation_since if pending.activation_since is not None
+                                    else pending.since)
         acknowledged = matches(observed) and (
             pending is None or not pending.fresh or self.marker(observed) != pending.baseline)
         if not force and acknowledged and (pending is None or pending.command == command):
             self.pending.pop(entity, None)
             return True
-        if not force and pending and pending.command == command:
-            if now - pending.since >= self.config.command_timeout_seconds:
-                raise CommandTimeout(self._command_timeout_message(entity, service, data, observed))
-            return False
+        if not force and pending and (pending.command == command or same_activation):
+            started = activation_since if head_activation else pending.since
+            timeout = (self.config.head_activation_timeout_seconds if head_activation
+                       else self.config.command_timeout_seconds)
+            if now - started >= timeout:
+                # A replacement target has not been dispatched yet. Report the
+                # actual outstanding command, which recovery will preserve.
+                raise CommandTimeout(self._command_timeout_message(
+                    entity, pending.command[0], dict(pending.command[1]), observed))
+            if pending.command == command:
+                return False
         # A transport exception may occur after dispatch. Preserve the command
         # before calling HA so a later off supersedes the uncertain activation.
-        self.pending[entity] = Pending(command, now, self.marker(observed), fresh)
+        self.pending[entity] = Pending(command, now, self.marker(observed), fresh,
+                                       activation_since=activation_since)
         if service == "set_hvac_mode" and data.get("hvac_mode") == "off":
             self._record_controller_head_stop(entity, states, previous_pending=pending)
         self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
@@ -175,10 +206,31 @@ class Executor:
                 devices[entity]["pending_command"] = {"service": command[0], "data": dict(command[1])}
             if block:
                 devices[entity]["missing_modes"] = block["missing_modes"]
+        pending_heads = {}
+        for entity in self.head_cycles:
+            pending = self.pending.get(entity)
+            if pending is None or pending.activation_since is None or entity in self.recoveries:
+                continue
+            command = dict(pending.command[1])
+            if pending.command[0] != "set_temperature" or command.get("hvac_mode") not in ("heat", "cool"):
+                continue
+            observed = self._states.get(entity, {})
+            elapsed = max(0.0, now - pending.activation_since)
+            timeout = self.config.head_activation_timeout_seconds
+            pending_heads[entity] = {
+                "requested_mode": command["hvac_mode"],
+                "requested_target_temperature": self._finite_temperature(command.get("temperature")),
+                "reported_mode": observed.get("state", "missing"),
+                "reported_target_temperature": self._finite_temperature(
+                    observed.get("attributes", {}).get("temperature")),
+                "temperature_unit": self.unit, "elapsed_seconds": elapsed,
+                "remaining_seconds": max(0.0, timeout - elapsed), "timeout_seconds": timeout,
+            }
         remaining = (max(0, self.config.off_settle_seconds - (now - self.all_off_since))
                      if self.phase == "settling" and self.all_off_since is not None else None)
         return {"phase": self.phase, "waiting_devices": self.waiting_devices,
                 "settle_remaining_seconds": remaining, "devices": devices,
+                "pending_head_commands": pending_heads,
                 "cycle_holds": {entity: dict(hold) for entity, hold in self.cycle_holds.items()},
                 "head_stop_reasons": {entity: dict(reason) for entity, reason in self.head_stop_reasons.items()}}
 

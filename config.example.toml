@@ -10,6 +10,7 @@ poll_seconds = 15 # Safety, heartbeat, and recovery checks; keep at most 30s liv
 decision_interval_seconds = 90 # Ordinary comfort adjustments; 60–120s recommended.
 head_minimum_run_seconds = 300 # Minimum requested head mode duration; safety can stop early.
 head_minimum_off_seconds = 180 # Per-head rest before activation; shared settling still applies.
+head_activation_timeout_seconds = 120 # Wait for exact mode/setpoint feedback; Off timing stays 45s.
 # Active calls use a device setpoint beyond both the room target and onboard
 # temperature, within device limits; independent room probes decide when to stop.
 # These are Fahrenheit differences. Set either to 0 for direct room setpoints.

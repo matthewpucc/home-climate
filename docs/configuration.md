@@ -28,6 +28,10 @@ HA forms use the configured temperature units. TOML and saved config-entry field
 
 TOML stores these as `head_heat_call_offset_f` and `head_cool_call_offset_f` in Fahrenheit differences, each from 0 to 20. Existing configurations receive the defaults automatically. See [control behavior](control.md#heat-pump-call-setpoints) for bounds, rounding, and comfort stops.
 
+## Heat-pump acknowledgement wait
+
+**System settings → Heat-pump acknowledgement wait** defaults to 120 seconds. A head can briefly report its old setpoint after accepting a command. The controller waits for the exact requested mode and temperature before acknowledging activation; changes to an unconfirmed target do not restart the overall wait. The TOML setting is `head_activation_timeout_seconds` (1–300 seconds). Off commands, auxiliary-heater commands, fan commands, safety polling, and the watchdog retain their existing timing.
+
 ## Sensors
 
 Use independent probes where possible. Ordinary comfort control uses their median; confirmed extremes still protect system limits. Prefer probes that measure occupied room air, and omit or calibrate consistently biased readings. The HA editor assigns a common source identifier to entities from the same registered device, so aliases are not counted twice. Existing imported probe source IDs, unit overrides, attributes, and offsets are preserved when reselecting them.
@@ -47,12 +51,12 @@ At least one probe must be configured per room. Operation can continue with one 
 | cooling | Run during this room's cooling demand |
 | conditioning | Run during this room's heating or cooling demand |
 | schedule | Use the active profile's fan speed |
-| transfer | Run when air from another room moves this room toward its target |
+| transfer | Run for useful air transfer, or assist a shared head conditioning this room |
 | always | Continuous circulation while the room has valid temperature data |
 
 A fan belongs to the room it helps, regardless of its physical location. Transfer rules also select a source room. Two fans can help the same room. Each fan can appear only once in a configuration.
 
-Transfer control uses temperature-difference hysteresis: start above 0.75°F, stop below 0.25°F, and stop when the source air would no longer help. Actual airflow direction is installation-specific.
+Transfer control uses temperature-difference hysteresis: start above 0.75°F, stop below 0.25°F, and stop when the source air would no longer help. When the source and destination share a head, transfer fans also run at their configured percentage while that head is selected in a direction that helps the destination. This moves conditioned air before the source room's average temperature changes. Fast safety checks remove head-dependent assistance when the head is inhibited; useful independent transfer can continue. Actual airflow direction is installation-specific.
 
 ## Optional auxiliary heater
 

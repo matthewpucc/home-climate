@@ -113,7 +113,11 @@
           "head_cool_call_offset_f": "Cooling call offset",
           "poll_seconds": "Safety and recovery check interval",
           "equipment_timing_confirmed": "I have verified the equipment timing",
-          "live": "Enable live commands"
+          "live": "Enable live commands",
+          "head_activation_timeout_seconds": "Heat-pump acknowledgement wait"
+        },
+        "data_description": {
+          "head_activation_timeout_seconds": "Seconds to wait for an exact heat-pump mode and setpoint report. Off commands and safety checks keep their normal timing."
         }
       },
       "auxiliary": {
@@ -262,7 +266,11 @@
           "head_cool_call_offset_f": "Cooling call offset",
           "poll_seconds": "Safety and recovery check interval",
           "equipment_timing_confirmed": "I have verified the equipment timing",
-          "live": "Enable live commands"
+          "live": "Enable live commands",
+          "head_activation_timeout_seconds": "Heat-pump acknowledgement wait"
+        },
+        "data_description": {
+          "head_activation_timeout_seconds": "Seconds to wait for an exact heat-pump mode and setpoint report. Off commands and safety checks keep their normal timing."
         }
       },
       "auxiliary": {
