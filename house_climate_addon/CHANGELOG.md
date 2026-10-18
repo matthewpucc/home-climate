@@ -5,6 +5,7 @@
 - Log controller-wide Off requests with their cause and affected devices before dispatch, including global worker faults, startup reconciliation, disable, and shutdown.
 - Report heartbeat-watchdog expiry with heartbeat age, the 120-second limit, and the full owned-device stop scope; distinguish worker pauses, saved ownership recovery, and shutdown-storage failures.
 - Avoid repeating identical stop and watchdog messages during retries. Routine lifecycle stops use INFO, watchdog pauses use WARNING, and controller faults use ERROR; local device failures remain local.
+- Explain deferred unloads with unconfirmed climate devices, in-flight activations, retained ownership, and worker/reload blockers without classifying an ordinary off-confirmation wait as a worker fault.
 - Keep command acknowledgement, ownership, safety checks, recovery, and equipment timing unchanged.
 
 ## 0.6.6

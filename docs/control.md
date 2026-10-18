@@ -82,6 +82,8 @@ Home Assistant's **Settings → System → Logs** records controller-wide failur
 
 Routine startup reconciliation, explicit disable, saved-ownership cleanup, and normal shutdown use INFO. Enable INFO logging for `custom_components.house_climate` to include these lifecycle messages. Identical stop causes are logged once per incident rather than on every retry; a later control session can log the same cause again. Local climate/fan failures and auxiliary probe cutoffs do not imply a controller-wide shutdown.
 
+When an unload/reload cannot finish, a deduplicated WARNING lists unconfirmed owned climate devices, in-flight activations, retained ownership, and any worker or integration-reload blocker. Pending circulation-fan cleanup alone does not block unload.
+
 These messages describe Off requests, not physical stop confirmation. A failed request names the affected device, while ownership and retries continue under the existing safety rules. The standalone/add-on engine emits structured `stopping` and `stopped` events with the reason, cause, configured-device scope, and any dispatch failures.
 
 ## Climate connectivity recovery
