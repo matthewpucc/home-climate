@@ -238,6 +238,22 @@ class Policy:
                     plan.warnings.append(
                         f"{labels}: {mode} requested but unavailable (HA modes: {', '.join(modes)})")
                     continue
+                floor = self.config.head_cool_min_f.get(self.config.heads[head]) if mode == "cool" else None
+                if floor is not None:
+                    attrs = states.get(self.config.heads[head], {}).get("attributes", {})
+                    try:
+                        # Incomplete/invalid HA metadata keeps the existing
+                        # executor recovery path. Only a proven floor conflict
+                        # removes this cooling call from shared arbitration.
+                        native_target(floor, attrs, climate_unit)
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        pass
+                    else:
+                        try:
+                            native_target(floor, attrs, climate_unit, minimum_f=floor)
+                        except ValueError as exc:
+                            plan.warnings.append(f"{head}: cooling unavailable because {exc}")
+                            continue
                 # Immediate raw extremes stop aggravating a potentially unsafe area.
                 blocked = any(rooms[name].low <= LOW + .25 for name in names) if mode == "cool" else any(rooms[name].high >= HIGH - .25 for name in names)
                 if blocked:
