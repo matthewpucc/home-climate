@@ -166,6 +166,33 @@ class HeadCoolingLimitTests(unittest.TestCase):
         # and trigger a reload of the integration owning healthy heads.
         self.assertNotIn(self.bonus, executor.recoveries)
 
+    def test_configuration_block_clears_when_advertised_range_recovers(self):
+        states = self.states()
+        states[self.bonus]["state"] = "cool"
+        states[self.bonus]["attributes"].update(max_temp=64, temperature=64)
+        ha, executor = self.executor(states)
+        blocked = self.decide(ha.states())
+        executor.step(blocked, ha.states(), 0)
+        self.assertEqual(ha.data[self.bonus]["state"], "off")
+        self.assertEqual(executor.recovery_status(0)["devices"][self.bonus]["kind"], "configuration")
+        self.assertEqual(ha.data[self.guest]["state"], "cool")
+        guest_calls = [call for call in ha.calls if call[2]["entity_id"] == self.guest]
+        ha.calls.clear()
+        ha.data[self.bonus]["attributes"]["max_temp"] = 90
+        for now in (15, 30):
+            resumed = self.decide(ha.states())
+            executor.step(resumed, ha.states(), now)
+        self.assertEqual(ha.data[self.bonus]["state"], "cool")
+        self.assertEqual(ha.data[self.bonus]["attributes"]["temperature"], 65)
+        self.assertNotIn(self.bonus, executor.device_issues)
+        self.assertNotIn(self.bonus, executor.recovery_status(30)["devices"])
+        self.assertNotIn(self.bonus, executor.pending)
+        self.assertEqual(len(self.activation(ha, self.bonus)), 1)
+        self.assertEqual(ha.data[self.guest]["state"], "cool")
+        self.assertEqual(executor.phase, "running")
+        self.assertEqual(len([call for call in guest_calls if call[1] == "set_temperature"]), 1)
+        self.assertFalse(any(call[2]["entity_id"] == self.guest for call in ha.calls))
+
     def test_reported_floor_target_strictly_acknowledges_without_recovery_or_off(self):
         states = self.states()
         plan = self.decide(states)
