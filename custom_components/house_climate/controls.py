@@ -36,7 +36,8 @@ class NativeControls:
         self.inflight = 0
         self.problem = None
         self._auxiliary_off_error = None
-        self._pause_logged = False
+        self._stop_log_reason = None
+        self._shutdown_save_error = None
         self._lock = asyncio.Lock()
         # Serializes every watchdog service with ownership claims and close.
         self._check_lock = asyncio.Lock()
@@ -66,6 +67,8 @@ class NativeControls:
             self.pending_fans = tuple(entity for entity in dict.fromkeys(pending)
                                       if entity not in self.owned)
             self.recovering = bool(self.owned)
+            if self.owned:
+                self._log_stop(logging.INFO, "Recovering previously owned devices after integration load")
         self._publish()
 
     @callback
@@ -146,15 +149,30 @@ class NativeControls:
             return "Turn on Controller enabled on this device"
         return None
 
+    def _log_stop(self, level, reason):
+        """Keep the original global-stop cause visible without retry spam."""
+        if self._stop_log_reason is not None:
+            return
+        self._stop_log_reason = reason
+        _LOGGER.log(
+            level, "House Climate watchdog: %s; stopping all %d owned devices: %s",
+            reason, len(self.owned), ", ".join(self.owned) or "none",
+        )
+
+    def _log_shutdown_save_error(self, message):
+        if self._shutdown_save_error == message:
+            return
+        self._shutdown_save_error = message
+        if self._stop_log_reason is None:
+            self._stop_log_reason = message
+        _LOGGER.error(
+            "House Climate watchdog: %s; stopping all %d owned devices: %s",
+            message, len(self.owned), ", ".join(self.owned) or "none",
+        )
+
     @callback
     def pause(self, reason=None):
-        if not self._pause_logged:
-            _LOGGER.warning(
-                "House Climate: %s; stopping all %d owned devices: %s",
-                reason or "Controller pause requested", len(self.owned),
-                ", ".join(self.owned) or "none",
-            )
-            self._pause_logged = True
+        self._log_stop(logging.WARNING, reason or "Controller pause requested")
         self.enabled = False
         self.recovering = bool(self.owned)
         if reason:
@@ -174,7 +192,10 @@ class NativeControls:
             if self.recovering or (self.owned and not self.enabled):
                 raise HAError("Waiting for previously owned devices to acknowledge off")
             self.problem = None
-            self._pause_logged = False
+            self._stop_log_reason = None
+            self._shutdown_save_error = None
+        elif self.owned:
+            self._log_stop(logging.INFO, "Controller disabled")
         self.enabled = enabled
         if not enabled and self.owned:
             self.recovering = True
@@ -344,11 +365,10 @@ class NativeControls:
                 expired = not 0 <= heartbeat_age <= 120
                 if self.recovering or not self.enabled or expired:
                     if self.enabled and expired:
-                        _LOGGER.warning(
-                            "House Climate watchdog: controller heartbeat expired "
-                            "(age %.1fs; lease limit 120s); disabling control and "
-                            "stopping all %d owned devices: %s",
-                            heartbeat_age, len(self.owned), ", ".join(self.owned),
+                        self._log_stop(
+                            logging.WARNING,
+                            f"controller heartbeat expired (age {heartbeat_age:.1f}s; "
+                            "lease limit 120s); disabling control",
                         )
                         self.enabled = False
                         self.problem = "Control paused: controller heartbeat expired"
@@ -361,7 +381,7 @@ class NativeControls:
                         await self._clear_if_off()
                     except Exception as exc:
                         self.problem = f"Could not save controller shutdown: {exc}"
-                        _LOGGER.error("House Climate watchdog: %s", self.problem)
+                        self._log_shutdown_save_error(self.problem)
                         self._publish()
                 elif self.config.heater_entity in self.owned:
                     heater = self.hass.states.get(self.config.heater_entity)
@@ -380,7 +400,7 @@ class NativeControls:
                     self.enabled = False
                     self.recovering = bool(self.owned)
                     self.problem = f"Could not save controller shutdown: {exc}"
-                    _LOGGER.error("House Climate watchdog: %s", self.problem)
+                    self._log_shutdown_save_error(self.problem)
                     self._publish()
 
     async def async_close(self):
