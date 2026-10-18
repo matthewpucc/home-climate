@@ -76,6 +76,16 @@ The native integration serializes its worker lifecycle and refuses a second load
 
 The native watchdog pauses control and stops all owned devices when the worker heartbeat expires after 120 seconds; probe cutoffs independently stop auxiliary heating. The standalone package watches only the auxiliary heater, so shared heads can retain setpoints if its process stops. While HA or the host is down, neither watchdog can run. Native ownership recovery resumes after HA starts.
 
+## Native heartbeat delivery
+
+The native integration queues one coalesced heartbeat callback on Home Assistant's event loop without making the worker wait for a synthetic helper-service roundtrip. Only a callback received within five seconds can confirm that pulse. Queuing a pulse does not renew ownership; an expired request or a callback from a previous enable session cannot revive an expired lease.
+
+A brief pending pulse is normal. When confirmation becomes overdue, **Plan summary**, **Recovery status**, and **Current issues** explain that new activations are deferred. Already acknowledged calls are not stopped solely because one heartbeat callback was delayed. Fresh room-safety checks, Off requests, command acknowledgements, and existing timeout deadlines continue. Heartbeat confirmation clears this temporary block without restarting shared-head settling or minimum-run timing.
+
+The HA-loop watchdog still expires the last confirmed ownership lease after 120 seconds. Heartbeat delivery does not extend that deadline from the worker or bypass disable, unload, persisted ownership recovery, auxiliary probe cutoffs, or failed-command recovery. If HA's event loop itself is stalled, queued actuator calls and the watchdog cannot run until that loop resumes. Native status-helper writes are handled locally because normal integration sensors already publish status; standalone and legacy helper-service behavior is unchanged.
+
+Controller and recovery attributes expose heartbeat state, whether activations are blocked, and the reason. Frequently changing heartbeat ages are omitted from these recorder-facing attributes.
+
 ## Saving configuration and reloading
 
 Saving options first persists the new configuration, then stops the existing controller while the HA entry remains loaded. **Plan summary** and **Recovery status** show that the configuration is saved and waiting for devices to stop. The controller blocks new activations and keeps its watchdog cleanup active while critical climate devices are unavailable or have not reported Off.

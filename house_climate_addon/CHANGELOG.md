@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.9
+
+- Deliver native worker heartbeats through a coalesced Home Assistant loop callback instead of waiting on a synthetic helper-service roundtrip. Native status-helper writes no longer queue no-op services.
+- Defer new positive commands when heartbeat confirmation is overdue while retaining ownership, active-call safety checks, pending acknowledgements, and their original deadlines. Only a timely HA-loop confirmation can renew the lease; expired or previous-session callbacks cannot revive control.
+- Show delayed heartbeat confirmation ahead of ordinary running/ready plans and warnings, with stable heartbeat state, block reason, and confirmation status in entity attributes.
+- Preserve explicit disable, shutdown, auxiliary probe cutoffs, command acknowledgements, and standalone/legacy helper behavior.
+
 ## 0.6.8
 
 - Add an explicit Back (keep draft) action to every configuration and options form. Preserve staged edits and unfinished form values while navigating, including incomplete room, schedule, and fan forms.
