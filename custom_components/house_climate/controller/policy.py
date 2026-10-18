@@ -3,19 +3,40 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import math
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from .config import Config, Settings
 from .sensors import Reading, Sensors, from_f, to_f
 
 
-def native_target(fahrenheit: float, attrs: dict, unit: str) -> float:
-    """Bound and quantize a setpoint in the climate entity's native HA unit."""
+def native_target(fahrenheit: float, attrs: dict, unit: str, *, minimum_f: float | None = None) -> float:
+    """Bound and quantize on the climate entity's original HA setpoint grid."""
     minimum, maximum = float(attrs["min_temp"]), float(attrs["max_temp"])
     step = float(attrs.get("target_temp_step", .5 if unit in ("C", "°C") else 1))
     value = from_f(fahrenheit, unit)
     if (not all(math.isfinite(number) for number in (minimum, maximum, step, value))
             or minimum > maximum or step <= 0):
         raise ValueError("Invalid climate temperature range")
+    if minimum_f is not None:
+        floor = from_f(minimum_f, unit)
+        if isinstance(minimum_f, bool) or not math.isfinite(floor):
+            raise ValueError("Invalid minimum climate setpoint")
+        # Raising min_temp itself would shift the grid. Keep the original
+        # anchor and choose the first supported rung at or above the floor.
+        # Decimal arithmetic avoids an extra rung from binary float error.
+        anchor, ceiling, increment = (Decimal(str(number)) for number in (minimum, maximum, step))
+        floor_value = Decimal(str(minimum_f))
+        if unit in ("C", "°C"):
+            floor_value = (floor_value - 32) * 5 / 9
+        lower = max(anchor, floor_value)
+        first = int(((lower - anchor) / increment).to_integral_value(rounding=ROUND_CEILING))
+        last = int(((ceiling - anchor) / increment).to_integral_value(rounding=ROUND_FLOOR))
+        if first > last:
+            raise ValueError(
+                f"No supported setpoint at or above {minimum_f:g}°F within HA range "
+                f"{minimum:g} to {maximum:g}{unit}")
+        rung = max(first, min(last, round((value - minimum) / step)))
+        return float(anchor + rung * increment)
     value = max(minimum, min(maximum, minimum + round((value - minimum) / step) * step))
     return round(value, 3)
 
@@ -38,8 +59,11 @@ def call_target_f(config: Config, entity: str, mode: str, comfort: float,
         except (TypeError, ValueError, OverflowError):
             pass
         target += offset if mode == "heat" else -offset
+    floor = config.head_cool_min_f.get(entity) if mode == "cool" else None
+    if floor is not None:
+        target = max(target, floor)
     try:
-        return to_f(native_target(target, attrs, climate_unit), climate_unit)
+        return to_f(native_target(target, attrs, climate_unit, minimum_f=floor), climate_unit)
     except (KeyError, TypeError, ValueError, OverflowError):
         # Disconnected/incomplete heads still get an explainable shadow plan.
         # The executor retains its activation-time metadata validation.

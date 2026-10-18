@@ -85,6 +85,7 @@ class Config:
     head_minimum_off_seconds: float = 180
     head_heat_call_offset_f: float = 5
     head_cool_call_offset_f: float = 5
+    head_cool_min_f: dict[str, float] = field(default_factory=dict)
     sensor_stale_seconds: float = 900
     sensor_confirmation_seconds: float = 60
     sensor_disagreement_f: float = 3
@@ -267,6 +268,14 @@ class Config:
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or not 1 <= value <= 300):
             raise ValueError("head_activation_timeout_seconds must be from 1 to 300 seconds")
+        if not isinstance(self.head_cool_min_f, dict):
+            raise ValueError("head_cool_min_f must map configured climate entity IDs to temperatures")
+        for entity, value in self.head_cool_min_f.items():
+            if entity not in self.heads.values():
+                raise ValueError("Cooling minimums must reference configured heat-pump climate entity IDs")
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not -40 <= value <= 140):
+                raise ValueError("Cooling minimums must be finite temperatures from -40 to 140°F")
         for name in ("head_heat_call_offset_f", "head_cool_call_offset_f"):
             value = getattr(self, name)
             if (isinstance(value, bool) or not isinstance(value, (int, float))
