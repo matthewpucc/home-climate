@@ -64,6 +64,12 @@ def navigable(parent):
             if user_input is not None and not (
                     result.get("type") == "form" and result.get("step_id") == step):
                 self._form_drafts.pop(key, None)
+                if step in {"schedule", "fan"} and values.get("remove") and key[2] is not None:
+                    self._remove_indexed_draft(step, key[1], key[2])
+                elif step == "remove_room" and values.get("confirm"):
+                    self._form_drafts = {
+                        pending_key: pending for pending_key, pending in self._form_drafts.items()
+                        if len(pending_key) < 2 or pending_key[1] != key[1]}
             return result
 
         return navigate
@@ -120,13 +126,30 @@ class RoomEditor:
             return step, self.head_entity_id
         return (step,)
 
+    def _remove_indexed_draft(self, step, room_id, removed):
+        """Keep unfinished edits attached to the same item after a sibling is removed."""
+        updated = {}
+        for key, values in self._form_drafts.items():
+            if key == (f"select_{step}", room_id):
+                continue
+            if key[0] == step and key[1] == room_id and key[2] is not None:
+                if key[2] == removed:
+                    continue
+                if key[2] > removed:
+                    key = key[0], key[1], key[2] - 1
+            updated[key] = values
+        self._form_drafts = updated
+
     def form(self, step, schema, errors=None, detail=None):
         pending = self._form_drafts.get(self._form_key(step))
         if pending:
             schema = self.add_suggested_values_to_schema(vol.Schema(schema), pending).schema
         schema = {
-            vol.Required("navigation_action", default="continue"): self.choice([
-                ("continue", "Continue"), ("back", "Back (keep draft)")]),
+            vol.Required("navigation_action", default="continue"): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[{"value": "continue", "label": "Continue"},
+                             {"value": "back", "label": "Back (keep draft)"}],
+                    mode=selector.SelectSelectorMode.LIST)),
             **schema,
         }
         return self.async_show_form(
