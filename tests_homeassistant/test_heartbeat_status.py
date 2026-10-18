@@ -105,11 +105,11 @@ class HeartbeatStatusTests(unittest.IsolatedAsyncioTestCase):
                        "auxiliary_lease_remaining_seconds": 0})
         summary = self.rendered(Overview(entry))
         self.assertIn("cool Quiet space", summary)
-        self.assertIn("auxiliary heating held off", summary)
+        self.assertIn("auxiliary heat blocked", summary)
         self.assertNotIn("auxiliary heat requested", summary)
         self.assertEqual(self.rendered(RecoveryStatus(entry)), reason)
         self.assertTrue(self.rendered(CurrentIssues(entry)).startswith(reason))
-        self.assertEqual(self.rendered(AuxiliaryPlan(entry)), "Heater kept off · " + reason)
+        self.assertEqual(self.rendered(AuxiliaryPlan(entry)), "Auxiliary heat blocked · " + reason)
         attributes = RecoveryStatus(entry).extra_state_attributes["heartbeat"]
         self.assertTrue(attributes["auxiliary_blocked"])
         self.assertEqual(attributes["auxiliary_reason"], reason)
@@ -117,4 +117,18 @@ class HeartbeatStatusTests(unittest.IsolatedAsyncioTestCase):
         status["heartbeat"].update(auxiliary_blocked=False, auxiliary_reason=None)
         self.assertEqual(self.rendered(AuxiliaryPlan(entry)), "Plan: heat using room probes")
         self.assertEqual(self.rendered(RecoveryStatus(entry)), "Ready")
+        self.assertEqual(self.calls, [])
+
+    async def test_healthy_delivery_phases_do_not_churn_recorder_attributes(self):
+        entry = self.live_entry(state="confirmed", blocked=False)
+        status = entry.runtime_data.status
+        entities = (ControllerStatus(entry), RecoveryStatus(entry), CurrentIssues(entry))
+        before = [deepcopy(entity.extra_state_attributes) for entity in entities]
+        for attributes in before:
+            self.assertEqual(attributes["heartbeat"]["state"], "ok")
+        status["heartbeat"].update(state="pending", pending_seconds=.1, lease_remaining_seconds=100)
+        self.assertEqual([entity.extra_state_attributes for entity in entities], before)
+        self.assertEqual(status["heartbeat"]["state"], "pending")
+        self.assertEqual(self.rendered(RecoveryStatus(entry)), "Ready")
+        self.assertEqual(self.rendered(CurrentIssues(entry)), "None")
         self.assertEqual(self.calls, [])

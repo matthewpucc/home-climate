@@ -43,6 +43,7 @@ class NativeControls:
         self._auxiliary_heartbeat_off_receipt = False
         self._auxiliary_heartbeat_off_ack = False
         self._auxiliary_stop_pending = False
+        self._auxiliary_stop_epoch = 0
         self.problem = None
         self._auxiliary_off_error = None
         self._stop_log_reason = None
@@ -76,6 +77,9 @@ class NativeControls:
             self.pending_fans = tuple(entity for entity in dict.fromkeys(pending)
                                       if entity not in self.owned)
             self.recovering = bool(self.owned)
+            # A prior process may have dispatched heat while HA still cached Off.
+            # Restored auxiliary ownership needs a fresh superseding stop.
+            self._auxiliary_heat_possible = bool(self.config.heater_entity in self.owned)
             if self.owned:
                 self._log_stop(logging.INFO, "Recovering previously owned devices after integration load")
         self._publish()
@@ -326,6 +330,7 @@ class NativeControls:
                 and (self.auxiliary_inflight or self._auxiliary_heat_possible
                      or self._auxiliary_could_heat())):
             self.auxiliary_heartbeat_blocked = True
+            self._auxiliary_stop_epoch += 1
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
             self._auxiliary_heartbeat_off_receipt = False
             self._auxiliary_heartbeat_off_ack = False
@@ -362,6 +367,7 @@ class NativeControls:
             # Keep possible heat exposure until a confirmed superseding stop.
             self._auxiliary_heat_possible = True
         if self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked:
+            self._auxiliary_stop_epoch += 1
             self._auxiliary_stop_pending = False
             self._auxiliary_heartbeat_off_receipt = False
             self._auxiliary_heartbeat_off_ack = False
@@ -373,6 +379,7 @@ class NativeControls:
                 or (self._auxiliary_heat_possible and self._auxiliary_stop_pending)):
             # An earlier Off cannot supersede a positive service which only
             # completed later. Require another Off and a fresh report after it.
+            self._auxiliary_stop_epoch += 1
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
             self._auxiliary_heartbeat_off_receipt = False
             self._auxiliary_heartbeat_off_ack = False
@@ -387,14 +394,19 @@ class NativeControls:
             return
         self._auxiliary_heat_possible = True
         if not self._auxiliary_stop_pending:
+            self._auxiliary_stop_epoch += 1
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
             self._auxiliary_heartbeat_off_receipt = False
             self._auxiliary_heartbeat_off_ack = False
             self._auxiliary_stop_pending = True
+        return (self.ownership_generation, self._auxiliary_stop_epoch)
 
     @callback
-    def auxiliary_off_finished(self):
-        if self._auxiliary_stop_pending:
+    def auxiliary_off_finished(self, receipt):
+        # A stop dispatched before the last positive completion cannot prove
+        # that the newly uncertain heater has been superseded.
+        if (receipt is not None and self._auxiliary_stop_pending
+                and receipt == (self.ownership_generation, self._auxiliary_stop_epoch)):
             self._auxiliary_heartbeat_off_receipt = True
             self._ack_auxiliary_heartbeat_off()
 
@@ -489,8 +501,7 @@ class NativeControls:
         self._task = self.hass.async_create_task(self.async_check(), "House Climate watchdog")
 
     async def _off(self, entity):
-        if entity == self.config.heater_entity:
-            self.auxiliary_off_started()
+        receipt = self.auxiliary_off_started() if entity == self.config.heater_entity else None
         try:
             async with asyncio.timeout(5):
                 await self.hass.services.async_call(
@@ -500,7 +511,7 @@ class NativeControls:
                     blocking=True,
                 )
             if entity == self.config.heater_entity:
-                self.auxiliary_off_finished()
+                self.auxiliary_off_finished(receipt)
             return True
         except Exception as exc:
             message = f"Could not stop {entity}: {exc}"
@@ -566,8 +577,7 @@ class NativeControls:
                 elif self.config.heater_entity in self.owned:
                     if self.auxiliary_heartbeat_blocked:
                         if not self._ack_auxiliary_heartbeat_off():
-                            if await self._off(self.config.heater_entity):
-                                self._auxiliary_heartbeat_off_receipt = True
+                            await self._off(self.config.heater_entity)
                             self._ack_auxiliary_heartbeat_off()
                     elif self._auxiliary_could_heat() and not self.probes_safe(self._probe_states()):
                         await self._off(self.config.heater_entity)

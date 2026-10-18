@@ -49,9 +49,14 @@ def heartbeat_attributes(status):
     heartbeat = status.get("heartbeat")
     if heartbeat is None:
         return {}
-    return {"heartbeat": {key: heartbeat[key] for key in
-                          ("state", "blocked", "reason", "auxiliary_blocked", "auxiliary_reason")
-                          if key in heartbeat}}
+    result = {key: heartbeat[key] for key in
+              ("state", "blocked", "reason", "auxiliary_blocked", "auxiliary_reason")
+              if key in heartbeat}
+    if not heartbeat.get("blocked") and heartbeat.get("state") in ("pending", "confirmed"):
+        # The HA-loop confirmation publishes both stages on every ordinary pulse.
+        # Keep the exact delivery phase in runtime diagnostics, not recorder churn.
+        result["state"] = "ok"
+    return {"heartbeat": result}
 
 
 def has_plan(status):
@@ -295,7 +300,7 @@ class Overview(ControllerEntity):
         else:
             text = "Heat pumps would stay off" if preview else "Heat pumps off requested"
         if auxiliary_heartbeat_issue(status):
-            text += "; auxiliary heating held off"
+            text += "; auxiliary heat blocked"
         elif status.get("heater_on"):
             text += "; auxiliary heat " + ("would be on" if preview else "requested")
         elif status.get("auxiliary_fan_only"):
@@ -566,7 +571,7 @@ class AuxiliaryPlan(ControllerEntity):
             return None
         status = self.runtime.status
         if issue := auxiliary_heartbeat_issue(status):
-            return short("Heater kept off · " + issue)
+            return short("Auxiliary heat blocked · " + issue)
         if (status.get("event") == "live"
                 and self.runtime.config.heater_entity in status.get("device_issues", {})):
             detail = status.get("recovery_details", {}).get(self.runtime.config.heater_entity, {})

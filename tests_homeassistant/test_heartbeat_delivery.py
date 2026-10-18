@@ -6,6 +6,8 @@ import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from homeassistant.helpers.storage import Store
+
 from custom_components.house_climate.controller.config import Config
 from custom_components.house_climate.controller.ha import HAActivationDeferred, HAError
 from tests_homeassistant import test_native as fixtures
@@ -22,7 +24,8 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
     settle_watchdog = native.NativeControlTests.settle_watchdog
 
 
-    async def timed_runtime(self, *, timeout=300, auxiliary_timeout=120, no_auxiliary=False):
+    async def timed_runtime(self, *, timeout=300, auxiliary_timeout=120,
+                            no_auxiliary=False, entry_id="native"):
         cfg = replace(
             Config.from_dict(self.cfg.to_dict()),
             heartbeat_timeout_seconds=timeout,
@@ -30,7 +33,7 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         if no_auxiliary:
             cfg = replace(cfg, heater_entity=None, auxiliary_room=None)
-        return await self.runtime(cfg=cfg)
+        return await self.runtime(cfg=cfg, entry_id=entry_id)
 
     def set_device_mode(self, entity, mode):
         state = self.hass.states.get(entity)
@@ -304,7 +307,7 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         clock = self.controlled_clock()
         await self.claim(runtime)
         guest = runtime.config.heads["guest"]
-        fan = runtime.config.fans["office"]
+        fan = next(iter(runtime.config.fans.values()))
         self.set_device_mode(guest, "cool")
         self.hass.states.async_set(fan, "on", {"percentage": 60, "supported_features": 49})
         await self.settle_watchdog(runtime.controls)
@@ -385,14 +388,14 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         callback = self.queue_heartbeat(runtime)
         off_started, release_off = asyncio.Event(), asyncio.Event()
         original_call = self.hass.services.async_call
-        async def held_off(domain, service, service_data=None, *args, **kwargs):
+        async def held_off(_registry, domain, service, service_data=None, *args, **kwargs):
             if (domain == "climate" and service == "set_hvac_mode"
                     and service_data.get("entity_id") == heater
                     and service_data.get("hvac_mode") == "off"):
                 off_started.set()
                 await release_off.wait()
             return await original_call(domain, service, service_data, *args, **kwargs)
-        with patch.object(self.hass.services, "async_call", side_effect=held_off):
+        with patch.object(type(self.hass.services), "async_call", new=held_off):
             clock.value = 221
             callback()  # Head lease is valid; the shorter heater lease is expired.
             self.assertEqual(runtime.controls.heartbeat_monotonic, 221)
@@ -433,14 +436,14 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         clock.value = 221
         original_call = self.hass.services.async_call
         attempted_off = []
-        async def unacknowledged_off(domain, service, service_data=None, *args, **kwargs):
+        async def unacknowledged_off(_registry, domain, service, service_data=None, *args, **kwargs):
             if (domain == "climate" and service == "set_hvac_mode"
                     and service_data.get("entity_id") == heater
                     and service_data.get("hvac_mode") == "off"):
                 attempted_off.append(dict(service_data))
                 return None
             return await original_call(domain, service, service_data, *args, **kwargs)
-        with patch.object(self.hass.services, "async_call", side_effect=unacknowledged_off):
+        with patch.object(type(self.hass.services), "async_call", new=unacknowledged_off):
             for state in ("unknown", "unavailable", None):
                 with self.subTest(state=state):
                     before = len(attempted_off)
@@ -482,14 +485,14 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         original_call = self.hass.services.async_call
         hold_off_report = False
         late_off_attempts = []
-        async def stale_off(domain, service, service_data=None, *args, **kwargs):
+        async def stale_off(_registry, domain, service, service_data=None, *args, **kwargs):
             if (hold_off_report and domain == "climate" and service == "set_hvac_mode"
                     and service_data.get("entity_id") == heater
                     and service_data.get("hvac_mode") == "off"):
                 late_off_attempts.append(dict(service_data))
                 return None
             return await original_call(domain, service, service_data, *args, **kwargs)
-        with patch.object(self.hass.services, "async_call", side_effect=stale_off):
+        with patch.object(type(self.hass.services), "async_call", new=stale_off):
             command = asyncio.create_task(asyncio.to_thread(
                 runtime.api.service, "climate", "set_temperature",
                 entity_id=heater, hvac_mode="heat", temperature=86,
@@ -546,14 +549,14 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         callback = self.queue_heartbeat(runtime)
         original_call = self.hass.services.async_call
         off_attempts = []
-        async def ignored_off(domain, service, service_data=None, *args, **kwargs):
+        async def ignored_off(_registry, domain, service, service_data=None, *args, **kwargs):
             if (domain == "climate" and service == "set_hvac_mode"
                     and service_data.get("entity_id") == heater
                     and service_data.get("hvac_mode") == "off"):
                 off_attempts.append(dict(service_data))
                 return None
             return await original_call(domain, service, service_data, *args, **kwargs)
-        with patch.object(self.hass.services, "async_call", side_effect=ignored_off):
+        with patch.object(type(self.hass.services), "async_call", new=ignored_off):
             clock.value = 221
             callback()
             self.assertEqual(runtime.controls.heartbeat_monotonic, 221)
@@ -571,3 +574,114 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         clock.value = 223
         self.queue_heartbeat(runtime)()
         self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
+
+    async def test_off_dispatched_before_late_heat_completion_cannot_ack_new_stop_obligation(self):
+        runtime, _ = await self.timed_runtime()
+        clock = self.controlled_clock()
+        await self.claim(runtime)
+        guest, heater = runtime.config.heads["guest"], runtime.config.heater_entity
+        self.set_device_mode(guest, "cool")
+        await self.settle_watchdog(runtime.controls)
+        heat_started, finish_heat = asyncio.Event(), asyncio.Event()
+        first_off_started, finish_first_off = asyncio.Event(), asyncio.Event()
+        next_off_started, finish_next_off = asyncio.Event(), asyncio.Event()
+        off_dispatches = []
+        async def late_heat(call):
+            heat_started.set()
+            await finish_heat.wait()
+            await self.handle(call)
+        async def ordered_off(call):
+            if call.data["entity_id"] == heater and call.data["hvac_mode"] == "off":
+                off_dispatches.append(dict(call.data))
+                if len(off_dispatches) == 1:
+                    first_off_started.set()
+                    await finish_first_off.wait()
+                else:
+                    next_off_started.set()
+                    await finish_next_off.wait()
+            await self.handle(call)
+        self.hass.services.async_register("climate", "set_temperature", late_heat)
+        self.hass.services.async_register("climate", "set_hvac_mode", ordered_off)
+        command = asyncio.create_task(asyncio.to_thread(
+            runtime.api.service, "climate", "set_temperature",
+            entity_id=heater, hvac_mode="heat", temperature=86,
+        ))
+        check = None
+        try:
+            await asyncio.wait_for(heat_started.wait(), 1)
+            self.assertEqual(runtime.controls.auxiliary_inflight, 1)
+            clock.value = 221
+            check = asyncio.create_task(runtime.controls.async_check())
+            await asyncio.wait_for(first_off_started.wait(), 1)
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            # Heat A completes after Off B was dispatched but before B completes.
+            finish_heat.set()
+            await command
+            self.assertEqual(runtime.controls.auxiliary_inflight, 0)
+            self.assertEqual(self.hass.states.get(heater).state, "heat")
+            finish_first_off.set()
+            await check
+            self.assertEqual(self.hass.states.get(heater).state, "off")
+            # B's genuinely new Off report still belongs to the old stop epoch.
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            clock.value = 222
+            self.queue_heartbeat(runtime)()
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            self.assertTrue(runtime.controls.enabled)
+            self.assertEqual(self.hass.states.get(guest).state, "cool")
+            # Only Off C, dispatched after A completed, can establish fresh proof.
+            await asyncio.wait_for(next_off_started.wait(), 1)
+            finish_next_off.set()
+            await self.settle_watchdog(runtime.controls)
+            self.assertGreaterEqual(len(off_dispatches), 2)
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            clock.value = 223
+            self.queue_heartbeat(runtime)()
+            self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
+            self.assertEqual(self.hass.states.get(guest).state, "cool")
+        finally:
+            finish_heat.set()
+            finish_first_off.set()
+            finish_next_off.set()
+            await command
+            if check is not None:
+                await check
+
+    async def test_restored_auxiliary_cached_off_needs_superseding_fresh_off_before_release(self):
+        heater = self.cfg.heater_entity
+        entry_id = "restored_aux_cached_off"
+        await Store(self.hass, 1, f"house_climate.{entry_id}.ownership").async_save({
+            "devices": [heater],
+        })
+        attempts = []
+        async def ignored_off(call):
+            if call.data["entity_id"] == heater and call.data["hvac_mode"] == "off":
+                attempts.append(dict(call.data))
+                return
+            await self.handle(call)
+        self.hass.services.async_register("climate", "set_hvac_mode", ignored_off)
+        runtime, _ = await self.timed_runtime(entry_id=entry_id)
+        await self.settle_watchdog(runtime.controls)
+        await runtime.controls.async_check()
+        self.assertTrue(attempts)
+        self.assertEqual(self.hass.states.get(heater).state, "off")
+        self.assertIn(heater, runtime.controls.owned)
+        self.assertTrue(runtime.controls.recovering)
+        self.assertFalse(runtime.controls.enabled)
+        with self.assertRaises(HAError):
+            await runtime.controls.async_set_enabled(True)
+        self.hass.services.async_register("climate", "set_hvac_mode", self.handle)
+        await runtime.controls.async_check()
+        await self.settle_watchdog(runtime.controls)
+        self.assertEqual(runtime.controls.owned, ())
+        self.assertFalse(runtime.controls.recovering)
+        await self.claim(runtime)
+        self.queue_heartbeat(runtime)()
+        self.assertTrue(runtime.controls.enabled)
+        self.assertIn(heater, runtime.controls.owned)
+        self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
+        await asyncio.to_thread(
+            runtime.api.service, "climate", "set_temperature",
+            entity_id=heater, hvac_mode="heat", temperature=86,
+        )
+        self.assertEqual(self.hass.states.get(heater).state, "heat")

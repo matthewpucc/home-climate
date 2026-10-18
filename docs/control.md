@@ -88,7 +88,7 @@ The main HA-loop watchdog expires the last confirmed ownership lease at the conf
 
 Heartbeat delivery does not extend either deadline from the worker or bypass disable, unload, persisted ownership recovery, auxiliary probe cutoffs, or failed-command recovery. If HA's event loop itself is stalled, queued actuator calls and the watchdog cannot run until that loop resumes. Native status-helper writes are handled locally because normal integration sensors already publish status; standalone and legacy helper-service behavior is unchanged.
 
-Controller and recovery attributes expose heartbeat state, whether activations are blocked, and the reason. Frequently changing heartbeat ages are omitted from these recorder-facing attributes.
+Controller and recovery attributes expose whether activations are blocked, the reason, and a stable heartbeat delivery state. Ordinary pending and confirmed pulses share the recorder-facing state `ok`; exact delivery phases remain in runtime diagnostics. Changing heartbeat ages are omitted. An auxiliary block is reported separately and describes an Off obligation, not proof that the heater has already stopped.
 
 ## Saving configuration and reloading
 

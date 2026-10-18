@@ -287,8 +287,7 @@ class NativeAPI:
         auxiliary_off = bool(
             controls and body.get("entity_id") == controls.config.heater_entity
             and service == "set_hvac_mode" and body.get("hvac_mode") == "off")
-        if auxiliary_off:
-            controls.auxiliary_off_started()
+        off_receipt = controls.auxiliary_off_started() if auxiliary_off else None
         try:
             async with asyncio.timeout(remaining):
                 await self.hass.services.async_call(domain, service, body, blocking=True)
@@ -298,7 +297,7 @@ class NativeAPI:
             raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
         else:
             if auxiliary_off:
-                controls.auxiliary_off_finished()
+                controls.auxiliary_off_finished(off_receipt)
         finally:
             if controls and activation:
                 controls.inflight -= 1
