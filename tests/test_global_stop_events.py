@@ -122,6 +122,49 @@ class GlobalStopEventTests(unittest.TestCase):
                           if domain in ("climate", "fan")}, self.expected_devices(cfg))
         self.assertEqual(ha.data[cfg.entity("enabled")]["state"], "on")
 
+    def test_release_still_attempts_all_off_when_stop_announcement_raises(self):
+        cfg, ha, _ = self.setup_run(True, True)
+        self.active_equipment(ha, cfg)
+        events = []
+
+        def report(event, **data):
+            if event == "stopping":
+                raise BrokenPipeError("diagnostic output closed")
+            events.append((event, data))
+
+        release(ha, Executor(cfg, ha, "°F"), report,
+                reason="Controller fault: test transport failure", cause="fault", forced=True)
+        self.assertEqual([event for event, _ in events], ["stopped"])
+        self.assertEqual(events[-1][1]["failures"], [])
+        requested = {data["entity_id"] for domain, service, data in ha.calls
+                     if domain in ("climate", "fan")
+                     and service in ("set_hvac_mode", "turn_off")}
+        self.assertEqual(requested, self.expected_devices(cfg))
+        self.assertTrue(all(ha.data[entity]["state"] == "off"
+                            for entity in self.expected_devices(cfg)))
+
+    def test_startup_still_reconciles_every_device_when_stop_announcement_raises(self):
+        cfg, ha, args = self.setup_run(True, True)
+        self.active_equipment(ha, cfg)
+        arming_requests = []
+
+        def report(event, **data):
+            if event == "stopping":
+                raise RuntimeError("diagnostic callback failed")
+            if event == "arming":
+                arming_requests.append({
+                    call["entity_id"] for domain, service, call in ha.calls
+                    if domain in ("climate", "fan")
+                    and service in ("set_hvac_mode", "turn_off")})
+
+        run_loop(args, cfg, ha_client=ha, stop_event=fixtures.BoundedEvent(1),
+                 event_callback=report)
+        # Capture at arming, before the final exit release can mask a skipped
+        # startup reconciliation by sending its own shutdown requests.
+        self.assertEqual(arming_requests, [self.expected_devices(cfg)])
+        self.assertTrue(all(ha.data[entity]["state"] == "off"
+                            for entity in self.expected_devices(cfg)))
+
 
 if __name__ == "__main__":
     unittest.main()
