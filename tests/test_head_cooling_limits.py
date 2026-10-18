@@ -7,7 +7,7 @@ import tomllib
 import unittest
 
 from house_climate.config import Config, Settings
-from house_climate.executor import ControlFault, Executor
+from house_climate.executor import Executor
 from house_climate.policy import Plan, Policy
 from tests.test_controller import FakeHA, NIGHT, config, fixture
 
@@ -144,13 +144,27 @@ class HeadCoolingLimitTests(unittest.TestCase):
         self.assertNotIn(self.bonus, executor.pending)
         self.assertNotIn(self.bonus, executor.device_issues)
 
-    def test_floor_above_advertised_maximum_never_sends_invalid_activation(self):
+    def test_impossible_floor_stops_only_affected_head_and_explains_configuration_block(self):
         states = self.states()
-        states[self.bonus]["attributes"]["max_temp"] = 64
+        states[self.bonus]["state"] = "cool"
+        states[self.bonus]["attributes"].update(max_temp=64, temperature=64)
+        plan = self.decide(states)
         ha, executor = self.executor(states)
-        with self.assertRaises(ControlFault):
-            executor.climate(self.bonus, "cool", 64, ha.states(), 0)
+        executor.step(deepcopy(plan), ha.states(), 0)
+        executor.step(deepcopy(plan), ha.states(), 15)
         self.assertEqual(self.activation(ha, self.bonus), [])
+        self.assertEqual(ha.data[self.bonus]["state"], "off")
+        self.assertEqual(ha.data[self.guest]["state"], "cool")
+        self.assertEqual(self.activation(ha, self.guest)[0]["temperature"], 64)
+        self.assertEqual(len(self.activation(ha, self.guest)), 1)
+        self.assertEqual(executor.phase, "running")
+        detail = executor.recovery_status(15)["devices"][self.bonus]
+        self.assertEqual(detail["kind"], "configuration")
+        self.assertIn("65", detail["reason"])
+        self.assertIn("64", detail["reason"])
+        # Configuration disagreement must not be mistaken for a Wi-Fi failure
+        # and trigger a reload of the integration owning healthy heads.
+        self.assertNotIn(self.bonus, executor.recoveries)
 
     def test_reported_floor_target_strictly_acknowledges_without_recovery_or_off(self):
         states = self.states()
