@@ -321,6 +321,7 @@ class RoomEditor:
             vol.Required("decision_interval_seconds", default=self.draft.get("decision_interval_seconds", 90)): self.number(60, 120, 1, "s"),
             vol.Required("head_minimum_run_seconds", default=self.draft.get("head_minimum_run_seconds", 300)): self.number(0, 3600, 1, "s"),
             vol.Required("head_minimum_off_seconds", default=self.draft.get("head_minimum_off_seconds", 180)): self.number(0, 3600, 1, "s"),
+            vol.Required("head_activation_timeout_seconds", default=self.draft.get("head_activation_timeout_seconds", 120)): self.number(1, 300, 1, "s"),
             vol.Required("head_heat_call_offset_f", default=self.delta(self.draft.get("head_heat_call_offset_f", 5))): self.number(0, self.delta(20), .1, self.unit),
             vol.Required("head_cool_call_offset_f", default=self.delta(self.draft.get("head_cool_call_offset_f", 5))): self.number(0, self.delta(20), .1, self.unit),
             vol.Required("poll_seconds", default=self.draft.get("poll_seconds", 15)): self.number(1, 30, 1, "s"),

@@ -114,16 +114,37 @@ class DecisionCadence:
                 plan.auxiliary_fan_only = False
                 self._warning("Auxiliary circulation stopped by fresh room temperature/probe check; waiting for next comfort decision")
 
-        for fan in self.config.fan_controls.values():
+        for key, fan in self.config.fan_controls.items():
             room = rooms.get(fan.room)
             unsafe = not room
             if fan.strategy in ("cooling", "transfer"):
                 unsafe = unsafe or room.low <= low + .25
             if fan.strategy == "transfer":
                 unsafe = unsafe or fan.source_room not in rooms
+            assist_head = plan.fan_head_assists.get(fan.entity_id)
             if unsafe and plan.fans.get(fan.entity_id, 0):
                 plan.fans[fan.entity_id] = 0
+                if assist_head:
+                    plan.fan_head_assists.pop(fan.entity_id, None)
+                    self.policy.transfer_on[key] = False
                 self._warning(f"Circulation fan {fan.entity_id}: stopped by fresh room temperature/probe check; waiting for next comfort decision")
+                continue
+            if assist_head and assist_head not in plan.head_targets_f:
+                # Assistance depends on its selected head. Ambient transfer
+                # can still help independently, using the already-on threshold.
+                source = rooms.get(fan.source_room)
+                target = plan.room_targets.get(fan.room, {}).get("target_f")
+                useful = False
+                if not unsafe and source and target is not None:
+                    delta = room.temperature - source.temperature
+                    useful = (((room.temperature > target and delta > 0)
+                               or (room.temperature < target and delta < 0))
+                              and abs(delta) > .25)
+                plan.fan_head_assists.pop(fan.entity_id, None)
+                if not useful and plan.fans.get(fan.entity_id, 0):
+                    plan.fans[fan.entity_id] = 0
+                    self.policy.transfer_on[key] = False
+                    self._warning(f"Circulation fan {fan.entity_id}: assisted head is inhibited and ambient transfer is not useful; waiting for next comfort decision")
 
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit="°F", *, monotonic_now=None):
         stamp = self.clock() if monotonic_now is None else monotonic_now

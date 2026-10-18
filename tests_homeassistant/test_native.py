@@ -38,7 +38,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         await dr.async_load(self.hass)
         await er.async_load(self.hass)
         self.cfg = replace(config(), poll_seconds=.03, off_settle_seconds=.04,
-                           command_timeout_seconds=1,
+                           command_timeout_seconds=1, head_activation_timeout_seconds=1,
                            equipment_timing_confirmed=True, heater_setpoint_confirmed=True)
         self.calls = []
         self.runtimes = []

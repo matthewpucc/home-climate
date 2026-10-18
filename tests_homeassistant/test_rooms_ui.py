@@ -201,6 +201,7 @@ class RoomUITests(unittest.IsolatedAsyncioTestCase):
             "decision_interval_seconds": (60, 120, 90),
             "head_minimum_run_seconds": (0, 3600, 300),
             "head_minimum_off_seconds": (0, 3600, 180),
+            "head_activation_timeout_seconds": (1, 300, 120),
             "poll_seconds": (1, 30, 15),
         }
         defaults = form["data_schema"]({})
@@ -212,12 +213,13 @@ class RoomUITests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(defaults[name], default)
         values = form["data_schema"]({
             "decision_interval_seconds": 120, "head_minimum_run_seconds": 600,
-            "head_minimum_off_seconds": 240, "poll_seconds": 10})
+            "head_minimum_off_seconds": 240, "head_activation_timeout_seconds": 150, "poll_seconds": 10})
         result = await flow.async_step_system(values)
         self.assertEqual(result["type"], "menu")
         self.assertEqual(flow.draft["decision_interval_seconds"], 120)
         self.assertEqual(flow.draft["head_minimum_run_seconds"], 600)
         self.assertEqual(flow.draft["head_minimum_off_seconds"], 240)
+        self.assertEqual(flow.draft["head_activation_timeout_seconds"], 150)
         self.assertEqual(flow.draft["poll_seconds"], 10)
         self.assertAlmostEqual(flow.draft["low_f"], 66, places=3)
         self.assertAlmostEqual(flow.draft["high_f"], 75, places=3)
@@ -228,7 +230,8 @@ class RoomUITests(unittest.IsolatedAsyncioTestCase):
         form = await flow.async_step_system()
         for name, value in (("decision_interval_seconds", 59), ("decision_interval_seconds", 121),
                             ("head_minimum_run_seconds", -1), ("head_minimum_off_seconds", -1),
-                            ("poll_seconds", 31)):
+                            ("poll_seconds", 31), ("head_activation_timeout_seconds", 0),
+                            ("head_activation_timeout_seconds", 301)):
             with self.subTest(name=name, value=value), self.assertRaises(probatio.Invalid):
                 form["data_schema"]({name: value})
 

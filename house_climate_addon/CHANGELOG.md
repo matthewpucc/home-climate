@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.5
+
+- Keep transfer fans running at their configured speed when their shared head is selected to condition the destination room, even before a useful room-temperature gradient develops. Fast safety checks remove head-dependent assistance when the head is inhibited.
+- Give heat-pump mode/setpoint acknowledgements a separate 120-second wait, configurable from System settings. Preserve a single bounded deadline across unconfirmed same-direction target changes; exact acknowledgement, safety stops, and Off/auxiliary/fan/transport timing remain unchanged.
+- Show pending head commands, requested and reported values, and confirmation countdowns in room plans and Recovery status.
+
 ## 0.6.4
 
 - Defer automatic reloads of a shared device integration while another healthy head on that integration is heating or cooling. Keep local recovery retries running without consuming a reload attempt.

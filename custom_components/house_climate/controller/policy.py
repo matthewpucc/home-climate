@@ -55,6 +55,7 @@ class Plan:
     heater_on: bool = False
     auxiliary_fan_only: bool = False
     fans: dict[str, int] = field(default_factory=dict)
+    fan_head_assists: dict[str, str] = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
     room_targets: dict = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
@@ -252,6 +253,27 @@ class Policy:
             key: call_target_f(self.config, self.config.heads[key], winner, target, states, climate_unit)
             for key, target in plan.head_targets_f.items()
         }
+        # A transfer fan can distribute conditioned air before the source
+        # area's ambient probe reflects the head's output. Only assist a head
+        # that survived the complete shared-mode arbitration and safety checks.
+        for key, fan in self.config.fan_controls.items():
+            if fan.strategy != "transfer":
+                continue
+            destination, source = rooms.get(fan.room), rooms.get(fan.source_room)
+            if not destination or not source:
+                continue
+            head = self.config.zones[fan.room].head
+            if (self.config.zones[fan.source_room].head != head
+                    or head not in plan.head_targets_f):
+                continue
+            target = bands[fan.room][2]
+            assists = ((winner == "cool" and destination.temperature > target)
+                       or (winner == "heat" and destination.temperature < target))
+            if assists:
+                plan.fans[fan.entity_id] = round(settings.value(fan.percentage))
+                if plan.fans[fan.entity_id]:
+                    plan.fan_head_assists[fan.entity_id] = head
+                self.transfer_on[key] = True
         if winner != "off":
             plan.reasons.append(f"{winner}: " + ", ".join(plan.head_targets_f))
         else:
