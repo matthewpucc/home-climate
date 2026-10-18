@@ -30,7 +30,8 @@ class HeadLimitsUITests(unittest.IsolatedAsyncioTestCase):
         menu = await flow.async_step_menu()
         self.assertIn("head_limits", menu["menu_options"])
         selection = await flow.async_step_head_limits()
-        selector = next(iter(selection["data_schema"].schema.values()))
+        selector = next(value for field, value in selection["data_schema"].schema.items()
+                        if field.schema == "head")
         choices = {item["value"]: item["label"] for item in selector.config["options"]}
         self.assertIn("North alcove, South nook", choices["climate.test_shared"])
         self.assertIn("Quiet space", choices["climate.test_second"])
