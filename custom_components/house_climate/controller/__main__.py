@@ -49,11 +49,19 @@ def stop_context(config, reason, cause, forced=False):
     }
 
 
+def announce_stop(report, context):
+    # A diagnostic sink (for example closed CLI stdout) must not prevent Off.
+    try:
+        report("stopping", **context)
+    except Exception:
+        pass
+
+
 def release(ha, executor, event_callback=None, *, reason="Controller shutdown",
             cause="shutdown", forced=False):
     report = event_callback or emit
     context = stop_context(executor.config, reason, cause, forced)
-    report("stopping", **context)
+    announce_stop(report, context)
     failures = executor.shutdown(reason=reason)
     # Leave ownership armed if the off command was not acknowledged. HA keeps retrying.
     try:
@@ -129,7 +137,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         active = True
                         # Reconcile startup/reenable through a full off barrier, including heater.
                         context = stop_context(config, "Startup all-off reconciliation", "startup")
-                        report("stopping", **context)
+                        announce_stop(report, context)
                         failures = executor.shutdown(states, reason=context["reason"])
                         for entity in failures:
                             kind = "Circulation fan" if entity in config.fans.values() else "Climate device"
