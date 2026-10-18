@@ -20,6 +20,9 @@ from .recovery import RecoveryManager
 
 _LOGGER = logging.getLogger(__name__)
 
+UNLOAD_ACK_TIMEOUT_SECONDS = 120
+SHUTDOWN_RECHECK_SECONDS = 15
+
 
 def controller_entity_ids(config):
     """The complete input set, including legacy helpers and safety interlocks."""
@@ -168,6 +171,11 @@ class ControllerRuntime:
         self._logged_stop = None
         self._logged_stop_failures = None
         self._logged_unload_blockers = None
+        self._stop_lock = asyncio.Lock()
+        self._shutdown_progress = asyncio.Event()
+        self._options_reload_task = None
+        self._configuration_reload_pending = False
+        self._configuration_reload_reason = None
         self.recovery = RecoveryManager(hass, self)
 
     async def async_setup_controls(self, entry_id):
@@ -195,6 +203,7 @@ class ControllerRuntime:
     def _async_controls_changed(self):
         if self.controls is None:
             return
+        self._shutdown_progress.set()
         previous = self.status.get("control_enabled")
         if self.status.get("event") == "live" and not self.controls.enabled:
             self.status = {"event": "stopping", **self.last_fault}
@@ -268,6 +277,7 @@ class ControllerRuntime:
             self.status.update(control_enabled=self.controls.enabled,
                                control_block_reason=self.controls.hint,
                                pending_fans=list(self.controls.pending_fans))
+        self._update_reload_status()
         self.recovery.observe(self.status)
         self.status["integration_recovery"] = self.recovery.diagnostics
         if event in ("fault", "worker_failed"):
@@ -352,7 +362,91 @@ class ControllerRuntime:
         except Exception:
             pass
 
-    async def async_stop(self, _event=None):
+    def _update_reload_status(self):
+        self.status["configuration_reload_pending"] = self._configuration_reload_pending
+        self.status["configuration_reload_reason"] = self._configuration_reload_reason
+
+    @callback
+    def async_schedule_options_reload(self, entry_id):
+        """Drain the old controller before asking HA to enter its unload state.
+
+        HA treats a False unload result as nonrecoverable. A disconnected head
+        must keep a configuration save pending, rather than strand the entry in
+        FAILED_UNLOAD after the watchdog eventually receives its Off report.
+        """
+        if self._options_reload_task and not self._options_reload_task.done():
+            return
+        self._configuration_reload_pending = True
+        self._configuration_reload_reason = "Configuration saved; waiting for devices to stop before reload"
+        self._update_reload_status()
+        async_dispatcher_send(self.hass, SIGNAL_STATUS)
+        self._options_reload_task = self.hass.async_create_background_task(
+            self._async_reload_when_stopped(entry_id), "House Climate saved configuration reload",
+            eager_start=False,
+        )
+
+    async def _async_wait_shutdown_progress(self, timeout=None):
+        if timeout is None:
+            timeout = SHUTDOWN_RECHECK_SECONDS
+        try:
+            await asyncio.wait_for(self._shutdown_progress.wait(), timeout=timeout)
+        except TimeoutError:
+            pass
+
+    async def _async_reload_when_stopped(self, entry_id):
+        try:
+            while not self.hass.is_stopping:
+                if await self.async_stop():
+                    if self.hass.is_stopping:
+                        return
+                    self._configuration_reload_reason = "Applying saved configuration"
+                    self._update_reload_status()
+                    async_dispatcher_send(self.hass, SIGNAL_STATUS)
+                    if not await self.hass.config_entries.async_reload(entry_id):
+                        _LOGGER.error("Saved configuration could not reload after controller shutdown")
+                    return
+                self._shutdown_progress.clear()
+                await self._async_wait_shutdown_progress()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("Saved configuration reload stopped unexpectedly")
+            self._configuration_reload_reason = "Saved configuration reload failed; check the Home Assistant log"
+        finally:
+            self._configuration_reload_pending = False
+            self._options_reload_task = None
+            self._update_reload_status()
+            async_dispatcher_send(self.hass, SIGNAL_STATUS)
+
+    async def _async_close_controls(self, wait_for_ack):
+        if self.controls is None:
+            return True
+        closed = await self.controls.async_close()
+        if closed or not wait_for_ack:
+            return closed
+        # Only wait for acknowledgement here. Cleanup services retain their own
+        # bounds and are never cancelled by an acknowledgement-wait timeout.
+        deadline = self.hass.loop.time() + UNLOAD_ACK_TIMEOUT_SECONDS
+        while not closed:
+            remaining = deadline - self.hass.loop.time()
+            if remaining <= 0:
+                return False
+            self._shutdown_progress.clear()
+            await self._async_wait_shutdown_progress(min(SHUTDOWN_RECHECK_SECONDS, remaining))
+            closed = await self.controls.async_close()
+        return True
+
+    async def async_stop(self, _event=None, *, wait_for_ack=False):
+        # An external unload supersedes a pending options reload. The managed
+        # reload itself re-enters this method from HA and must not cancel itself.
+        task = self._options_reload_task
+        if wait_for_ack and task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        async with self._stop_lock:
+            return await self._async_stop(wait_for_ack)
+
+    async def _async_stop(self, wait_for_ack):
         self.stop_event.set()
         self.wake_event.set()
         if self.comfort:
@@ -371,7 +465,7 @@ class ControllerRuntime:
                 self._async_report("worker_failed", {"error": "Controller shutdown timed out"})
                 return False
             await self.hass.async_add_executor_job(self.thread.join)
-        controls_closed = await self.controls.async_close() if self.controls else True
+        controls_closed = await self._async_close_controls(wait_for_ack)
         closed = controls_closed and recovery_closed
         if closed:
             self._logged_unload_blockers = None

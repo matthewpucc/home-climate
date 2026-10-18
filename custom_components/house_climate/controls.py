@@ -412,23 +412,30 @@ class NativeControls:
                     self._publish()
 
     async def async_close(self):
-        if not self.active and self._closing:
+        if not self.active and self._closing and not self.owned and not self.inflight:
             return True
         self._closing = True
-        await self.async_set_enabled(False)
-        if self._task:
-            await self._task
-        # The check lock also waits for a claim that was already saving ownership.
-        await self.async_check()
-        if self.owned or self.inflight:
-            self._closing = False
-            self._schedule_check()
-            # Keep watchdog subscriptions alive for unresolved critical ownership.
-            return False
-        # Optional fan-only cleanup survives in storage and resumes on next load.
-        self.active = False
-        for unsubscribe in self._unsubscribers:
-            unsubscribe()
-        self._unsubscribers.clear()
-        self._publish()
-        return True
+        closed = False
+        try:
+            await self.async_set_enabled(False)
+            if self._task:
+                # Cancelling a pending configuration reload must not cancel the
+                # independently scheduled watchdog it happens to be awaiting.
+                await asyncio.shield(self._task)
+            # The check lock also waits for a claim already saving ownership.
+            await self.async_check()
+            if self.owned or self.inflight:
+                # Keep subscriptions alive for unresolved critical ownership.
+                return False
+            # Fan-only cleanup survives in storage and resumes on next load.
+            self.active = False
+            for unsubscribe in self._unsubscribers:
+                unsubscribe()
+            self._unsubscribers.clear()
+            self._publish()
+            closed = True
+            return True
+        finally:
+            if not closed:
+                self._closing = False
+                self._schedule_check()

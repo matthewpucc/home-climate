@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import wraps
 from uuid import uuid4
 
 import probatio as vol
@@ -18,6 +19,63 @@ from .controller.sensors import from_f, to_f
 PROFILE_FIELDS = ("target_f", "half_band_f", "priority", "comfort_enabled", "fan_percentage", "low_f", "high_f")
 
 
+class NavigationSchema(vol.Schema):
+    """Render optional inputs for Back, but validate Continue with the full schema."""
+
+    def __init__(self, schema):
+        self._continue_schema = vol.Schema(schema)
+        optional = {}
+        for field, validator in schema.items():
+            if isinstance(field, vol.Required) and field.schema != "navigation_action":
+                field = vol.Optional(field.schema, default=field.default,
+                                     description=field.description)
+            optional[field] = validator
+        super().__init__(optional)
+
+    def __call__(self, data):
+        if isinstance(data, dict) and data.get("navigation_action") == "back":
+            # Back must work even when selectors are empty or edits are invalid.
+            return {key: value for key, value in data.items() if key in self.schema}
+        return self._continue_schema(data)
+
+
+def navigable(parent):
+    """Keep unfinished form values inside this flow when returning to a menu."""
+    def decorate(method):
+        step = method.__name__.removeprefix("async_step_")
+
+        @wraps(method)
+        async def navigate(self, user_input=None):
+            key = self._form_key(step)
+            values = None
+            if user_input is not None:
+                values = deepcopy(user_input)
+                action = values.pop("navigation_action", "continue")
+                self._form_drafts[key] = values
+                if action == "back":
+                    # One-shot confirmations must be selected again after Back.
+                    for confirmation in ("confirm", "remove", "apply_to_all"):
+                        values.pop(confirmation, None)
+                    destination = parent
+                    if step == "room" and self.room_id is None:
+                        destination = "menu"
+                    return await getattr(self, f"async_step_{destination}")()
+            result = await method(self, values)
+            if user_input is not None and not (
+                    result.get("type") == "form" and result.get("step_id") == step):
+                self._form_drafts.pop(key, None)
+                if step in {"schedule", "fan"} and values.get("remove") and key[2] is not None:
+                    self._remove_indexed_draft(step, key[1], key[2])
+                elif step == "remove_room" and values.get("confirm"):
+                    self._form_drafts = {
+                        pending_key: pending for pending_key, pending in self._form_drafts.items()
+                        if len(pending_key) < 2 or pending_key[1] != key[1]}
+            return result
+
+        return navigate
+    return decorate
+
+
 class RoomEditor:
     """A private draft: cancelling any step leaves the running config untouched."""
 
@@ -32,6 +90,7 @@ class RoomEditor:
         self.schedule_index = None
         self.fan_index = None
         self.head_entity_id = None
+        self._form_drafts = {}
 
     @property
     def unit(self):
@@ -56,10 +115,57 @@ class RoomEditor:
     def room_choices(self, exclude=None):
         return [(key, value["name"]) for key, value in self.draft["rooms"].items() if key != exclude]
 
+    def _form_key(self, step):
+        if step in {"room", "remove_room", "select_schedule", "select_fan"}:
+            return step, self.room_id
+        if step == "schedule":
+            return step, self.room_id, self.schedule_index
+        if step == "fan":
+            return step, self.room_id, self.fan_index
+        if step == "head_limit":
+            return step, self.head_entity_id
+        return (step,)
+
+    def _remove_indexed_draft(self, step, room_id, removed):
+        """Keep unfinished edits attached to the same item after a sibling is removed."""
+        updated = {}
+        for key, values in self._form_drafts.items():
+            if key == (f"select_{step}", room_id):
+                continue
+            if key[0] == step and key[1] == room_id and key[2] is not None:
+                if key[2] == removed:
+                    continue
+                if key[2] > removed:
+                    key = key[0], key[1], key[2] - 1
+            updated[key] = values
+        self._form_drafts = updated
+
     def form(self, step, schema, errors=None, detail=None):
+        pending = self._form_drafts.get(self._form_key(step))
+        if pending is not None:
+            restored = {}
+            for field, validator in schema.items():
+                if field.schema not in pending and field.schema not in {
+                        "confirm", "remove", "apply_to_all"}:
+                    # The frontend omits empty fields. Do not resurrect a value
+                    # the user cleared before returning to the parent menu.
+                    description = dict(field.description or {})
+                    description.pop("suggested_value", None)
+                    field = type(field)(field.schema, description=description)
+                restored[field] = validator
+            schema = self.add_suggested_values_to_schema(vol.Schema(restored), pending).schema
+        schema = {
+            vol.Required("navigation_action", default="continue"): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=[{"value": "continue", "label": "Continue"},
+                             {"value": "back", "label": "Back (keep draft)"}],
+                    mode=selector.SelectSelectorMode.LIST)),
+            **schema,
+        }
         return self.async_show_form(
-            step_id=step, data_schema=vol.Schema(schema), errors=errors or {},
-            description_placeholders={"detail": str(detail or "")})
+            step_id=step, data_schema=NavigationSchema(schema), errors=errors or {},
+            description_placeholders={"detail": str(detail or "")},
+            last_step=step == "finish")
 
     def profile_schema(self, data):
         result = {
@@ -135,6 +241,7 @@ class RoomEditor:
         self.room_id = None
         return await self.async_step_room()
 
+    @navigable("menu")
     async def async_step_select_room(self, user_input=None):
         if not self.draft["rooms"]:
             return await self.async_step_add_room()
@@ -148,6 +255,7 @@ class RoomEditor:
             "room", "add_schedule", "select_schedule", "add_fan", "select_fan", "remove_room", "menu"],
             description_placeholders={"room": self.draft["rooms"][self.room_id]["name"]})
 
+    @navigable("room_menu")
     async def async_step_room(self, user_input=None):
         room = self.draft["rooms"].get(self.room_id, {})
         errors, detail = {}, None
@@ -203,6 +311,7 @@ class RoomEditor:
             schema = self.add_suggested_values_to_schema(vol.Schema(schema), user_input).schema
         return self.form("room", schema, errors, detail)
 
+    @navigable("room_menu")
     async def async_step_remove_room(self, user_input=None):
         if user_input is not None and user_input.get("confirm"):
             candidate = deepcopy(self.draft)
@@ -221,6 +330,7 @@ class RoomEditor:
         self.schedule_index = None
         return await self.async_step_schedule()
 
+    @navigable("room_menu")
     async def async_step_select_schedule(self, user_input=None):
         schedules = self.draft["rooms"][self.room_id].get("schedules", [])
         if not schedules:
@@ -231,6 +341,7 @@ class RoomEditor:
         return self.form("select_schedule", {vol.Required("schedule"): self.choice([
             (i, p.get("name") or f'{p["start"]}–{p["end"]}') for i, p in enumerate(schedules)])})
 
+    @navigable("room_menu")
     async def async_step_schedule(self, user_input=None):
         room = self.draft["rooms"][self.room_id]
         period = room["schedules"][self.schedule_index] if self.schedule_index is not None else room["profile"]
@@ -265,6 +376,7 @@ class RoomEditor:
         self.fan_index = None
         return await self.async_step_fan()
 
+    @navigable("room_menu")
     async def async_step_select_fan(self, user_input=None):
         fans = self.draft["rooms"][self.room_id].get("fans", [])
         if not fans:
@@ -275,6 +387,7 @@ class RoomEditor:
         return self.form("select_fan", {vol.Required("fan"): self.choice([
             (i, p["entity_id"]) for i, p in enumerate(fans)])})
 
+    @navigable("room_menu")
     async def async_step_fan(self, user_input=None):
         fans = self.draft["rooms"][self.room_id].get("fans", [])
         fan = fans[self.fan_index] if self.fan_index is not None else {}
@@ -312,6 +425,7 @@ class RoomEditor:
             schema[vol.Optional("source_room", **({"default": fan["source_room"]} if fan.get("source_room") else {}))] = self.choice(choices)
         return self.form("fan", schema, errors, detail)
 
+    @navigable("menu")
     async def async_step_system(self, user_input=None):
         errors, detail = {}, None
         if user_input is not None:
@@ -345,6 +459,7 @@ class RoomEditor:
             vol.Required("live", default=self.live): bool,
         }, errors, detail)
 
+    @navigable("menu")
     async def async_step_head_limits(self, user_input=None):
         choices = self.head_choices()
         if not choices:
@@ -358,6 +473,7 @@ class RoomEditor:
                 return await self.async_step_head_limit()
         return self.form("head_limits", {vol.Required("head"): self.choice(choices)}, errors, detail)
 
+    @navigable("head_limits")
     async def async_step_head_limit(self, user_input=None):
         choices = dict(self.head_choices())
         if self.head_entity_id not in choices:
@@ -396,6 +512,7 @@ class RoomEditor:
             schema = self.add_suggested_values_to_schema(vol.Schema(schema), user_input).schema
         return self.form("head_limit", schema, errors, detail)
 
+    @navigable("menu")
     async def async_step_auxiliary(self, user_input=None):
         errors, detail = {}, None
         if user_input is not None:
@@ -434,6 +551,7 @@ class RoomEditor:
             schema[vol.Optional("auxiliary_room", **({"default": self.draft["auxiliary_room"]} if self.draft.get("auxiliary_room") else {}))] = self.choice(choices)
         return self.form("auxiliary", schema, errors, detail)
 
+    @navigable("menu")
     async def async_step_import_file(self, user_input=None):
         errors, detail = {}, None
         if user_input is not None:
@@ -450,6 +568,7 @@ class RoomEditor:
                 return await self.async_step_menu()
         return self.form("import_file", {vol.Required("config_file", default="house_climate.toml"): str}, errors, detail)
 
+    @navigable("menu")
     async def async_step_finish(self, user_input=None):
         errors, detail = {}, None
         try:

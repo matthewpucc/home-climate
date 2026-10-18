@@ -2,6 +2,14 @@
 
 For native HA installations, use **House Climate → Configure**. TOML is optional, intended for standalone/add-on operation or importing an existing setup.
 
+## Editing without losing your draft
+
+Each form has an **Action** control. Choose **Back (keep draft)** and press **Next** to return to its parent menu without applying that form. Previously submitted edits and the form's unfinished values remain in this editing session. Reopen the form and submit with **Continue** to include those unfinished values in the configuration; final review saves only validated, continued edits. On **Review and save**, Back uses the **Submit** button and returns without saving.
+
+Choose **Continue** and submit a form to validate and stage its changes. Only the final **Review and save → Continue → Submit** writes the configuration and reloads the controller. Closing the dialog with **X** cancels the entire unsaved draft. Back does not apply pending remove, confirmation, or apply-to-all selections; choose these again when you intend to use them.
+
+To adjust comfort during a live run, use the room's thermostat card or **Desired temperature** control. Those changes create a comfort hold without reloading the integration. Saving base profiles, schedules, or equipment configuration through **Configure** does reload it and leaves **Controller enabled** off.
+
 ## Model
 
 One configuration describes one outdoor/shared heat-or-cool system. Any number of indoor heads can belong to it. Each room references one head; several rooms can reference the same head. An optional independent auxiliary heater belongs to one room.
@@ -12,7 +20,7 @@ A room has a stable ID, editable name, optional HA area, temperature probes, bas
 | --- | --- |
 | Target | Desired temperature while comfort control is enabled |
 | Half-width | Heat/cool demand begins outside target ± this amount |
-| Priority | 0.1–10; higher wins between competing comfort demands |
+| Priority | 0.1–10 in 0.1 steps; higher numbers mean higher priority when rooms compete for heat versus cool. 1 is typical; safety limits take precedence |
 | Comfort enabled | Off uses system temperature limits instead of a comfort target |
 | Scheduled fan speed | Used by fans with the schedule strategy; 0 means off |
 | Lower/upper override | Optional explicit comfort edges, for asymmetric bands |
@@ -41,7 +49,7 @@ TOML uses a map keyed by quoted climate entity IDs, with absolute temperatures i
 "climate.example_head_a" = 65
 ```
 
-The controller combines this floor with the head's advertised range and temperature step. It rounds up to an allowed device setpoint when needed, so a 65°F floor on a 0.5°C grid may produce an 18.5°C call. If no supported setpoint satisfies the floor, that head is stopped and its configuration issue is reported while other heads can continue. Changing this setting does not loosen acknowledgement checks or trigger an integration reload.
+The controller combines this floor with the head's advertised range and temperature step. It rounds up to an allowed device setpoint when needed, so a 65°F floor on a 0.5°C grid may produce an 18.5°C call. If no supported setpoint satisfies the floor, that head is stopped and its configuration issue is reported while other heads can continue. An infeasible limit does not loosen acknowledgement checks or trigger an automatic device-integration reload. Saving changes through Configure still reloads House Climate normally.
 
 ## Heat-pump acknowledgement wait
 
