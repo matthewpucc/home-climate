@@ -197,7 +197,8 @@ class Executor:
                 "reason": reason, "state": state.get("state", "missing"),
                 "available_modes": list(state.get("attributes", {}).get("hvac_modes") or []),
                 "required_mode": self._wanted_modes.get(entity),
-                "kind": "recovery" if entity in self.recoveries else "capability",
+                "kind": ("recovery" if entity in self.recoveries
+                         else block.get("kind", "capability") if block else "capability"),
             }
             pending = self.pending.get(entity)
             recovery = self.recoveries.get(entity)
@@ -314,14 +315,19 @@ class Executor:
             entity, "set_hvac_mode", {"hvac_mode": "off"}, self.reports_off, states, now,
             fresh=bool(pending and pending.command != command))
 
-    def target(self, entity: str, fahrenheit: float, states: dict, heater: bool = False) -> float:
+    def target(self, entity: str, fahrenheit: float, states: dict, heater: bool = False,
+               *, mode: str | None = None) -> float:
         attrs = states.get(entity, {}).get("attributes", {})
+        floor = (self.config.head_cool_min_f.get(entity)
+                 if not heater and mode == "cool" and entity in self.head_cycles else None)
         try:
-            result = native_target(fahrenheit, attrs, self.unit)
+            result = native_target(fahrenheit, attrs, self.unit, minimum_f=floor)
             if heater and not float(attrs["min_temp"]) <= from_f(fahrenheit, self.unit) <= float(attrs["max_temp"]):
                 raise ControlFault("Configured high heater setpoint is outside its supported range")
             return result
-        except (KeyError, ValueError, TypeError, OverflowError):
+        except (KeyError, ValueError, TypeError, OverflowError) as exc:
+            if floor is not None:
+                raise ControlFault(f"Cooling minimum {floor:g}°F cannot be applied to {entity}: {exc}") from None
             raise ControlFault(f"Missing/invalid climate temperature range: {entity}") from None
 
     def _command_timeout_message(self, entity, service, data, observed):
@@ -401,7 +407,8 @@ class Executor:
             elif entity in self.recoveries:
                 kind, reason = "recovery", f"Off requested to reconcile device state: {self.recoveries[entity].reason}"
             elif entity in self.capability_blocks:
-                kind, reason = "capability", f"Off requested: {self.capability_blocks[entity]['reason']}"
+                block = self.capability_blocks[entity]
+                kind, reason = block.get("kind", "capability"), f"Off requested: {block['reason']}"
             elif self._shared_stop_context:
                 kind, reason = self._shared_stop_context
             else:
@@ -589,9 +596,25 @@ class Executor:
         if not self._supports(entity, mode, states):
             self.off(entity, states, now, preserve_capability=True)
             return
-        if not heater and self._head_off_guard(entity, states, now):
+        floor_configured = (not heater and mode == "cool" and entity in self.head_cycles
+                            and entity in self.config.head_cool_min_f)
+        if not heater and not floor_configured and self._head_off_guard(entity, states, now):
             return
-        target = self.target(entity, target_f, states, heater)
+        try:
+            target = self.target(entity, target_f, states, heater, mode=mode)
+        except ControlFault as exc:
+            if not floor_configured:
+                raise
+            # This is a configuration/metadata constraint, not a failed
+            # device command. Keep the issue local and exclude automatic reload.
+            self.capability_blocks[entity] = {
+                "kind": "configuration", "reason": str(exc), "missing_modes": [],
+            }
+            self._sync_issue(entity)
+            self.off(entity, states, now, preserve_capability=True)
+            return
+        if floor_configured and self._head_off_guard(entity, states, now):
+            return
 
         def matches(observed):
             try:
@@ -813,7 +836,9 @@ class Executor:
                 try:
                     # Fresh capability limits may differ from the cached policy
                     # snapshot; this never recalculates bias from a changing sensor.
-                    call = to_f(native_target(call, states.get(entity, {}).get("attributes", {}), self.unit), self.unit)
+                    floor = self.config.head_cool_min_f.get(entity) if plan.mode == "cool" else None
+                    call = to_f(native_target(call, states.get(entity, {}).get("attributes", {}),
+                                              self.unit, minimum_f=floor), self.unit)
                 except (KeyError, TypeError, ValueError, OverflowError):
                     pass
                 plan.head_call_targets_f[key] = call

@@ -42,7 +42,9 @@ Room comfort goals and head call setpoints are separate. The external room probe
 
 The default heating and cooling offsets are each 5°F. Heating requests the greater of the room goal and the head's valid onboard temperature, plus the heating offset. Cooling requests the smaller of those temperatures, minus the cooling offset. Missing, invalid, or implausible onboard temperatures fall back to the room goal. Onboard temperature is used to choose the actuator setpoint; it does not replace fused external room feedback.
 
-For example, a 72°F cooling goal normally sends a 67°F head setpoint. If the head already reports 69°F while the external room probes still need cooling, it sends 64°F. The request is clamped and rounded to the head's advertised range and step. The room goal remains 72°F. A device limit can prevent the full offset from being achieved.
+For example, a 72°F cooling goal normally sends a 67°F head setpoint. If the head already reports 69°F while the external room probes still need cooling, the offset asks for 64°F. A configured 65°F minimum cooling setpoint raises that call to 65°F, subject to the head's advertised range and step. The room goal remains 72°F. A device limit can prevent the full offset from being achieved.
+
+Optional per-head cooling floors (`head_cool_min_f`, keyed by physical climate entity) supplement incomplete HA metadata. Both planning and execution apply them. Rounding stays on the original device temperature grid and never goes below the floor. An incompatible floor blocks only the affected head, reports a configuration issue, and does not request an integration reload. Heating and the independent auxiliary heater are unchanged. See [head cooling limits](configuration.md#head-cooling-limits) for setup.
 
 System settings exposes separate Heating call offset and Cooling call offset controls as temperature differences. TOML uses `head_heat_call_offset_f` and `head_cool_call_offset_f`, each 0–20°F. Zero disables the offset for that direction and sends the original room goal, ignoring onboard temperature for this calculation.
 
