@@ -62,6 +62,33 @@ def controller_entity_ids(config):
     return frozenset(entities)
 
 
+class NativeActivationDispatch:
+    """Serialize worker abandonment with HA-loop dispatch for one positive call."""
+
+    def __init__(self, deadline):
+        self.deadline = deadline
+        self._lock = threading.Lock()
+        self._dispatched = False
+        self._abandoned = False
+
+    def abandon_if_queued(self):
+        with self._lock:
+            if self._dispatched:
+                return False
+            self._abandoned = True
+            return True
+
+    def begin(self):
+        with self._lock:
+            if self._abandoned or time.monotonic() >= self.deadline:
+                self._abandoned = True
+                raise HAActivationDeferred(
+                    "Home Assistant has not dispatched this command; retrying after responsiveness returns")
+            # Mark possible execution immediately before the actual service call.
+            # From here a timeout remains an ambiguous actuator failure.
+            self._dispatched = True
+
+
 class NativeAPI:
     """Read configured cached states; marshal service calls onto HA's loop."""
 
@@ -106,13 +133,20 @@ class NativeAPI:
             generation = self.controls._snapshot["generation"]
         timeout = 2 if self.stop_event.is_set() else 10
         deadline = time.monotonic() + timeout
+        dispatch = NativeActivationDispatch(deadline) if self.controls is not None and activation else None
         future = asyncio.run_coroutine_threadsafe(
-            self._async_request(path, body, deadline, generation=generation), self.hass.loop
+            self._async_request(path, body, deadline, generation=generation, dispatch=dispatch), self.hass.loop
         )
         try:
             return future.result(timeout=timeout + 1)
         except FutureTimeout:
+            # Cancellation alone cannot prevent a queued coroutine from starting
+            # first when HA's loop resumes. The shared ticket closes that race.
+            deferred = dispatch is not None and dispatch.abandon_if_queued()
             future.cancel()
+            if deferred:
+                raise HAActivationDeferred(
+                    "Home Assistant has not dispatched this command; retrying after responsiveness returns") from None
             raise HAError(f"Home Assistant native operation timed out: {path}") from None
 
     @staticmethod
@@ -240,11 +274,14 @@ class NativeAPI:
             return [{"entity_id": entity, **state} for entity, state in states.items()]
         return result
 
-    async def _async_request(self, path, body, deadline, *, generation=None):
+    async def _async_request(self, path, body, deadline, *, generation=None, dispatch=None):
         # Cancelling the worker's future is not enough: a queued coroutine can
         # start before its cancellation callback when the loop resumes.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if dispatch is not None and dispatch.abandon_if_queued():
+                raise HAActivationDeferred(
+                    "Home Assistant has not dispatched this command; retrying after responsiveness returns")
             raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
 
         if path == "config" and body is None:
@@ -281,6 +318,9 @@ class NativeAPI:
             if issue or confirming:
                 raise HAActivationDeferred(issue or HEARTBEAT_WAIT_REASON)
             controls.check_activation(body.get("entity_id"), body, generation=generation)
+        if dispatch is not None:
+            dispatch.begin()
+        if controls and activation:
             controls.inflight += 1
             if body.get("entity_id") == controls.config.heater_entity:
                 controls.auxiliary_activation_started(body)

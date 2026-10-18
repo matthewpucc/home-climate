@@ -4,6 +4,7 @@
 
 - Deliver native worker heartbeats through a coalesced Home Assistant loop callback instead of waiting on a synthetic helper-service roundtrip. Native status-helper writes no longer queue no-op services.
 - Defer new positive commands when heartbeat confirmation is overdue while retaining ownership, active-call safety checks, pending acknowledgements, and their original deadlines. Only a timely HA-loop confirmation can renew the lease; expired or previous-session callbacks cannot revive control.
+- Abandon positive commands that time out before service dispatch without stopping an existing head call. Once dispatch begins, uncertain commands retain strict timeout and Off recovery.
 - Show delayed heartbeat confirmation ahead of ordinary running/ready plans and warnings, with stable heartbeat state, block reason, and confirmation status in entity attributes.
 - Configure native controller and auxiliary heartbeat leases separately, defaulting to five and two minutes. Auxiliary expiry stops heating locally and requires confirmed Off plus a later heartbeat before rearming; healthy heads retain the main lease.
 - Preserve explicit disable, shutdown, auxiliary probe cutoffs, command acknowledgements, and standalone/legacy helper behavior.
