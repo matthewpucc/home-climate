@@ -43,6 +43,31 @@ class HeadCoolingLimitTests(unittest.TestCase):
         return [data for _, service, data in ha.calls
                 if service == "set_temperature" and data["entity_id"] == entity]
 
+    def test_impossible_high_priority_cooling_cannot_outvote_valid_heating(self):
+        primary = self.base.heads["primary"]
+        cfg = replace(self.base, head_cool_min_f={primary: 65})
+        states = fixture(cfg, office=65, entertainment=68, primary=76)
+        states[primary]["attributes"].update(
+            min_temp=60, max_temp=64, current_temperature=69,
+        )
+        # Both rooms breach a hard limit by 1°F. At NIGHT the primary bedroom
+        # otherwise wins on priority, but this cooling call cannot be served.
+        plan = self.decide(states, cfg)
+        self.assertEqual(plan.mode, "heat")
+        self.assertIn("bonus", plan.head_targets_f)
+        self.assertNotIn("primary", plan.head_targets_f)
+        self.assertTrue(any(
+            "65" in warning and ("64" in warning or "floor" in warning.lower())
+            for warning in plan.warnings
+        ))
+        # Once the integration advertises a compatible range, a fresh comfort
+        # decision may select that high-priority cooling demand again.
+        states[primary]["attributes"]["max_temp"] = 90
+        restored = self.decide(states, cfg)
+        self.assertEqual(restored.mode, "cool")
+        self.assertIn("primary", restored.head_targets_f)
+        self.assertEqual(restored.head_call_targets_f["primary"], 65)
+
     def test_missing_override_keeps_previous_biased_cooling_behavior(self):
         raw = self.base.to_dict()
         raw.pop("head_cool_min_f", None)
@@ -148,7 +173,10 @@ class HeadCoolingLimitTests(unittest.TestCase):
         states = self.states()
         states[self.bonus]["state"] = "cool"
         states[self.bonus]["attributes"].update(max_temp=64, temperature=64)
-        plan = self.decide(states)
+        # A cached plan may predate a capability change; execution must still
+        # enforce the configured floor and isolate this head.
+        plan = Plan(mode="cool", head_targets_f={"bonus": 72, "guest": 72},
+                    head_call_targets_f={"bonus": 65, "guest": 64})
         ha, executor = self.executor(states)
         executor.step(deepcopy(plan), ha.states(), 0)
         executor.step(deepcopy(plan), ha.states(), 15)
@@ -171,7 +199,8 @@ class HeadCoolingLimitTests(unittest.TestCase):
         states[self.bonus]["state"] = "cool"
         states[self.bonus]["attributes"].update(max_temp=64, temperature=64)
         ha, executor = self.executor(states)
-        blocked = self.decide(ha.states())
+        blocked = Plan(mode="cool", head_targets_f={"bonus": 72, "guest": 72},
+                       head_call_targets_f={"bonus": 65, "guest": 64})
         executor.step(blocked, ha.states(), 0)
         self.assertEqual(ha.data[self.bonus]["state"], "off")
         self.assertEqual(executor.recovery_status(0)["devices"][self.bonus]["kind"], "configuration")
