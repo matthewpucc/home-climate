@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .config import Config
-from .ha import HAError
+from .ha import HAActivationDeferred, HAError
 from .policy import Plan, call_target_f, native_target
 from .sensors import from_f, to_f
 
@@ -155,7 +155,16 @@ class Executor:
                                        activation_since=activation_since)
         if service == "set_hvac_mode" and data.get("hvac_mode") == "off":
             self._record_controller_head_stop(entity, states, previous_pending=pending)
-        self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
+        try:
+            self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
+        except HAActivationDeferred:
+            # Native controls guarantee that no command was dispatched. Keep
+            # any earlier command and its original acknowledgement budget.
+            if pending is None:
+                self.pending.pop(entity, None)
+            else:
+                self.pending[entity] = pending
+            raise
         self.pending[entity].receipt = True
         return False
 
@@ -273,6 +282,9 @@ class Executor:
                     and pending is not None and pending is not before and pending.receipt):
                 self._refresh_needed = True
             return acknowledged
+        except HAActivationDeferred:
+            # Temporary native heartbeat uncertainty is not a device failure.
+            return False
         except (CommandTimeout, HAError) as exc:
             self._issue(entity, f"{exc}; off acknowledgement required", states)
             pending = self.pending.get(entity)
@@ -723,6 +735,12 @@ class Executor:
             self.ensure(entity, service, data, matches, states, now, force=bool(urgent_off))
             if urgent_off:
                 failure.command, failure.retry_at = command, now
+        except HAActivationDeferred:
+            # Retain existing fan acknowledgement/backoff state until the
+            # native heartbeat is confirmed; Off commands are never deferred.
+            if failure:
+                plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
+            return
         except (ControlFault, HAError) as exc:
             if failure and now < failure.retry_at and command in (None, failure.command):
                 plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")

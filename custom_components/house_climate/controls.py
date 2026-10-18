@@ -14,11 +14,12 @@ from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 from homeassistant.helpers.storage import Store
 
-from .controller.ha import HAError
+from .controller.ha import HAActivationDeferred, HAError
 from .controller.ha_package import watchdog_signature
 from .controller.sensors import probe_value
 
 _LOGGER = logging.getLogger(__name__)
+
 
 
 class NativeControls:
@@ -34,6 +35,15 @@ class NativeControls:
         self.heartbeat = 0.0
         self.heartbeat_monotonic = 0.0
         self.inflight = 0
+        self.ownership_generation = 0
+        self.auxiliary_inflight = 0
+        self._auxiliary_heat_possible = False
+        self.auxiliary_heartbeat_blocked = False
+        self._auxiliary_heartbeat_baseline = None
+        self._auxiliary_heartbeat_off_receipt = False
+        self._auxiliary_heartbeat_off_ack = False
+        self._auxiliary_stop_pending = False
+        self._auxiliary_stop_epoch = 0
         self.problem = None
         self._auxiliary_off_error = None
         self._stop_log_reason = None
@@ -67,6 +77,9 @@ class NativeControls:
             self.pending_fans = tuple(entity for entity in dict.fromkeys(pending)
                                       if entity not in self.owned)
             self.recovering = bool(self.owned)
+            # A prior process may have dispatched heat while HA still cached Off.
+            # Restored auxiliary ownership needs a fresh superseding stop.
+            self._auxiliary_heat_possible = bool(self.config.heater_entity in self.owned)
             if self.owned:
                 self._log_stop(logging.INFO, "Recovering previously owned devices after integration load")
         self._publish()
@@ -91,6 +104,10 @@ class NativeControls:
             "enabled": self.enabled and not self.recovering and not self._claiming,
             "owned": bool(self.owned) and not self.recovering, "active": self.active,
             "heartbeat": self.heartbeat,
+            "heartbeat_monotonic": self.heartbeat_monotonic,
+            "generation": self.ownership_generation,
+            "auxiliary_heartbeat_blocked": self.auxiliary_heartbeat_blocked,
+            "auxiliary_heartbeat_reason": self.auxiliary_heartbeat_reason,
         }
         self.notify()
 
@@ -182,6 +199,7 @@ class NativeControls:
     def pause(self, reason=None):
         self._log_stop(logging.WARNING, reason or "Controller pause requested")
         self.enabled = False
+        self.ownership_generation += 1
         self.recovering = bool(self.owned)
         if reason:
             self.problem = reason
@@ -204,6 +222,8 @@ class NativeControls:
             self._shutdown_save_error = None
         elif self.owned:
             self._log_stop(logging.INFO, "Controller disabled")
+        if enabled != self.enabled:
+            self.ownership_generation += 1
         self.enabled = enabled
         if not enabled and self.owned:
             self.recovering = True
@@ -253,6 +273,7 @@ class NativeControls:
                                     self._publish()
                                     raise
                                 self.owned = devices
+                                self.ownership_generation += 1
                                 self.pending_fans = pending
                                 self.recovering = not self.enabled
                             self.heartbeat = datetime.now(timezone.utc).timestamp()
@@ -267,20 +288,166 @@ class NativeControls:
                 await self._clear_if_off()
                 self._schedule_check()
         elif domain == "input_datetime":
-            if not self.enabled or self.recovering or self._closing:
-                raise HAError("Control is disabled or still stopping")
-            self.heartbeat = datetime.now(timezone.utc).timestamp()
-            self.heartbeat_monotonic = time.monotonic()
-            self._publish()
+            self.confirm_heartbeat()
         # The old input_text is only a CLI diagnostic sink; native sensors expose it.
 
-    def check_activation(self, entity, data):
+    @property
+    def auxiliary_heartbeat_reason(self):
+        if not self.auxiliary_heartbeat_blocked:
+            return None
+        if self._auxiliary_heartbeat_off_ack:
+            return "Auxiliary heater stopped after heartbeat expiry; waiting for a fresh heartbeat"
+        return "Auxiliary heater heartbeat expired; waiting for fresh Off acknowledgement"
+
+    def _auxiliary_marker(self):
+        state = self.hass.states.get(self.config.heater_entity) if self.config.heater_entity else None
+        if state is None:
+            return None
+        return (state.state, state.attributes.get("hvac_action"),
+                state.attributes.get("temperature"), state.last_reported,
+                state.last_updated, state.last_changed)
+
+    def _auxiliary_could_heat(self):
+        state = self.hass.states.get(self.config.heater_entity) if self.config.heater_entity else None
+        return (state is None or state.state not in ("off", "fan_only")
+                or state.attributes.get("hvac_action") == "heating")
+
+    def _reset_auxiliary_heartbeat(self):
+        self._auxiliary_heat_possible = False
+        self.auxiliary_heartbeat_blocked = False
+        self._auxiliary_heartbeat_baseline = None
+        self._auxiliary_heartbeat_off_receipt = False
+        self._auxiliary_heartbeat_off_ack = False
+        self._auxiliary_stop_pending = False
+
+    def _check_auxiliary_heartbeat_deadline(self, instant):
+        if (not self.config.heater_entity or self.config.heater_entity not in self.owned
+                or not self.enabled or self.recovering or not self.live):
+            return
+        age = instant - self.heartbeat_monotonic
+        if (not self.auxiliary_heartbeat_blocked
+                and not 0 <= age <= self.config.auxiliary_heartbeat_timeout_seconds
+                and (self.auxiliary_inflight or self._auxiliary_heat_possible
+                     or self._auxiliary_could_heat())):
+            self.auxiliary_heartbeat_blocked = True
+            self._auxiliary_stop_epoch += 1
+            self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
+            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_ack = False
+            self._auxiliary_stop_pending = True
+            try:
+                _LOGGER.warning(
+                    "Auxiliary heater heartbeat expired (age %.1fs; lease limit %.0fs); "
+                    "Off requested for %s; shared heat-pump heads retain their own lease",
+                    age, self.config.auxiliary_heartbeat_timeout_seconds, self.config.heater_entity)
+            except Exception:
+                pass  # Diagnostic handlers must never prevent the safety Off.
+            self._publish()
+            self._schedule_check()
+
+    def _ack_auxiliary_heartbeat_off(self):
+        if not (self.auxiliary_heartbeat_blocked or self._auxiliary_heat_possible):
+            return False
+        acknowledged = bool(
+            self._auxiliary_heartbeat_off_receipt and not self.auxiliary_inflight
+            and self._is_off(self.config.heater_entity)
+            and self._auxiliary_marker() != self._auxiliary_heartbeat_baseline)
+        if acknowledged and not self.auxiliary_heartbeat_blocked:
+            self._auxiliary_heat_possible = False
+        if acknowledged != self._auxiliary_heartbeat_off_ack:
+            self._auxiliary_heartbeat_off_ack = acknowledged
+            self._publish()
+        return acknowledged
+
+    @callback
+    def auxiliary_activation_started(self, data):
+        self.auxiliary_inflight += 1
+        if data.get("hvac_mode") != "fan_only":
+            # A completed service can still leave an old Off report cached.
+            # Keep possible heat exposure until a confirmed superseding stop.
+            self._auxiliary_heat_possible = True
+        if self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked:
+            self._auxiliary_stop_epoch += 1
+            self._auxiliary_stop_pending = False
+            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_ack = False
+
+    @callback
+    def auxiliary_activation_finished(self):
+        self.auxiliary_inflight -= 1
+        if (self.auxiliary_heartbeat_blocked
+                or (self._auxiliary_heat_possible and self._auxiliary_stop_pending)):
+            # An earlier Off cannot supersede a positive service which only
+            # completed later. Require another Off and a fresh report after it.
+            self._auxiliary_stop_epoch += 1
+            self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
+            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_ack = False
+            self._auxiliary_stop_pending = True
+            self._publish()
+
+    @callback
+    def auxiliary_off_started(self):
+        if (not self.config.heater_entity
+                or not (self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked
+                        or self.auxiliary_inflight or self._auxiliary_could_heat())):
+            return
+        self._auxiliary_heat_possible = True
+        if not self._auxiliary_stop_pending:
+            self._auxiliary_stop_epoch += 1
+            self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
+            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_ack = False
+            self._auxiliary_stop_pending = True
+        return (self.ownership_generation, self._auxiliary_stop_epoch)
+
+    @callback
+    def auxiliary_off_finished(self, receipt):
+        # A stop dispatched before the last positive completion cannot prove
+        # that the newly uncertain heater has been superseded.
+        if (receipt is not None and self._auxiliary_stop_pending
+                and receipt == (self.ownership_generation, self._auxiliary_stop_epoch)):
+            self._auxiliary_heartbeat_off_receipt = True
+            self._ack_auxiliary_heartbeat_off()
+
+    @callback
+    def confirm_heartbeat(self, *, generation=None):
+        """Renew only a still-valid ownership lease, on Home Assistant's loop."""
+        if generation is not None and generation != self.ownership_generation:
+            raise HAActivationDeferred("Heartbeat belongs to an earlier controller lease")
+        if (not self.active or not self.live or not self.enabled or not self.owned
+                or self.recovering or self._claiming or self._closing):
+            raise HAActivationDeferred("Controller is disabled or stopping; heartbeat ignored")
+        instant = time.monotonic()
+        age = instant - self.heartbeat_monotonic
+        if not 0 <= age <= self.config.heartbeat_timeout_seconds:
+            self.pause(f"Control paused: controller heartbeat expired (age {age:.1f}s; lease limit {self.config.heartbeat_timeout_seconds:g}s)")
+            raise HAActivationDeferred("Controller heartbeat lease expired")
+        # Observe the shorter heater deadline before the shared lease is renewed.
+        self._check_auxiliary_heartbeat_deadline(instant)
+        if self._ack_auxiliary_heartbeat_off():
+            self._reset_auxiliary_heartbeat()
+        self.heartbeat = datetime.now(timezone.utc).timestamp()
+        self.heartbeat_monotonic = instant
+        self._publish()
+
+    def check_activation(self, entity, data, *, generation=None):
+        if generation is not None and generation != self.ownership_generation:
+            raise HAActivationDeferred("Command belongs to an earlier controller lease")
         if (not self.active or not self.live or not self.enabled or self.recovering
                 or self._claiming or self._closing
                 or entity not in self.owned):
             raise HAError("Controller is disabled or stopping; activation blocked")
-        if not 0 <= time.monotonic() - self.heartbeat_monotonic <= 120:
+        instant = time.monotonic()
+        age = instant - self.heartbeat_monotonic
+        if not 0 <= age <= self.config.heartbeat_timeout_seconds:
             raise HAError("Controller heartbeat expired; activation blocked")
+        self._check_auxiliary_heartbeat_deadline(instant)
+        if entity == self.config.heater_entity and (
+                self.auxiliary_heartbeat_blocked
+                or not 0 <= age <= self.config.auxiliary_heartbeat_timeout_seconds):
+            raise HAActivationDeferred(self.auxiliary_heartbeat_reason
+                                      or "Waiting for a fresh auxiliary heater heartbeat")
         if (entity == self.config.heater_entity and data.get("hvac_mode") == "heat"
                 and not self.probes_safe(self._probe_states())):
             raise HAError("External room probes block auxiliary heat")
@@ -293,7 +460,9 @@ class NativeControls:
     async def _clear_if_off(self):
         async with self._lock:
             critical = tuple(entity for entity in self.owned if entity.startswith("climate."))
-            if (self.owned and not self.inflight
+            auxiliary_safe = (not (self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked)
+                              or self._ack_auxiliary_heartbeat_off())
+            if (self.owned and not self.inflight and not self.auxiliary_inflight and auxiliary_safe
                     and all(self._is_off(entity) for entity in critical)):
                 pending = tuple(dict.fromkeys([
                     *self.pending_fans,
@@ -303,6 +472,8 @@ class NativeControls:
                 # Persist the retry obligation before releasing critical ownership.
                 await self._save((), pending)
                 self.owned = ()
+                self.ownership_generation += 1
+                self._reset_auxiliary_heartbeat()
                 self.pending_fans = pending
                 self.recovering = False
                 if self.problem and self.problem.startswith(
@@ -330,6 +501,7 @@ class NativeControls:
         self._task = self.hass.async_create_task(self.async_check(), "House Climate watchdog")
 
     async def _off(self, entity):
+        receipt = self.auxiliary_off_started() if entity == self.config.heater_entity else None
         try:
             async with asyncio.timeout(5):
                 await self.hass.services.async_call(
@@ -338,6 +510,9 @@ class NativeControls:
                     {"entity_id": entity, **({"hvac_mode": "off"} if entity.startswith("climate.") else {})},
                     blocking=True,
                 )
+            if entity == self.config.heater_entity:
+                self.auxiliary_off_finished(receipt)
+            return True
         except Exception as exc:
             message = f"Could not stop {entity}: {exc}"
             if entity.startswith("fan."):
@@ -352,6 +527,7 @@ class NativeControls:
                 if entity == self.config.heater_entity:
                     self._auxiliary_off_error = message
             self._publish()
+            return False
 
     async def async_check(self):
         """Run on HA's loop even when the control worker stalls or exits."""
@@ -369,21 +545,28 @@ class NativeControls:
                 self._auxiliary_off_error = None
             attempted = set()
             if self.owned:
-                heartbeat_age = time.monotonic() - self.heartbeat_monotonic
-                expired = not 0 <= heartbeat_age <= 120
+                instant = time.monotonic()
+                heartbeat_age = instant - self.heartbeat_monotonic
+                expired = not 0 <= heartbeat_age <= self.config.heartbeat_timeout_seconds
+                if not expired:
+                    self._check_auxiliary_heartbeat_deadline(instant)
                 if self.recovering or not self.enabled or expired:
                     if self.enabled and expired:
                         self._log_stop(
                             logging.WARNING,
                             f"controller heartbeat expired (age {heartbeat_age:.1f}s; "
-                            "lease limit 120s); disabling control",
+                            f"lease limit {self.config.heartbeat_timeout_seconds:g}s); disabling control",
                         )
                         self.enabled = False
+                        self.ownership_generation += 1
                         self.problem = "Control paused: controller heartbeat expired"
                     self.recovering = True
                     self._publish()
                     attempted = {entity for entity in self.owned
-                                 if self.inflight or not self._is_off(entity)}
+                                 if self.inflight or not self._is_off(entity)
+                                 or (entity == self.config.heater_entity
+                                     and (self._auxiliary_heat_possible
+                                          or self.auxiliary_heartbeat_blocked))}
                     await asyncio.gather(*(self._off(entity) for entity in attempted))
                     try:
                         await self._clear_if_off()
@@ -392,10 +575,11 @@ class NativeControls:
                         self._log_shutdown_save_error(self.problem)
                         self._publish()
                 elif self.config.heater_entity in self.owned:
-                    heater = self.hass.states.get(self.config.heater_entity)
-                    could_heat = (not heater or heater.state not in ("off", "fan_only")
-                                  or heater.attributes.get("hvac_action") == "heating")
-                    if could_heat and not self.probes_safe(self._probe_states()):
+                    if self.auxiliary_heartbeat_blocked:
+                        if not self._ack_auxiliary_heartbeat_off():
+                            await self._off(self.config.heater_entity)
+                            self._ack_auxiliary_heartbeat_off()
+                    elif self._auxiliary_could_heat() and not self.probes_safe(self._probe_states()):
                         await self._off(self.config.heater_entity)
             # Cleanup from previous mappings is independent of the live lease.
             # Current fans are removed from this bucket by the saved claim above.

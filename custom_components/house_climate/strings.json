@@ -146,11 +146,15 @@
           "poll_seconds": "Safety and recovery check interval",
           "equipment_timing_confirmed": "I have verified the equipment timing",
           "live": "Enable live commands",
-          "head_activation_timeout_seconds": "Heat-pump acknowledgement wait"
+          "head_activation_timeout_seconds": "Heat-pump acknowledgement wait",
+          "heartbeat_timeout_seconds": "Controller heartbeat timeout",
+          "auxiliary_heartbeat_timeout_seconds": "Auxiliary heater heartbeat timeout"
         },
         "data_description": {
           "head_activation_timeout_seconds": "Seconds to wait for an exact heat-pump mode and setpoint report. Off commands and safety checks keep their normal timing.",
-          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes.",
+          "heartbeat_timeout_seconds": "Native Home Assistant watchdog: pause control and stop owned devices if the control loop has not reported a heartbeat within this many seconds. Default 300 seconds (5 minutes); allowed range 60–900 seconds. Device acknowledgement waits and temperature limits are unchanged.",
+          "auxiliary_heartbeat_timeout_seconds": "Native Home Assistant watchdog: stop and latch the auxiliary heater off after this heartbeat gap, while heat-pump heads can continue until the controller timeout. Default 120 seconds (2 minutes); at least 30 seconds and no longer than the controller timeout. The independent temperature cutoff remains active."
         }
       },
       "auxiliary": {
@@ -218,7 +222,10 @@
     },
     "error": {
       "invalid_config": "The configuration could not be saved. Review the details above.",
-      "room_in_use": "This room is still referenced, or is the last remaining room."
+      "room_in_use": "This room is still referenced, or is the last remaining room.",
+      "invalid_heartbeat_timeout": "Choose a controller heartbeat timeout from 60 to 900 seconds.",
+      "invalid_auxiliary_heartbeat_timeout": "Choose an auxiliary heater heartbeat timeout from 30 to 900 seconds.",
+      "auxiliary_heartbeat_exceeds_controller": "The auxiliary heater timeout must not exceed the controller heartbeat timeout."
     },
     "abort": {
       "single_instance_allowed": "Only one shared-system controller may be configured."
@@ -370,11 +377,15 @@
           "poll_seconds": "Safety and recovery check interval",
           "equipment_timing_confirmed": "I have verified the equipment timing",
           "live": "Enable live commands",
-          "head_activation_timeout_seconds": "Heat-pump acknowledgement wait"
+          "head_activation_timeout_seconds": "Heat-pump acknowledgement wait",
+          "heartbeat_timeout_seconds": "Controller heartbeat timeout",
+          "auxiliary_heartbeat_timeout_seconds": "Auxiliary heater heartbeat timeout"
         },
         "data_description": {
           "head_activation_timeout_seconds": "Seconds to wait for an exact heat-pump mode and setpoint report. Off commands and safety checks keep their normal timing.",
-          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes.",
+          "heartbeat_timeout_seconds": "Native Home Assistant watchdog: pause control and stop owned devices if the control loop has not reported a heartbeat within this many seconds. Default 300 seconds (5 minutes); allowed range 60–900 seconds. Device acknowledgement waits and temperature limits are unchanged.",
+          "auxiliary_heartbeat_timeout_seconds": "Native Home Assistant watchdog: stop and latch the auxiliary heater off after this heartbeat gap, while heat-pump heads can continue until the controller timeout. Default 120 seconds (2 minutes); at least 30 seconds and no longer than the controller timeout. The independent temperature cutoff remains active."
         }
       },
       "auxiliary": {
@@ -442,7 +453,10 @@
     },
     "error": {
       "invalid_config": "The configuration could not be saved. Review the details above.",
-      "room_in_use": "This room is still referenced, or is the last remaining room."
+      "room_in_use": "This room is still referenced, or is the last remaining room.",
+      "invalid_heartbeat_timeout": "Choose a controller heartbeat timeout from 60 to 900 seconds.",
+      "invalid_auxiliary_heartbeat_timeout": "Choose an auxiliary heater heartbeat timeout from 30 to 900 seconds.",
+      "auxiliary_heartbeat_exceeds_controller": "The auxiliary heater timeout must not exceed the controller heartbeat timeout."
     }
   }
 }

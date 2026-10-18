@@ -10,6 +10,10 @@ class HAError(RuntimeError):
     pass
 
 
+class HAActivationDeferred(HAError):
+    """Native interlock rejected activation before dispatch; retry without recovery."""
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Do not forward a bearer token to another origin.

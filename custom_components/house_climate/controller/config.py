@@ -16,6 +16,15 @@ from .legacy import LOW, HIGH, NUMBERS, TIMES, TOGGLES, helper
 Value = float | str
 
 
+class HeartbeatTimeoutError(ValueError):
+    """A watchdog setting that can be highlighted on its HA form field."""
+
+    def __init__(self, field, code, message):
+        super().__init__(message)
+        self.field = field
+        self.code = code
+
+
 @dataclass(frozen=True)
 class Probe:
     entity_id: str
@@ -95,6 +104,8 @@ class Config:
     off_settle_seconds: float = 180
     command_timeout_seconds: float = 45
     head_activation_timeout_seconds: float = 120
+    heartbeat_timeout_seconds: float = 300
+    auxiliary_heartbeat_timeout_seconds: float = 120
     equipment_timing_confirmed: bool = False
     heater_high_setpoint_f: float = 86
     heater_setpoint_confirmed: bool = False
@@ -268,6 +279,19 @@ class Config:
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or not 1 <= value <= 300):
             raise ValueError("head_activation_timeout_seconds must be from 1 to 300 seconds")
+        for name, minimum, maximum, code in (
+            ("heartbeat_timeout_seconds", 60, 900, "invalid_heartbeat_timeout"),
+            ("auxiliary_heartbeat_timeout_seconds", 30, 900, "invalid_auxiliary_heartbeat_timeout"),
+        ):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not minimum <= value <= maximum):
+                raise HeartbeatTimeoutError(
+                    name, code, f"{name} must be from {minimum} to {maximum} seconds")
+        if self.auxiliary_heartbeat_timeout_seconds > self.heartbeat_timeout_seconds:
+            raise HeartbeatTimeoutError(
+                "auxiliary_heartbeat_timeout_seconds", "auxiliary_heartbeat_exceeds_controller",
+                "auxiliary_heartbeat_timeout_seconds must not exceed heartbeat_timeout_seconds")
         if not isinstance(self.head_cool_min_f, dict):
             raise ValueError("head_cool_min_f must map configured climate entity IDs to temperatures")
         for entity, value in self.head_cool_min_f.items():
@@ -288,7 +312,7 @@ class Config:
         if live and (not self.equipment_timing_confirmed or (self.heater_entity and not self.heater_setpoint_confirmed)):
             raise ValueError("Confirm equipment timing and any auxiliary heater setpoint before live control")
         if live and (self.poll_seconds > 30 or self.command_timeout_seconds > 60):
-            raise ValueError("Live polling/command timing must fit the 120-second watchdog lease")
+            raise ValueError("Live watchdog checks require poll_seconds <= 30 seconds and command_timeout_seconds <= 60 seconds")
 
 
 def seconds(value):

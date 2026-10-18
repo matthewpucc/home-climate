@@ -16,10 +16,47 @@ def short(text):
     return text if len(text) <= 255 else text[:254] + "…"
 
 
+def auxiliary_heartbeat_issue(status):
+    """Keep the shorter auxiliary lease separate from the shared-head lease."""
+    heartbeat = status.get("heartbeat") or {}
+    if (status.get("event") == "live" and status.get("control_enabled") is not False
+            and heartbeat.get("auxiliary_blocked")):
+        return heartbeat.get("auxiliary_reason") or "Auxiliary heating held off until fresh Off confirmation and heartbeat"
+    return None
+
+
 def plan_warnings(status):
-    return [*status.get("warnings", []),
-            *(f"Circulation fan {entity}: waiting for off; retrying independently"
-              for entity in status.get("pending_fans", []))]
+    warnings = [*status.get("warnings", []),
+                *(f"Circulation fan {entity}: waiting for off; retrying independently"
+                  for entity in status.get("pending_fans", []))]
+    if (issue := auxiliary_heartbeat_issue(status)) and issue not in warnings:
+        warnings.insert(0, issue)
+    return warnings
+
+
+def heartbeat_issue(status):
+    """A delayed native pulse blocks new activations, not the whole controller."""
+    heartbeat = status.get("heartbeat") or {}
+    if (status.get("event") == "live" and status.get("control_enabled") is not False
+            and heartbeat.get("blocked")
+            and heartbeat.get("state") != "stopped"):
+        return heartbeat.get("reason") or "Waiting for Home Assistant heartbeat confirmation; new activations are deferred"
+    return None
+
+
+def heartbeat_attributes(status):
+    """Keep changing heartbeat ages out of recorder-facing entity attributes."""
+    heartbeat = status.get("heartbeat")
+    if heartbeat is None:
+        return {}
+    result = {key: heartbeat[key] for key in
+              ("state", "blocked", "reason", "auxiliary_blocked", "auxiliary_reason")
+              if key in heartbeat}
+    if not heartbeat.get("blocked") and heartbeat.get("state") in ("pending", "confirmed"):
+        # The HA-loop confirmation publishes both stages on every ordinary pulse.
+        # Keep the exact delivery phase in runtime diagnostics, not recorder churn.
+        result["state"] = "ok"
+    return {"heartbeat": result}
 
 
 def has_plan(status):
@@ -223,7 +260,7 @@ class ControllerStatus(ControllerEntity):
                  "device_issues", "waiting_devices", "recovery_details",
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
-                 "head_stop_reasons", "pending_head_commands") if key in status}
+                 "head_stop_reasons", "pending_head_commands") if key in status} | heartbeat_attributes(status)
 
 
 class Overview(ControllerEntity):
@@ -240,6 +277,8 @@ class Overview(ControllerEntity):
             return short(status["configuration_reload_reason"])
         if not has_plan(status):
             return short(inactive_message(status))
+        if issue := heartbeat_issue(status):
+            return short("Live plan · " + issue)
         preview = status["event"] == "shadow"
         prefix = "Preview only · " if preview else "Live plan · "
         if preview and status.get("control_block_reason"):
@@ -260,7 +299,9 @@ class Overview(ControllerEntity):
             text = ("Would " if preview else "") + action + " " + ", ".join(active)
         else:
             text = "Heat pumps would stay off" if preview else "Heat pumps off requested"
-        if status.get("heater_on"):
+        if auxiliary_heartbeat_issue(status):
+            text += "; auxiliary heat blocked"
+        elif status.get("heater_on"):
             text += "; auxiliary heat " + ("would be on" if preview else "requested")
         elif status.get("auxiliary_fan_only"):
             text += "; auxiliary fan-only " + ("would be on" if preview else "requested")
@@ -289,10 +330,14 @@ class RecoveryStatus(ControllerEntity):
             reason = status.get("control_block_reason")
             messages = ["Preview only", reason, reload_message]
             return short(" · ".join(message for message in messages if message))
+        if issue := heartbeat_issue(status):
+            return short(issue)
         details = status.get("recovery_details", {})
         issues = status.get("device_issues", {})
         waiting = dict.fromkeys([*details, *issues, *status.get("waiting_devices", [])])
         messages = [reload_message] if reload_message else []
+        if issue := auxiliary_heartbeat_issue(status):
+            messages.append(issue)
         for entity_id in waiting:
             detail = details.get(entity_id, {})
             reason = (capability_message(detail) if detail.get("kind") == "capability"
@@ -315,7 +360,7 @@ class RecoveryStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
-                 "integration_recovery", "cycle_holds", "head_stop_reasons", "pending_head_commands") if key in status}
+                 "integration_recovery", "cycle_holds", "head_stop_reasons", "pending_head_commands") if key in status} | heartbeat_attributes(status)
 
 
 class CurrentIssues(ControllerEntity):
@@ -333,11 +378,13 @@ class CurrentIssues(ControllerEntity):
         issues = plan_warnings(status)
         if status.get("control_block_reason"):
             issues.insert(0, status["control_block_reason"])
+        if issue := heartbeat_issue(status):
+            issues.insert(0, issue)
         return short("; ".join(issues) or "None")
 
     @property
     def extra_state_attributes(self):
-        return {"warnings": plan_warnings(self.runtime.status)}
+        return {"warnings": plan_warnings(self.runtime.status)} | heartbeat_attributes(self.runtime.status)
 
 
 class LastFault(ControllerEntity):
@@ -523,6 +570,8 @@ class AuxiliaryPlan(ControllerEntity):
         if not self.available:
             return None
         status = self.runtime.status
+        if issue := auxiliary_heartbeat_issue(status):
+            return short("Auxiliary heat blocked · " + issue)
         if (status.get("event") == "live"
                 and self.runtime.config.heater_entity in status.get("device_issues", {})):
             detail = status.get("recovery_details", {}).get(self.runtime.config.heater_entity, {})
