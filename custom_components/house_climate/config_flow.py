@@ -142,8 +142,18 @@ class RoomEditor:
 
     def form(self, step, schema, errors=None, detail=None):
         pending = self._form_drafts.get(self._form_key(step))
-        if pending:
-            schema = self.add_suggested_values_to_schema(vol.Schema(schema), pending).schema
+        if pending is not None:
+            restored = {}
+            for field, validator in schema.items():
+                if field.schema not in pending and field.schema not in {
+                        "confirm", "remove", "apply_to_all"}:
+                    # The frontend omits empty fields. Do not resurrect a value
+                    # the user cleared before returning to the parent menu.
+                    description = dict(field.description or {})
+                    description.pop("suggested_value", None)
+                    field = type(field)(field.schema, description=description)
+                restored[field] = validator
+            schema = self.add_suggested_values_to_schema(vol.Schema(restored), pending).schema
         schema = {
             vol.Required("navigation_action", default="continue"): selector.SelectSelector(
                 selector.SelectSelectorConfig(
