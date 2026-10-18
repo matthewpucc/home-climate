@@ -6,10 +6,10 @@ from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from homeassistant.core import CoreState
 from homeassistant.config_entries import (
     ConfigEntries, ConfigEntry, ConfigEntryState, OperationNotAllowed, SOURCE_USER,
 )
-from homeassistant.helpers.storage import Store
 
 from custom_components import house_climate as integration
 from custom_components.house_climate.const import DOMAIN
@@ -235,10 +235,14 @@ class ReloadShutdownTests(unittest.IsolatedAsyncioTestCase):
     async def test_core_shutdown_does_not_start_a_saved_configuration_reload(self):
         runtime, _ = await self.runtime(entry_id="saved_reload_during_core_stop")
         with self.entry_lifecycle(runtime) as (entry, manager, setup):
-            with patch.object(type(self.hass), "is_stopping", new_callable=lambda: property(lambda _self: True)):
+            previous = self.hass.state
+            self.hass.set_state(CoreState.stopping)
+            try:
                 await integration.async_update_options(self.hass, entry)
                 task = runtime._options_reload_task
                 await asyncio.wait_for(task, 2)
+            finally:
+                self.hass.set_state(previous)
             setup.assert_not_awaited()
             self.assertEqual(entry.state, ConfigEntryState.LOADED)
             self.assertIsNone(runtime._options_reload_task)

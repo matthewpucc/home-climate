@@ -381,7 +381,8 @@ class ControllerRuntime:
         self._update_reload_status()
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
         self._options_reload_task = self.hass.async_create_background_task(
-            self._async_reload_when_stopped(entry_id), "House Climate saved configuration reload"
+            self._async_reload_when_stopped(entry_id), "House Climate saved configuration reload",
+            eager_start=False,
         )
 
     async def _async_wait_shutdown_progress(self, timeout=None):

@@ -76,6 +76,14 @@ The native integration serializes its worker lifecycle and refuses a second load
 
 The native watchdog pauses control and stops all owned devices when the worker heartbeat expires after 120 seconds; probe cutoffs independently stop auxiliary heating. The standalone package watches only the auxiliary heater, so shared heads can retain setpoints if its process stops. While HA or the host is down, neither watchdog can run. Native ownership recovery resumes after HA starts.
 
+## Saving configuration and reloading
+
+Saving options persists the new configuration before stopping the current controller. House Climate keeps the integration loaded while its worker stops, owned climate devices confirm Off, in-flight activation calls finish, and cleared ownership is saved. Plan summary and Recovery status show that the saved configuration is waiting to apply. A disconnected device keeps the configuration pending; the watchdog continues shutdown retries and the reload completes automatically after the required acknowledgements arrive. Further saves use the latest options and do not start another worker.
+
+Only after shutdown is confirmed does House Climate ask HA to unload the old instance and load the saved configuration. Controller enabled remains off after the reload. The old device mapping stays responsible for shutdown until ownership is safely released.
+
+A direct HA unload or Reload additionally waits up to two minutes for delayed shutdown acknowledgements. If critical shutdown is still unconfirmed, it refuses to unload and retains the watchdog and saved ownership. HA treats an unsuccessful unload as nonrecoverable, so that direct failure can require a Core restart; an Off report arriving later does not repair HA's entry state. Saved configuration remains persisted. Normal configuration saves avoid entering that state while devices are disconnected.
+
 ## Stop logs
 
 Home Assistant's **Settings → System → Logs** records controller-wide failures separately from individual device recovery. A worker fault logs an ERROR explaining why Off was requested for every configured climate device and circulation fan. Heartbeat expiry logs a WARNING with the heartbeat age, the 120-second lease limit, and every owned device included in the stop request. Worker pauses and shutdown-storage failures also identify the cause and owned-device scope.
