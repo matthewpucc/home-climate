@@ -118,7 +118,8 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         runtime, switch = await self.runtime()
         await self.claim(runtime)
         await switch.async_turn_off()
-        with self.assertRaisesRegex(HAError, "activation blocked"):
+        # Disable and ownership cleanup can rotate the lease before dispatch.
+        with self.assertRaisesRegex(HAError, "activation blocked|earlier controller lease"):
             await asyncio.to_thread(runtime.api.service, "climate", "set_temperature",
                                     entity_id=self.cfg.heater_entity, hvac_mode="heat", temperature=86)
         self.assertFalse(any(call[1] == "set_temperature" for call in self.calls))
