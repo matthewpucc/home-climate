@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.8
+
+- Add an explicit Back (keep draft) action to every configuration and options form. Preserve staged edits and unfinished form values while navigating, including incomplete room, schedule, and fan forms.
+- Keep validation on Continue and apply configuration only at the final review/save step. Back clears destructive confirmation choices, and closing the dialog still cancels the unsaved draft.
+- Explain comfort priority beside the room and schedule fields: higher numbers mean higher priority, with 1 as a typical value.
+
 ## 0.6.7
 
 - Log controller-wide Off requests with their cause and affected devices before dispatch, including global worker faults, startup reconciliation, disable, and shutdown.

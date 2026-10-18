@@ -4,7 +4,7 @@
     "step": {
       "menu": {
         "title": "House Climate",
-        "description": "Configure rooms for one shared heating/cooling system. Changes take effect only when you save.",
+        "description": "Configure rooms for one shared heating/cooling system. Submitted edits stay in this draft until Review and save. Use Back (keep draft) within forms to return; Close (X) cancels all unsaved changes.",
         "menu_options": {
           "add_room": "Add room",
           "select_room": "Edit a room",
@@ -18,7 +18,11 @@
       "select_room": {
         "title": "Choose a room",
         "data": {
+          "navigation_action": "Action",
           "room": "Room"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "room_menu": {
@@ -38,6 +42,7 @@
         "title": "Room settings",
         "description": "Choose independent temperature probes where possible. Rooms sharing a heat-pump head must select the same climate entity. Higher comfort priority wins when rooms disagree; temperature limits take precedence.\n\nIf a sensor reports only when its reading changes, select it below as well. Its last value stays usable while Home Assistant shows it available; sensors not selected there still need recent reports. Unknown, unavailable, and invalid readings are always excluded.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "name": "Room name",
           "area": "Home Assistant area (optional)",
           "head": "Heat-pump head",
@@ -50,25 +55,38 @@
           "fan_percentage": "Scheduled fan speed",
           "low_f": "Lower comfort limit (optional override)",
           "high_f": "Upper comfort limit (optional override)"
+        },
+        "data_description": {
+          "priority": "Higher numbers mean higher comfort priority: 0.1 is lowest, 1 is typical, and 10 is highest. Used when rooms compete for heating versus cooling; temperature safety limits take precedence.",
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "remove_room": {
         "title": "Remove room",
         "description": "Remove airflow links and the auxiliary heater assignment first. At least one room must remain.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "confirm": "Remove this room"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "select_schedule": {
         "title": "Choose a schedule",
         "data": {
+          "navigation_action": "Action",
           "schedule": "Schedule"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "schedule": {
         "title": "Daily comfort schedule",
         "description": "Uses Home Assistant's timezone. A schedule may cross midnight; schedules in the same room must not overlap. The base profile applies outside these hours. Fan speed applies to fans using the schedule strategy.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "name": "Schedule name",
           "start": "Start",
           "end": "End",
@@ -80,29 +98,42 @@
           "low_f": "Lower comfort limit (optional override)",
           "high_f": "Upper comfort limit (optional override)",
           "remove": "Remove this schedule"
+        },
+        "data_description": {
+          "priority": "Higher numbers mean higher comfort priority: 0.1 is lowest, 1 is typical, and 10 is highest. Used when rooms compete for heating versus cooling; temperature safety limits take precedence.",
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "select_fan": {
         "title": "Choose a fan",
         "data": {
+          "navigation_action": "Action",
           "fan": "Fan"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "fan": {
         "title": "Fan behavior",
         "description": "Assign fans to the room they help, even if physically located elsewhere. For airflow transfer, select the room supplying useful air. Scheduled fans use the active room profile's speed.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "entity_id": "Fan",
           "strategy": "Run when",
           "percentage": "Fan speed",
           "source_room": "Air source room",
           "remove": "Remove this fan"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "system": {
         "title": "System settings",
         "description": "Comfort adjustments normally run every 60–120 seconds. Safety, heartbeat, and recovery checks run separately at the safety interval. Minimum run/off times apply to each head's requested mode; the heat-pump system controls its compressor. Safety can stop a head early. The shared all-off settling interval still applies before changing direction. Confirm equipment timing before enabling live commands, then turn on Controller enabled on the House climate controller device after saving.\n\nCall offsets push active head setpoints past both the room target and the head's own temperature, within equipment limits. External room probes decide when the call ends; your room target stays unchanged. Set an offset to 0 to use the room target directly for that direction.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "low_f": "Minimum room temperature",
           "high_f": "Maximum room temperature",
           "off_settle_seconds": "All-off settling interval",
@@ -118,13 +149,15 @@
           "head_activation_timeout_seconds": "Heat-pump acknowledgement wait"
         },
         "data_description": {
-          "head_activation_timeout_seconds": "Seconds to wait for an exact heat-pump mode and setpoint report. Off commands and safety checks keep their normal timing."
+          "head_activation_timeout_seconds": "Seconds to wait for an exact heat-pump mode and setpoint report. Off commands and safety checks keep their normal timing.",
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "auxiliary": {
         "title": "Optional auxiliary heater",
         "description": "Room probes control this heater externally. Choose a high device setpoint that reliably calls for heat, and a separate cutoff above the room's comfort band. Exclude the heater's own sensor and separate fan entity from room configuration. The native watchdog follows these settings automatically.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "enabled": "Use an auxiliary heater",
           "heater_entity": "Heater",
           "auxiliary_room": "Heated room",
@@ -132,33 +165,54 @@
           "heater_cutoff_f": "Independent heating cutoff",
           "auxiliary_fan_enabled": "Use fan-only mode during cooling demand",
           "heater_setpoint_confirmed": "I have verified the device setpoint"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "import_file": {
         "title": "Import existing configuration",
         "description": "Enter a TOML path relative to the Home Assistant configuration directory. Import replaces this draft and starts in shadow mode. Version-1 helper values are copied from HA when available.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "config_file": "Configuration file"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "finish": {
         "title": "Review and save",
-        "description": "{detail}\n\nSaving applies all edits and reloads the controller. Owned devices are stopped, and the Controller enabled switch starts off. Turn it on from the device page when ready for live control."
+        "description": "{detail}\n\nOnly edits submitted with Continue are included. Values kept by Back remain available when you reopen their form; continue that form before saving to include them.\n\nSaving applies the reviewed edits and reloads the controller. Owned devices are stopped, and the Controller enabled switch starts off. Turn it on from the device page when ready for live control.",
+        "data": {
+          "navigation_action": "Action"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Submit to return to the controller menu without saving. Close (X) cancels all unsaved changes."
+        }
       },
       "head_limits": {
         "title": "Choose a heat-pump head",
         "description": "Choose the head whose lowest cooling setpoint you want to configure. Rooms sharing a head share this setting.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "head": "Heat-pump head"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "head_limit": {
         "title": "Cooling setpoint limit",
         "description": "{detail}\n\nEnable this only when you know the lowest cooling setpoint your equipment accepts. Active cooling calls stay at or above this temperature even if Home Assistant reports a lower device minimum. Room comfort targets stay unchanged. Leave it disabled to use the device's reported range. Applying to all updates every configured heat-pump head in this draft.",
         "data": {
+          "navigation_action": "Action",
           "override_enabled": "Use a minimum cooling setpoint",
           "cool_min_f": "Lowest cooling setpoint",
           "apply_to_all": "Apply this setting to all heat-pump heads"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       }
     },
@@ -174,7 +228,7 @@
     "step": {
       "menu": {
         "title": "House Climate",
-        "description": "Configure rooms for one shared heating/cooling system. Changes take effect only when you save.",
+        "description": "Configure rooms for one shared heating/cooling system. Submitted edits stay in this draft until Review and save. Use Back (keep draft) within forms to return; Close (X) cancels all unsaved changes.",
         "menu_options": {
           "add_room": "Add room",
           "select_room": "Edit a room",
@@ -188,7 +242,11 @@
       "select_room": {
         "title": "Choose a room",
         "data": {
+          "navigation_action": "Action",
           "room": "Room"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "room_menu": {
@@ -208,6 +266,7 @@
         "title": "Room settings",
         "description": "Choose independent temperature probes where possible. Rooms sharing a heat-pump head must select the same climate entity. Higher comfort priority wins when rooms disagree; temperature limits take precedence.\n\nIf a sensor reports only when its reading changes, select it below as well. Its last value stays usable while Home Assistant shows it available; sensors not selected there still need recent reports. Unknown, unavailable, and invalid readings are always excluded.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "name": "Room name",
           "area": "Home Assistant area (optional)",
           "head": "Heat-pump head",
@@ -220,25 +279,38 @@
           "fan_percentage": "Scheduled fan speed",
           "low_f": "Lower comfort limit (optional override)",
           "high_f": "Upper comfort limit (optional override)"
+        },
+        "data_description": {
+          "priority": "Higher numbers mean higher comfort priority: 0.1 is lowest, 1 is typical, and 10 is highest. Used when rooms compete for heating versus cooling; temperature safety limits take precedence.",
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "remove_room": {
         "title": "Remove room",
         "description": "Remove airflow links and the auxiliary heater assignment first. At least one room must remain.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "confirm": "Remove this room"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "select_schedule": {
         "title": "Choose a schedule",
         "data": {
+          "navigation_action": "Action",
           "schedule": "Schedule"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "schedule": {
         "title": "Daily comfort schedule",
         "description": "Uses Home Assistant's timezone. A schedule may cross midnight; schedules in the same room must not overlap. The base profile applies outside these hours. Fan speed applies to fans using the schedule strategy.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "name": "Schedule name",
           "start": "Start",
           "end": "End",
@@ -250,29 +322,42 @@
           "low_f": "Lower comfort limit (optional override)",
           "high_f": "Upper comfort limit (optional override)",
           "remove": "Remove this schedule"
+        },
+        "data_description": {
+          "priority": "Higher numbers mean higher comfort priority: 0.1 is lowest, 1 is typical, and 10 is highest. Used when rooms compete for heating versus cooling; temperature safety limits take precedence.",
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "select_fan": {
         "title": "Choose a fan",
         "data": {
+          "navigation_action": "Action",
           "fan": "Fan"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "fan": {
         "title": "Fan behavior",
         "description": "Assign fans to the room they help, even if physically located elsewhere. For airflow transfer, select the room supplying useful air. Scheduled fans use the active room profile's speed.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "entity_id": "Fan",
           "strategy": "Run when",
           "percentage": "Fan speed",
           "source_room": "Air source room",
           "remove": "Remove this fan"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "system": {
         "title": "System settings",
         "description": "Comfort adjustments normally run every 60–120 seconds. Safety, heartbeat, and recovery checks run separately at the safety interval. Minimum run/off times apply to each head's requested mode; the heat-pump system controls its compressor. Safety can stop a head early. The shared all-off settling interval still applies before changing direction. Confirm equipment timing before enabling live commands, then turn on Controller enabled on the House climate controller device after saving.\n\nCall offsets push active head setpoints past both the room target and the head's own temperature, within equipment limits. External room probes decide when the call ends; your room target stays unchanged. Set an offset to 0 to use the room target directly for that direction.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "low_f": "Minimum room temperature",
           "high_f": "Maximum room temperature",
           "off_settle_seconds": "All-off settling interval",
@@ -288,13 +373,15 @@
           "head_activation_timeout_seconds": "Heat-pump acknowledgement wait"
         },
         "data_description": {
-          "head_activation_timeout_seconds": "Seconds to wait for an exact heat-pump mode and setpoint report. Off commands and safety checks keep their normal timing."
+          "head_activation_timeout_seconds": "Seconds to wait for an exact heat-pump mode and setpoint report. Off commands and safety checks keep their normal timing.",
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "auxiliary": {
         "title": "Optional auxiliary heater",
         "description": "Room probes control this heater externally. Choose a high device setpoint that reliably calls for heat, and a separate cutoff above the room's comfort band. Exclude the heater's own sensor and separate fan entity from room configuration. The native watchdog follows these settings automatically.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "enabled": "Use an auxiliary heater",
           "heater_entity": "Heater",
           "auxiliary_room": "Heated room",
@@ -302,33 +389,54 @@
           "heater_cutoff_f": "Independent heating cutoff",
           "auxiliary_fan_enabled": "Use fan-only mode during cooling demand",
           "heater_setpoint_confirmed": "I have verified the device setpoint"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "import_file": {
         "title": "Import existing configuration",
         "description": "Enter a TOML path relative to the Home Assistant configuration directory. Import replaces this draft and starts in shadow mode. Version-1 helper values are copied from HA when available.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "config_file": "Configuration file"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "finish": {
         "title": "Review and save",
-        "description": "{detail}\n\nSaving applies all edits and reloads the controller. Owned devices are stopped, and the Controller enabled switch starts off. Turn it on from the device page when ready for live control."
+        "description": "{detail}\n\nOnly edits submitted with Continue are included. Values kept by Back remain available when you reopen their form; continue that form before saving to include them.\n\nSaving applies the reviewed edits and reloads the controller. Owned devices are stopped, and the Controller enabled switch starts off. Turn it on from the device page when ready for live control.",
+        "data": {
+          "navigation_action": "Action"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Submit to return to the controller menu without saving. Close (X) cancels all unsaved changes."
+        }
       },
       "head_limits": {
         "title": "Choose a heat-pump head",
         "description": "Choose the head whose lowest cooling setpoint you want to configure. Rooms sharing a head share this setting.\n\n{detail}",
         "data": {
+          "navigation_action": "Action",
           "head": "Heat-pump head"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       },
       "head_limit": {
         "title": "Cooling setpoint limit",
         "description": "{detail}\n\nEnable this only when you know the lowest cooling setpoint your equipment accepts. Active cooling calls stay at or above this temperature even if Home Assistant reports a lower device minimum. Room comfort targets stay unchanged. Leave it disabled to use the device's reported range. Applying to all updates every configured heat-pump head in this draft.",
         "data": {
+          "navigation_action": "Action",
           "override_enabled": "Use a minimum cooling setpoint",
           "cool_min_f": "Lowest cooling setpoint",
           "apply_to_all": "Apply this setting to all heat-pump heads"
+        },
+        "data_description": {
+          "navigation_action": "Choose Back (keep draft) and press Next to return without applying this form. Your other draft edits and unfinished values are kept. Close (X) cancels all unsaved changes."
         }
       }
     },
