@@ -36,6 +36,7 @@ class NativeControls:
         self.inflight = 0
         self.problem = None
         self._auxiliary_off_error = None
+        self._pause_logged = False
         self._lock = asyncio.Lock()
         # Serializes every watchdog service with ownership claims and close.
         self._check_lock = asyncio.Lock()
@@ -147,6 +148,13 @@ class NativeControls:
 
     @callback
     def pause(self, reason=None):
+        if not self._pause_logged:
+            _LOGGER.warning(
+                "House Climate: %s; stopping all %d owned devices: %s",
+                reason or "Controller pause requested", len(self.owned),
+                ", ".join(self.owned) or "none",
+            )
+            self._pause_logged = True
         self.enabled = False
         self.recovering = bool(self.owned)
         if reason:
@@ -166,6 +174,7 @@ class NativeControls:
             if self.recovering or (self.owned and not self.enabled):
                 raise HAError("Waiting for previously owned devices to acknowledge off")
             self.problem = None
+            self._pause_logged = False
         self.enabled = enabled
         if not enabled and self.owned:
             self.recovering = True
@@ -331,9 +340,16 @@ class NativeControls:
                 self._auxiliary_off_error = None
             attempted = set()
             if self.owned:
-                expired = not 0 <= time.monotonic() - self.heartbeat_monotonic <= 120
+                heartbeat_age = time.monotonic() - self.heartbeat_monotonic
+                expired = not 0 <= heartbeat_age <= 120
                 if self.recovering or not self.enabled or expired:
                     if self.enabled and expired:
+                        _LOGGER.warning(
+                            "House Climate watchdog: controller heartbeat expired "
+                            "(age %.1fs; lease limit 120s); disabling control and "
+                            "stopping all %d owned devices: %s",
+                            heartbeat_age, len(self.owned), ", ".join(self.owned),
+                        )
                         self.enabled = False
                         self.problem = "Control paused: controller heartbeat expired"
                     self.recovering = True
