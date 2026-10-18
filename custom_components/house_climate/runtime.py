@@ -289,7 +289,7 @@ class ControllerRuntime:
             incident = (data.get("reason"), tuple(data["failures"]))
             if incident != self._logged_stop_failures:
                 _LOGGER.warning(
-                    "Controller-wide Off requests failed for %s; cause: %s; off confirmation still required",
+                    "Controller shutdown incomplete: %s; cause: %s",
                     ", ".join(data["failures"]), data.get("reason", "Controller shutdown"))
                 self._logged_stop_failures = incident
         else:
