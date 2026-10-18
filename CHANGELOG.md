@@ -5,6 +5,8 @@
 - Add an explicit Back (keep draft) action to every configuration and options form. Preserve staged edits and unfinished form values while navigating, including incomplete room, schedule, and fan forms.
 - Keep validation on Continue and apply configuration only at the final review/save step. Back clears destructive confirmation choices, and closing the dialog still cancels the unsaved draft.
 - Explain comfort priority beside the room and schedule fields: higher numbers mean higher priority, with 1 as a typical value.
+- Drain the previous controller before starting Home Assistant’s configuration reload. Keep saved changes pending and retry shutdown through device disconnects instead of entering HA’s permanent failed-unload state after an ordinary delayed Off report.
+- Allow an additional 120-second Off-acknowledgement wait for direct unloads, preserving the worker-exit limit, critical ownership, in-flight activation barriers, and persisted fan cleanup.
 
 ## 0.6.7
 

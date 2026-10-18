@@ -62,7 +62,7 @@ async def async_setup_entry(hass, entry):
 
 async def async_unload_entry(hass, entry):
     runtime = entry.runtime_data
-    if not await runtime.async_stop():
+    if not await runtime.async_stop(wait_for_ack=True):
         return False
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
@@ -72,7 +72,11 @@ async def async_unload_entry(hass, entry):
 
 
 async def async_update_options(hass, entry):
-    await hass.config_entries.async_reload(entry.entry_id)
+    runtime = getattr(entry, "runtime_data", None)
+    if runtime is None:
+        hass.config_entries.async_schedule_reload(entry.entry_id)
+        return
+    runtime.async_schedule_options_reload(entry.entry_id)
 
 
 async def async_migrate_entry(hass, entry):

@@ -76,6 +76,14 @@ The native integration serializes its worker lifecycle and refuses a second load
 
 The native watchdog pauses control and stops all owned devices when the worker heartbeat expires after 120 seconds; probe cutoffs independently stop auxiliary heating. The standalone package watches only the auxiliary heater, so shared heads can retain setpoints if its process stops. While HA or the host is down, neither watchdog can run. Native ownership recovery resumes after HA starts.
 
+## Saving configuration and reloading
+
+Saving options first persists the new configuration, then stops the existing controller while the HA entry remains loaded. **Plan summary** and **Recovery status** show that the configuration is saved and waiting for devices to stop. The controller blocks new activations and keeps its watchdog cleanup active while critical climate devices are unavailable or have not reported Off.
+
+Only after the worker exits, in-flight activations finish, and critical shutdown ownership is durably cleared does House Climate ask HA to reload. A delayed Off report or a head reconnecting can therefore finish the saved reload without restarting HA Core. Repeated saves while cleanup is pending use the latest saved configuration. The replacement controller starts disabled and still follows the ordinary all-off, settling, and per-head timing rules when enabled.
+
+An explicit unload or reload requested outside this options-save path allows 45 seconds for worker exit and an additional 120-second acknowledgement wait after initial cleanup. Individual cleanup operations retain their own bounds. Unconfirmed critical ownership still blocks successful unload; HA treats a failed unload as nonrecoverable until Core restarts. Pending circulation-fan cleanup alone remains persisted and does not block reload.
+
 ## Stop logs
 
 Home Assistant's **Settings → System → Logs** records controller-wide failures separately from individual device recovery. A worker fault logs an ERROR explaining why Off was requested for every configured climate device and circulation fan. Heartbeat expiry logs a WARNING with the heartbeat age, the 120-second lease limit, and every owned device included in the stop request. Worker pauses and shutdown-storage failures also identify the cause and owned-device scope.

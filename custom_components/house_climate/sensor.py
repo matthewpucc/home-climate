@@ -219,6 +219,7 @@ class ControllerStatus(ControllerEntity):
                  "heater_on", "auxiliary_fan_only", "fans", "room_targets", "error",
                  "last_error", "last_fault_at", "fault_count",
                  "control_enabled", "control_block_reason", "pending_fans",
+                 "configuration_reload_pending", "configuration_reload_reason",
                  "device_issues", "waiting_devices", "recovery_details",
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
@@ -235,6 +236,8 @@ class Overview(ControllerEntity):
     @property
     def native_value(self):
         status = self.runtime.status
+        if status.get("configuration_reload_pending"):
+            return short(status["configuration_reload_reason"])
         if not has_plan(status):
             return short(inactive_message(status))
         preview = status["event"] == "shadow"
@@ -275,6 +278,8 @@ class RecoveryStatus(ControllerEntity):
     @property
     def native_value(self):
         status = self.runtime.status
+        if status.get("configuration_reload_pending"):
+            return short(status["configuration_reload_reason"])
         reload_status = status.get("integration_recovery", {}).get("reload_status")
         reload_message = reload_status if reload_status and reload_status not in ("Idle", "Disabled", "Shadow mode", "Stopped") else None
         if not has_plan(status):
