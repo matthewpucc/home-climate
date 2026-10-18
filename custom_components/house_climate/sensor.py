@@ -8,7 +8,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN, SIGNAL_STATUS
-from .controller.sensors import from_f
+from .controller.sensors import from_f, to_f
 
 
 def short(text):
@@ -113,6 +113,43 @@ def cycle_hold_summary(status):
     return "Waiting for head cycle timing"
 
 
+def visible_pending_heads(status):
+    """Safety/recovery and cycle timing take precedence over ordinary feedback waits."""
+    if (status.get("event") != "live" or status.get("mode") == "off"
+            or phase_message(status)):
+        return {}
+    blocked = {*status.get("device_issues", {}), *status.get("recovery_details", {}),
+               *status.get("waiting_devices", []), *status.get("cycle_holds", {})}
+    return {entity: detail for entity, detail in status.get("pending_head_commands", {}).items()
+            if entity not in blocked}
+
+
+def pending_head_message(detail, display_unit):
+    """Describe requested settings and HA feedback without implying acceptance."""
+    remaining = detail.get("remaining_seconds")
+    seconds = (max(0, ceil(remaining))
+               if isinstance(remaining, (int, float)) and isfinite(remaining) else None)
+    text = "Waiting for head confirmation"
+    if seconds is not None:
+        text += f": {seconds}s remaining"
+
+    def setting(mode, value):
+        result = str(mode or "unknown")
+        if isinstance(value, (int, float)) and isfinite(value):
+            native_unit = detail.get("temperature_unit") or display_unit
+            try:
+                converted = from_f(to_f(value, native_unit), display_unit)
+            except ValueError:
+                return result
+            target = f"{converted:.1f}".rstrip("0").rstrip(".")
+            result += f" {target} {display_unit}"
+        return result
+
+    requested = setting(detail.get("requested_mode"), detail.get("requested_target_temperature"))
+    reported = setting(detail.get("reported_mode"), detail.get("reported_target_temperature"))
+    return text + f"; requested {requested}, reported {reported}"
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     entities = [ControllerStatus(entry), Overview(entry), RecoveryStatus(entry),
                 CurrentIssues(entry), LastFault(entry)]
@@ -185,7 +222,7 @@ class ControllerStatus(ControllerEntity):
                  "device_issues", "waiting_devices", "recovery_details",
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
-                 "head_stop_reasons") if key in status}
+                 "head_stop_reasons", "pending_head_commands") if key in status}
 
 
 class Overview(ControllerEntity):
@@ -208,6 +245,8 @@ class Overview(ControllerEntity):
             prefix += wait + " · "
         if not preview and (hold := cycle_hold_summary(status)):
             prefix += hold + " · "
+        if not preview and visible_pending_heads(status):
+            prefix += "Waiting for head confirmation · "
         warnings = plan_warnings(status)
         if warnings:
             prefix += f'{len(warnings)} warning(s) · '
@@ -259,6 +298,9 @@ class RecoveryStatus(ControllerEntity):
             if entity_id not in waiting:
                 last_stop = status.get("head_stop_reasons", {}).get(entity_id)
                 messages.append(f"{climate_label(self.runtime.config, entity_id)}: {cycle_hold_message(hold, last_stop)}")
+        for entity_id, detail in visible_pending_heads(status).items():
+            message = pending_head_message(detail, self.hass.config.units.temperature_unit)
+            messages.append(f"{climate_label(self.runtime.config, entity_id)}: {message}")
         if wait := phase_message(status):
             messages.append(wait)
         return short("; ".join(messages) or "Ready")
@@ -268,7 +310,7 @@ class RecoveryStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
-                 "integration_recovery", "cycle_holds", "head_stop_reasons") if key in status}
+                 "integration_recovery", "cycle_holds", "head_stop_reasons", "pending_head_commands") if key in status}
 
 
 class CurrentIssues(ControllerEntity):
@@ -377,6 +419,7 @@ class RoomPlan(RoomEntity):
         limits = status["room_targets"][self.room_id]
         cycle_hold = (status.get("cycle_holds", {}).get(config.heads[room.head])
                       if status.get("event") == "live" else None)
+        pending_head = visible_pending_heads(status).get(config.heads[room.head])
         waiting = (status.get("event") == "live"
                    and config.heads[room.head] in status.get("device_issues", {}))
         if waiting:
@@ -391,6 +434,11 @@ class RoomPlan(RoomEntity):
                 action = f'{head}: {timing}; {status["mode"]} toward {self.temperature(target)}'
             else:
                 action = f'{head}: {timing}; then request {status["mode"]} toward {self.temperature(target)}'
+        elif pending_head:
+            message = pending_head_message(pending_head, self.hass.config.units.temperature_unit)
+            action = f"{head}: {message[0].lower()}{message[1:]}"
+            if target is not None:
+                action += f"; room target {self.temperature(target)}"
         elif target is not None:
             call_target = status.get("head_call_targets_f", {}).get(room.head)
             if call_target is not None and not isclose(call_target, target, rel_tol=0, abs_tol=.05):
@@ -421,6 +469,8 @@ class RoomPlan(RoomEntity):
                 "head_call_target_f": status.get("head_call_targets_f", {}).get(head),
                 **({"last_stop": status["head_stop_reasons"][config.heads[head]]}
                    if config.heads[head] in status.get("head_stop_reasons", {}) else {}),
+                **({"pending_head_command": status["pending_head_commands"][config.heads[head]]}
+                   if config.heads[head] in status.get("pending_head_commands", {}) else {}),
                 **status.get("room_targets", {}).get(self.room_id, {})}
 
 
