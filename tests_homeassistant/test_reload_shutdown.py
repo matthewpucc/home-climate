@@ -7,13 +7,16 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.core import CoreState
+from homeassistant.helpers.storage import Store
 from homeassistant.config_entries import (
     ConfigEntries, ConfigEntry, ConfigEntryState, OperationNotAllowed, SOURCE_USER,
 )
 
 from custom_components import house_climate as integration
 from custom_components.house_climate.const import DOMAIN
+from custom_components.house_climate.controller.config import Config
 from custom_components.house_climate.controller.ha import HAError
+from custom_components.house_climate.runtime import ControllerRuntime
 from custom_components.house_climate.sensor import Overview, RecoveryStatus
 from tests_homeassistant import test_native as native_fixtures
 from tests_homeassistant import test_native_controls as control_fixtures
@@ -231,6 +234,61 @@ class ReloadShutdownTests(unittest.IsolatedAsyncioTestCase):
             setup.assert_awaited_once()
             self.assertFalse(runtime.controls.owned)
             self.assertIsNone(runtime._options_reload_task)
+
+    async def test_saved_reload_before_ha_start_keeps_recovered_critical_ownership(self):
+        cfg = Config.from_dict(self.cfg.to_dict())
+        head = cfg.heads["guest"]
+        store = Store(self.hass, 1, "house_climate.prestart_saved_reload.ownership")
+        await store.async_save({"devices": [head]})
+        runtime = ControllerRuntime(self.hass, cfg, True)
+        self.runtimes.append(runtime)
+        await runtime.async_setup_controls("prestart_saved_reload")
+        self.assertFalse(runtime.controls.active)
+        self.assertIn(head, runtime.controls.owned)
+        old = self.hass.states.get(head)
+        self.hass.states.async_set(head, "unavailable", dict(old.attributes))
+        off_attempts = 0
+
+        async def no_feedback(call):
+            nonlocal off_attempts
+            if call.data["entity_id"] == head:
+                off_attempts += 1
+                return
+            await self.handle(call)
+
+        self.hass.services.async_register("climate", "set_hvac_mode", no_feedback)
+        with self.entry_lifecycle(runtime) as (entry, _manager, setup):
+            await integration.async_update_options(self.hass, entry)
+            task = runtime._options_reload_task
+            await self.until(lambda: off_attempts >= 2 and not runtime.controls._closing)
+            self.assertEqual(entry.state, ConfigEntryState.LOADED)
+            self.assertIn(head, runtime.controls.owned)
+            self.assertFalse(runtime.controls._closing)
+            self.assertIsNone(runtime.thread)
+            setup.assert_not_awaited()
+            self.acknowledge_off(head)
+            await asyncio.wait_for(task, 2)
+            setup.assert_awaited_once()
+            self.assertFalse(runtime.controls.owned)
+            self.assertEqual(await store.async_load(), {"devices": []})
+
+    async def test_core_shutdown_cancels_reload_intent_already_waiting_for_off(self):
+        runtime, _ = await self.runtime(entry_id="pending_reload_core_stop")
+        head, off_called = await self.block_off_feedback(runtime, "unavailable")
+        with self.entry_lifecycle(runtime) as (entry, _manager, setup):
+            await integration.async_update_options(self.hass, entry)
+            task = runtime._options_reload_task
+            await asyncio.wait_for(off_called.wait(), 2)
+            previous = self.hass.state
+            self.hass.set_state(CoreState.stopping)
+            try:
+                self.acknowledge_off(head)
+                await asyncio.wait_for(task, 2)
+                setup.assert_not_awaited()
+                self.assertEqual(entry.state, ConfigEntryState.LOADED)
+            finally:
+                self.hass.set_state(previous)
+            self.assertTrue(await runtime.async_stop())
 
     async def test_core_shutdown_does_not_start_a_saved_configuration_reload(self):
         runtime, _ = await self.runtime(entry_id="saved_reload_during_core_stop")

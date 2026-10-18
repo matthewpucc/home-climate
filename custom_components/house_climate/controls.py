@@ -412,9 +412,10 @@ class NativeControls:
                     self._publish()
 
     async def async_close(self):
-        if not self.active and self._closing:
+        if not self.active and self._closing and not self.owned and not self.inflight:
             return True
         self._closing = True
+        closed = False
         try:
             await self.async_set_enabled(False)
             if self._task:
@@ -432,8 +433,9 @@ class NativeControls:
                 unsubscribe()
             self._unsubscribers.clear()
             self._publish()
+            closed = True
             return True
         finally:
-            if self.active:
+            if not closed:
                 self._closing = False
                 self._schedule_check()
