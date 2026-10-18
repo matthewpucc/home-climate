@@ -65,9 +65,23 @@ class WatchdogLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("controller heartbeat expired", message)
         self.assertIn("age 130.0s", message)
         self.assertIn("lease limit 120s", message)
-        self.assertIn(f"stopping all {len(expected)} owned devices", message)
+        self.assertIn(f"Off requested for all {len(expected)} owned devices", message)
         for entity in expected:
             self.assertIn(entity, message)
+        self.assertFalse(runtime.controls.enabled)
+        self.assertFalse(runtime.controls.owned)
+        self.assertIn("heartbeat expired", runtime.controls.problem)
+        self.assert_all_off(expected)
+
+    async def test_broken_log_handler_cannot_block_heartbeat_shutdown(self):
+        runtime, _ = await self.runtime()
+        await self.claim(runtime)
+        expected = await self.running_devices(runtime)
+        self.calls.clear()
+        with patch("custom_components.house_climate.controls._LOGGER.log",
+                   side_effect=RuntimeError("log sink unavailable")) as failed_log:
+            await self.expire(runtime.controls)
+        failed_log.assert_called_once()
         self.assertFalse(runtime.controls.enabled)
         self.assertFalse(runtime.controls.owned)
         self.assertIn("heartbeat expired", runtime.controls.problem)
@@ -104,7 +118,7 @@ class WatchdogLoggingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(captured.records[0].levelno, logging.WARNING)
             message = captured.records[0].getMessage()
             self.assertIn(reason, message)
-            self.assertIn(f"stopping all {len(expected)} owned devices", message)
+            self.assertIn(f"Off requested for all {len(expected)} owned devices", message)
             for entity in expected:
                 self.assertIn(entity, message)
             self.assertEqual(runtime.controls.problem, reason)
@@ -126,7 +140,7 @@ class WatchdogLoggingTests(unittest.IsolatedAsyncioTestCase):
         message = captured.records[0].getMessage()
         self.assertIn("Controller disabled", message)
         self.assertNotIn("heartbeat expired", message)
-        self.assertIn(f"stopping all {len(expected)} owned devices", message)
+        self.assertIn(f"Off requested for all {len(expected)} owned devices", message)
         self.assertFalse(runtime.controls.enabled)
         self.assertIsNone(runtime.controls.problem)
         self.assert_all_off(expected)
@@ -147,7 +161,7 @@ class WatchdogLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured.records[0].levelno, logging.INFO)
         message = captured.records[0].getMessage()
         self.assertIn("Recovering previously owned devices", message)
-        self.assertIn("stopping all 2 owned devices", message)
+        self.assertIn("Off requested for all 2 owned devices", message)
         for entity in expected:
             self.assertIn(entity, message)
         self.assertFalse(runtime.controls.owned)
@@ -174,7 +188,7 @@ class WatchdogLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(captured.records), 1)
         message = captured.records[0].getMessage()
         self.assertIn("Could not save controller shutdown: disk full", message)
-        self.assertIn(f"stopping all {len(expected)} owned devices", message)
+        self.assertIn(f"Off requested for all {len(expected)} owned devices", message)
         for entity in expected:
             self.assertIn(entity, message)
         self.assertFalse(runtime.controls.enabled)

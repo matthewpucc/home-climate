@@ -154,10 +154,14 @@ class NativeControls:
         if self._stop_log_reason is not None:
             return
         self._stop_log_reason = reason
-        _LOGGER.log(
-            level, "House Climate watchdog: %s; stopping all %d owned devices: %s",
-            reason, len(self.owned), ", ".join(self.owned) or "none",
-        )
+        try:
+            _LOGGER.log(
+                level, "House Climate watchdog: %s; Off requested for all %d owned devices: %s",
+                reason, len(self.owned), ", ".join(self.owned) or "none",
+            )
+        except Exception:
+            # A failing custom log handler must never prevent safety commands.
+            pass
 
     def _log_shutdown_save_error(self, message):
         if self._shutdown_save_error == message:
@@ -165,10 +169,14 @@ class NativeControls:
         self._shutdown_save_error = message
         if self._stop_log_reason is None:
             self._stop_log_reason = message
-        _LOGGER.error(
-            "House Climate watchdog: %s; stopping all %d owned devices: %s",
-            message, len(self.owned), ", ".join(self.owned) or "none",
-        )
+        try:
+            _LOGGER.error(
+                "House Climate watchdog: %s; Off requested for all %d owned devices: %s",
+                message, len(self.owned), ", ".join(self.owned) or "none",
+            )
+        except Exception:
+            # Reporting persistence failure must not interrupt its shutdown.
+            pass
 
     @callback
     def pause(self, reason=None):
