@@ -28,11 +28,18 @@ def generate_configuration(config, config_dir):
     write_dashboard(output / "dashboard.json", config)
 
 
-def entry_configuration(config_dir, values):
-    """UI configuration takes precedence; old file-based entries remain supported."""
+def entry_configuration(config_dir, values, bindings=None):
+    """Native house policy is fixed; legacy files remain a standalone path."""
     live = values.get("live", False)
     if type(live) is not bool:
         raise ValueError("Live control must be a boolean")
+    from .house_policy import HOUSE_POLICY, house_configuration, load_bindings
+
+    if values.get("policy") == HOUSE_POLICY:
+        config = house_configuration(values.get("configuration"),
+                                     bindings if bindings is not None else load_bindings(config_dir))
+        config.validate(live=live)
+        return config
     if "configuration" not in values:
         return load_configuration(config_dir, values.get("config_file", "house_climate.toml"), live)
     config = Config.from_dict(values["configuration"])

@@ -1,108 +1,41 @@
-# Room configuration
+# Wiring and everyday controls
 
-For native HA installations, use **House Climate → Configure**. TOML is optional, intended for standalone/add-on operation or importing an existing setup.
+Native House Climate uses a fixed house policy. Setup and Configure expose only **Allow live commands**. The **Controller enabled** device switch starts or pauses comfort control; a restart leaves it disabled. There is no room/schedule editor to work through.
 
-## Editing without losing your draft
+## Room cards
 
-Each form has an **Action** control. Choose **Back (keep draft)** and press **Next** to return to its parent menu without applying that form. Previously submitted edits and the form's unfinished values remain in this editing session. Reopen the form and submit with **Continue** to include those unfinished values in the configuration; final review saves only validated, continued edits. On **Review and save**, Back uses the **Submit** button and returns without saving.
+Use each room's climate card to change its desired temperature or comfort range. The change holds until the next scheduled profile change. Safety limits continue to apply. Existing climate and number entities are retained when upgrading.
 
-Choose **Continue** and submit a form to validate and stage its changes. Only the final **Review and save → Continue → Submit** writes the configuration and reloads the controller. Closing the dialog with **X** cancels the entire unsaved draft. Back does not apply pending remove, confirmation, or apply-to-all selections; choose these again when you intend to use them.
+The fixed primary schedule is 10 p.m.–5 a.m. at 68°F (67–69°F range), 5–9 a.m. at 69°F (67–70°F), and limits-only outside those hours. Its purifier runs at 60% during the sleep period and is off during the day. Other occupied rooms normally target 72°F; living targets 68°F and has the lowest shared-head priority.
 
-To adjust comfort during a live run, use the room's thermostat card or **Desired temperature** control. Those changes create a comfort hold without reloading the integration. Saving base profiles, schedules, or equipment configuration through **Configure** does reload it and leaves **Controller enabled** off.
+## Source mapping
 
-## Model
+`custom_components/house_climate/controller/house_policy.py` contains schedules, priorities, and temperatures. Actual room/head/fan IDs are loaded from `/config/house_climate_bindings.json`; the repository contains only a synthetic example.
 
-One configuration describes one outdoor/shared heat-or-cool system. Any number of indoor heads can belong to it. Each room references one head; several rooms can reference the same head. An optional independent auxiliary heater belongs to one room.
+Assign the actual ambient probe IDs to each logical area in the private file. Prefer at least two independent sources where available; the shared-head areas still require their own measurements.
 
-A room has a stable ID, editable name, optional HA area, temperature probes, base profile, daily schedules, and fan rules. IDs and entity IDs are independent of display names.
+Ambient probes in cold exterior corners remain valid readings with no invented offset. A probe near the heater may warm sooner; its reading still participates in the cutoff. Multiple probes contribute to the room median; the valid coldest/hottest readings also protect room limits. Heat-pump thermometers, the auxiliary heater's internal readings, obsolete probes, and equipment temperature gauges are excluded from ambient bindings.
 
-| Setting | Meaning |
-| --- | --- |
-| Target | Desired temperature while comfort control is enabled |
-| Half-width | Heat/cool demand begins outside target ± this amount |
-| Priority | 0.1–10 in 0.1 steps; higher numbers mean higher priority when rooms compete for heat versus cool. 1 is typical; safety limits take precedence |
-| Comfort enabled | Off uses system temperature limits instead of a comfort target |
-| Scheduled fan speed | Used by fans with the schedule strategy; 0 means off |
-| Lower/upper override | Optional explicit comfort edges, for asymmetric bands |
-| Schedule | Complete profile override for a daily start/end interval |
+Both bonus-floor fans circulate conditioned air toward the office. The bonus head serves office and entertainment together; neither room substitutes for a completely unmeasured other area.
 
-Schedules are local to HA's timezone, start-inclusive and end-exclusive. Midnight crossings work; overlapping intervals and equal start/end times are rejected. DST repeated hours use the same local profile. Outside schedules, the base profile applies. Comfort disabled still retains temperature-limit protection.
+## Electrical wiring
 
-HA forms use the configured temperature units. TOML and saved config-entry fields ending in `_f` use Fahrenheit; half-band and calibration offsets are Fahrenheit differences.
+The independent power guard receives private bindings for complete-circuit power, battery input/output, battery charge, both wall phases, heater-plug current, and the dedicated heater-only cutoff switch.
 
-## Heat-pump call offsets
+The heater is downstream of the battery. Circuit power and battery input are overlapping views and are never summed. The guard never switches the battery AC output or network equipment.
 
-**System settings** includes **Heating call offset** and **Cooling call offset**, each defaulting to a 5°F temperature difference (about 2.8°C). These push the device setpoint beyond the desired room goal and, when available, its onboard temperature while external probes call for conditioning. Room goals and comfort bands remain unchanged. Set an offset to zero to send direct room targets for that direction.
+Electrical thresholds live in `custom_components/house_climate/power_guard.py`. Device IDs stay in the private JSON file. These are operational rules, not user-facing tuning options. See [power and recovery rules](control.md).
 
-TOML stores these as `head_heat_call_offset_f` and `head_cool_call_offset_f` in Fahrenheit differences, each from 0 to 20. Existing configurations receive the defaults automatically. See [control behavior](control.md#heat-pump-call-setpoints) for bounds, rounding, and comfort stops.
+## Private bindings
 
-## Head cooling limits
+Copy the prepared private file to `/config/house_climate_bindings.json` **before** upgrading. New installations can use `bindings.example.json` as a schema example; every example ID is synthetic.
 
-Some integrations advertise a generic temperature range even when a head has a higher minimum in cooling mode. Set the equipment's actual limit in **Configure → Heat-pump head limits**: choose a head, enable its minimum cooling setpoint, enter the value, then submit the form and save the configuration. **Apply to all heads** copies that setting to every configured head; use it only when their limits match. Disabling the override clears it for the selected head, or all heads when that option is selected.
+The file has exactly five top-level sections: `heads`, `rooms`, `fans`, `heater`, and `power`. It accepts entity IDs only. Unknown fields, rule overrides, missing roles, and invalid domains are rejected. Missing private bindings fail closed rather than selecting guessed equipment.
 
-These limits apply to physical heads, including all rooms sharing one head. They do not change room comfort targets or schedules. HA forms use local temperature units. No override is assumed by default.
+Keep this file in HA's config directory, outside `custom_components`. Git ignores its standard filename, and installation/source packages explicitly exclude it. It survives HACS updates.
 
-TOML uses a map keyed by quoted climate entity IDs, with absolute temperatures in Fahrenheit:
+## Upgrade behavior
 
-```toml
-[head_cool_min_f]
-"climate.example_head_a" = 65
-```
+Configuration entries migrate in place. Existing room identities and area assignments are matched to the private wiring so dashboards retain their entities. Valid temporary holds are carried over with updated fingerprints and cannot extend beyond the new next schedule boundary. Legacy tuning is no longer authoritative.
 
-The controller combines this floor with the head's advertised range and temperature step. It rounds up to an allowed device setpoint when needed, so a 65°F floor on a 0.5°C grid may produce an 18.5°C call. If no supported setpoint satisfies the floor, that head is stopped and its configuration issue is reported while other heads can continue. An infeasible limit does not loosen acknowledgement checks or trigger an automatic device-integration reload. Saving changes through Configure still reloads House Climate normally.
-
-## Heat-pump acknowledgement wait
-
-**System settings → Heat-pump acknowledgement wait** defaults to 120 seconds. A head can briefly report its old setpoint after accepting a command. The controller waits for the exact requested mode and temperature before acknowledging activation; changes to an unconfirmed target do not restart the overall wait. The TOML setting is `head_activation_timeout_seconds` (1–300 seconds). Off commands, auxiliary-heater commands, fan commands, safety polling, and the watchdog retain their existing timing.
-
-## Sensors
-
-Use independent probes where possible. Ordinary comfort control uses their median; confirmed extremes still protect system limits. Prefer probes that measure occupied room air, and omit or calibrate consistently biased readings. The HA editor assigns a common source identifier to entities from the same registered device, so aliases are not counted twice. Existing imported probe source IDs, unit overrides, attributes, and offsets are preserved when reselecting them.
-
-TOML probes can specify `source`, `attribute`, `unit`, and `offset_f`. Share a source ID between aliases of the same physical probe. Explicit units are particularly useful for attribute-based probes used by the auxiliary watchdog. Omit unreliable sensors, especially the auxiliary heater's internal temperature.
-
-Periodic probes use the configured maximum report age. Some battery sensors report a temperature only when it changes enough; an old measurement from such a source can still be valid. In **Edit a room → select a room → Room settings**, select those sources under **Sensors that report only on change**. Other sources retain normal age checks. Removing a source from that selection restores its age check.
-
-TOML uses `report_on_change = true` on the individual sensor entry. The default is false. This option accepts the last reported value while HA considers the entity available; it does not infer a new measurement or prove that a silent device is connected. Unknown/unavailable, invalid, implausible, missing-timestamp, and future-dated readings remain rejected. Native and generated auxiliary watchdogs follow the same policy. Standalone/legacy users must regenerate their HA package after changing this setting.
-
-At least one probe must be configured per room. Operation can continue with one valid independent source and a diagnostic warning. If all sources fail, the room's shared head is inhibited.
-
-## Fans
-
-| Strategy | Behavior |
-| --- | --- |
-| cooling | Run during this room's cooling demand |
-| conditioning | Run during this room's heating or cooling demand |
-| schedule | Use the active profile's fan speed |
-| transfer | Run for useful air transfer, or assist a shared head conditioning this room |
-| always | Continuous circulation while the room has valid temperature data |
-
-A fan belongs to the room it helps, regardless of its physical location. Transfer rules also select a source room. Two fans can help the same room. Each fan can appear only once in a configuration.
-
-Transfer control uses temperature-difference hysteresis: start above 0.75°F, stop below 0.25°F, and stop when the source air would no longer help. When the source and destination share a head, transfer fans also run at their configured percentage while that head is selected in a direction that helps the destination. This moves conditioned air before the source room's average temperature changes. Fast safety checks remove head-dependent assistance when the head is inhibited; useful independent transfer can continue. Actual airflow direction is installation-specific.
-
-## Optional auxiliary heater
-
-Assign its climate entity and room, high heating setpoint, external cutoff, and optional fan-only behavior. The cutoff must exceed all configured comfort-band upper bounds and lie inside system limits. The high device setpoint must be supported and verified to call for heat.
-
-A combined heater/fan uses only its climate entity. Its `fan_only` mode retains the existing device fan speed; the integration does not assume a separate fan-speed service. Unsupported fan-only mode is skipped. Do not select its internal temperature as an external probe.
-
-## TOML
-
-[config.example.toml](../config.example.toml) documents schema version 2 with synthetic devices. Change stable room IDs, display names, devices, profiles, and schedules as needed. Remove auxiliary fields and fan arrays when unused.
-
-Advanced TOML settings include sensor freshness/confirmation, calibration, forecast horizon, switch confirmation, command timeout, and helper prefix. Native users can import an advanced TOML file; options edits preserve fields not exposed by the editor.
-
-Never put API tokens in configuration files. Standalone REST credentials belong in `HA_URL` and `HA_TOKEN`.
-
-## Upgrading from version 1
-
-Upgrading the integration preserves the old TOML file and live HA helpers. Their values remain authoritative until you save a room-based configuration in **Configure**.
-
-When opening the editor or importing the old file, the controller translates the former room roles into explicit profiles, schedules, priorities, and fan rules. It copies current numeric, schedule, and fan-enable helper values from HA; missing helpers use the prior defaults. The editor starts in shadow mode for this conversion.
-
-Review the imported draft while HA helpers are loaded. Saving stores the configuration in HA; the TOML file and old comfort helpers then stop being authoritative. The helper prefix remains in the stored configuration for compatibility, but native control uses the device's Controller enabled switch.
-
-After saving, verify live-command settings and turn on Controller enabled on the device. Native controls and the watchdog are created automatically. Stop the old controller before migration; once its ownership is off, the obsolete helper package can be removed. Keep a backup of the old file/package until migration is verified. Standalone/add-on installations continue to require their generated package.
-
-An ordinary room rename preserves its stable ID. Existing legacy role words remain only in the compatibility reader and regression fixtures; new configurations do not depend on them.
+Shadow mode performs no device writes. After opting into live commands, the electrical guard protects the heater independently of the comfort switch. It can therefore shed a manually operated heater while comfort control is paused.

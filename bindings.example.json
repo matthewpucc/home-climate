@@ -1,0 +1,47 @@
+{
+  "heads": {
+    "bonus": "climate.shared_head",
+    "guest": "climate.guest_head",
+    "primary": "climate.sleep_head",
+    "living": "climate.common_head"
+  },
+  "rooms": {
+    "office": [
+      "sensor.office_ambient_a",
+      "sensor.office_ambient_b",
+      "sensor.office_ambient_c"
+    ],
+    "entertainment": [
+      "sensor.entertainment_ambient"
+    ],
+    "guest": [
+      "sensor.guest_ambient_a",
+      "sensor.guest_ambient_b"
+    ],
+    "primary": [
+      "sensor.sleep_ambient_a",
+      "sensor.sleep_ambient_b"
+    ],
+    "living": [
+      "sensor.living_ambient_a",
+      "sensor.living_ambient_b"
+    ]
+  },
+  "fans": {
+    "primary": "fan.sleep_circulation",
+    "guest": "fan.guest_circulation",
+    "office": "fan.office_transfer",
+    "entertainment": "fan.shared_transfer"
+  },
+  "heater": "climate.auxiliary_heater",
+  "power": {
+    "heater_switch": "switch.auxiliary_heater_power",
+    "battery": "sensor.reserve_battery",
+    "circuit_power": "sensor.shared_circuit_power",
+    "input_power": "sensor.reserve_input_power",
+    "output_power": "sensor.reserve_output_power",
+    "heater_current": "sensor.heater_plug_current",
+    "wall_phase_a_voltage": "sensor.supply_a_voltage",
+    "wall_phase_b_voltage": "sensor.supply_b_voltage"
+  }
+}

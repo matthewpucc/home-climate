@@ -9,6 +9,7 @@ from datetime import datetime
 from .config import Config, Settings
 from .policy import Plan, Policy
 from .sensors import Sensors
+from .temperature_guard import heating_cutoff_reached, opposite_limit_reached
 
 
 class DecisionCadence:
@@ -82,9 +83,9 @@ class DecisionCadence:
             if any(name not in rooms for name in names):
                 self._inhibit(head, "temperature unavailable in an attached room")
                 continue
-            if plan.mode == "cool" and any(rooms[name].low <= low + .25 for name in names):
+            if plan.mode == "cool" and any(opposite_limit_reached(rooms[name], "cool", low, high) for name in names):
                 self._inhibit(head, "cooling blocked by opposite temperature limit")
-            elif plan.mode == "heat" and any(rooms[name].high >= high - .25 for name in names):
+            elif plan.mode == "heat" and any(opposite_limit_reached(rooms[name], "heat", low, high) for name in names):
                 self._inhibit(head, "heating blocked by opposite temperature limit")
             elif (plan.mode in ("heat", "cool")
                   and getattr(self.config, f"head_{plan.mode}_call_offset_f", 0) > 0):
@@ -106,7 +107,7 @@ class DecisionCadence:
         if self.config.heater_entity:
             cutoff = min(self.config.heater_cutoff_f,
                          plan.room_targets.get(self.config.auxiliary_room, {}).get("high_f", self.config.heater_cutoff_f))
-            if plan.heater_on and (not auxiliary or auxiliary.high >= cutoff):
+            if plan.heater_on and (not auxiliary or heating_cutoff_reached(auxiliary, cutoff, high)):
                 plan.heater_on = False
                 self.policy.heater_on = False
                 self._warning("Auxiliary heat stopped by fresh room temperature/probe check; waiting for next comfort decision")

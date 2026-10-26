@@ -12,3 +12,5 @@ build/
 home_assistant/*.yaml
 home_assistant/*.json
 house_climate.toml
+house_climate_bindings.json
+bindings.local.json

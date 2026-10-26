@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0
+
+- Replace the native room/schedule editor with a fixed operating policy and private device-role bindings. Keep one live-command opt-in and the existing dashboard temperature/range cards.
+- Keep actual entity IDs in a private Home Assistant JSON file; publish only synthetic bindings. Migrate existing room identities, area assignments, and valid temporary holds using that private map. Holds cannot extend past the next fixed schedule boundary.
+- Use ambient probes for room control; exclude heat-pump and living-room heater thermometers. Preserve valid cold-corner ambient readings alongside other independent probes without invented offsets.
+- Stop heating/cooling with a 1°F house-limit reserve and a short worsening-trend forecast, including fresh maintenance and minimum-run retention.
+- Add a native living-room heater power guard: conservative 1350 W circuit/input budget, separate 2000 W battery-output spike threshold, and 40% battery reserve. Apply the 12 A ceiling to circuit/input only; use downstream heater current for recovery confirmation rather than an output limit.
+- Request Dyson Off, then cut only its dedicated outlet if acknowledgement fails. Restore guard-owned power only after battery exceeds 40%, safe load/cooldown checks, and fresh physical power/thermostat feedback; never force heat.
+- Persist power-cut ownership and protect unload/restart from delayed outlet restoration. Keep the Elite and network outlets outside the actuator set.
+- Explain that Emporia real watts are a conservative input budget, not a full-circuit RMS-current measurement. The independent native guard is not installed by the legacy standalone/add-on path.
+
 ## 0.6.9
 
 - Deliver native worker heartbeats through a coalesced Home Assistant loop callback instead of waiting on a synthetic helper-service roundtrip. Native status-helper writes no longer queue no-op services.

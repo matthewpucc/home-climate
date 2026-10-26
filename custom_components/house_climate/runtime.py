@@ -101,6 +101,7 @@ class NativeAPI:
         self.status_entity = config.entity("status", "input_text")
         self.entity_ids = controller_entity_ids(config)
         self.controls = None
+        self.power_guard = None
         self.heartbeat_notify = None
         self._heartbeat_lock = threading.Lock()
         self._heartbeat = HeartbeatState()
@@ -271,6 +272,9 @@ class NativeAPI:
                 })
         if self.controls is not None:
             states = self.controls.overlay({state["entity_id"]: state for state in result})
+            if self.power_guard is not None and self.power_guard.blocked:
+                key = self.controls.config.entity("auxiliary_probe_safe", "binary_sensor")
+                states[key] = {**states[key], "state": "off"}
             return [{"entity_id": entity, **state} for entity, state in states.items()]
         return result
 
@@ -318,6 +322,10 @@ class NativeAPI:
             if issue or confirming:
                 raise HAActivationDeferred(issue or HEARTBEAT_WAIT_REASON)
             controls.check_activation(body.get("entity_id"), body, generation=generation)
+        if activation and self.power_guard is not None:
+            # Check on HA's loop immediately before dispatch, not against an old
+            # worker snapshot. Off requests always remain allowed.
+            self.power_guard.check_activation(body.get("entity_id"), body)
         if dispatch is not None:
             dispatch.begin()
         if controls and activation:
@@ -354,7 +362,7 @@ class NativeAPI:
 
 
 class ControllerRuntime:
-    def __init__(self, hass, config, live):
+    def __init__(self, hass, config, live, *, house_policy=False, power_bindings=None):
         self.hass = hass
         self.config = config
         self.live = live
@@ -362,6 +370,9 @@ class ControllerRuntime:
         self.wake_event = threading.Event()
         self.controls = None
         self.comfort = None
+        self.house_policy = house_policy
+        self.power_bindings = power_bindings
+        self.power_guard = None
         self.api = NativeAPI(hass, live, self.stop_event, config)
         self.api.heartbeat_notify = self._async_heartbeat_changed
         self.thread = None
@@ -395,9 +406,32 @@ class ControllerRuntime:
                                                self._async_controls_changed)
                 self.api.controls = self.controls
                 await self.controls.async_load()
+            if self.house_policy:
+                from .power_guard import HeaterPowerGuard
+                self.power_guard = HeaterPowerGuard(
+                    self.hass, bindings=self.power_bindings, live=self.live, entry_id=entry_id,
+                    notify=self._async_power_guard_changed)
+                self.api.power_guard = self.power_guard
+                if self.controls is not None:
+                    self.controls.power_guard = self.power_guard
+                await self.power_guard.async_load()
         except BaseException:
+            if self.power_guard is not None:
+                await self.power_guard.async_close()
             await self.comfort.async_close()
             raise
+
+    def _update_power_guard_status(self):
+        if self.power_guard is not None:
+            self.status["power_guard"] = self.power_guard.diagnostics
+
+    @callback
+    def _async_power_guard_changed(self):
+        self._update_power_guard_status()
+        self.wake_event.set()
+        if self.controls is not None:
+            self.controls._schedule_check()
+        async_dispatcher_send(self.hass, SIGNAL_STATUS)
 
     def _update_heartbeat_status(self):
         diagnostics = self.api.heartbeat_diagnostics
@@ -474,6 +508,8 @@ class ControllerRuntime:
             return
         if self.controls:
             self.controls.async_start()
+        if self.power_guard is not None:
+            self.power_guard.async_start()
         self._remove_climate_listener = async_track_state_change_event(
             self.hass, self.config.climate_entities, self._async_climate_changed
         )
@@ -498,6 +534,7 @@ class ControllerRuntime:
         if self.controls and event == "live" and not self.controls.enabled:
             event = "stopping" if self.controls.owned else "shadow"
         self.status = {"event": event, **data, **self.last_fault}
+        self._update_power_guard_status()
         if self.controls:
             self.status.update(control_enabled=self.controls.enabled,
                                control_block_reason=self.controls.hint,
@@ -694,7 +731,16 @@ class ControllerRuntime:
         controls_closed = await self._async_close_controls(wait_for_ack)
         closed = controls_closed and recovery_closed
         if closed:
-            self._logged_unload_blockers = None
+            if self.power_guard is not None:
+                guard_closed = await self.power_guard.async_close()
+                if guard_closed is False:
+                    # A delayed outlet-On is an activation, even if an older Off
+                    # is cached. Keep this runtime until compensation is proven.
+                    closed = False
+                    _LOGGER.warning("Controller unload deferred; waiting for heater outlet restoration to be safely stopped")
+                    self._update_power_guard_status()
+            if closed:
+                self._logged_unload_blockers = None
         else:
             self._warn_unload_deferred(recovery_pending=not recovery_closed)
         if closed and self._remove_climate_listener:
