@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.1
+
+- Rename the integration, add-on, device labels, logs, generated dashboards, release bundles, and documentation to Home Climate.
+- Refresh the old default integration title while preserving custom names, registered entities, settings, storage, and add-on identity.
+- Prefer private `home_climate_bindings.json` wiring and continue reading `house_climate_bindings.json` when the new file is absent. Both filenames stay excluded from public archives.
+- Add the `home-climate` command while retaining the previous command as a compatibility alias.
+
 ## 0.7.0
 
 - Replace the native room/schedule editor with a fixed operating policy and private device-role bindings. Keep one live-command opt-in and the existing dashboard temperature/range cards.

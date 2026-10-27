@@ -9,7 +9,7 @@ OUTPUT.mkdir(exist_ok=True)
 INTEGRATION = ROOT / "custom_components/house_climate"
 PUBLIC_URL = "https://github.com/matthewpucc/home-climate"
 DEVELOPMENT_URL = "https://github.com/matthewpucc/home-climate"
-PRIVATE_BINDING_NAMES = {"house_climate_bindings.json", "bindings.local.json"}
+PRIVATE_BINDING_NAMES = {"home_climate_bindings.json", "house_climate_bindings.json", "bindings.local.json"}
 
 
 def files_under(directory):
@@ -24,7 +24,7 @@ assert manifest["domain"] == "house_climate" and manifest["config_flow"]
 assert (INTEGRATION / "brand/icon.png").is_file()
 assert json.loads((ROOT / "hacs.json").read_text())["homeassistant"] == "2026.10.0"
 
-with ZipFile(OUTPUT / "house-climate-integration.zip", "w", ZIP_DEFLATED) as archive:
+with ZipFile(OUTPUT / "home-climate-integration.zip", "w", ZIP_DEFLATED) as archive:
     for path in paths:
         archive.write(path, path.relative_to(ROOT))
     for name in ("config.example.toml", "bindings.example.json", "LICENSE"):
@@ -46,7 +46,7 @@ for name in ("README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md",
 workflow = (ROOT / ".github/workflows/container.yml").read_text()
 # The public repository owns its CI and GHCR package.
 workflow = workflow.replace("branches: [work]", "branches: [main]")
-with ZipFile(OUTPUT / "house-climate-public-repository.zip", "w", ZIP_DEFLATED) as archive:
+with ZipFile(OUTPUT / "home-climate-public-repository.zip", "w", ZIP_DEFLATED) as archive:
     for path in public:
         relative = path.relative_to(ROOT).as_posix()
         if path.suffix == ".png":

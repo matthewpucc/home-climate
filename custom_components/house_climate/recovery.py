@@ -217,7 +217,7 @@ class RecoveryManager:
         if scheduled is not None:
             self._active_entry = scheduled
             self._task = self.hass.async_create_background_task(
-                self._async_reload(scheduled), "house-climate-integration-recovery"
+                self._async_reload(scheduled), "home-climate-integration-recovery"
             )
 
     async def async_reload_entity(self, entity_id):
@@ -259,7 +259,7 @@ class RecoveryManager:
         }
         self._summary = self._details[entry_id]["reason"]
         self._task = self.hass.async_create_background_task(
-            self._async_reload(entry_id, manual=True), "house-climate-manual-integration-recovery"
+            self._async_reload(entry_id, manual=True), "home-climate-manual-integration-recovery"
         )
         self._notify()
         if not await asyncio.shield(self._task):

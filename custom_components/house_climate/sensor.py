@@ -7,7 +7,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN, SIGNAL_STATUS
+from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 from .controller.sensors import from_f, to_f
 
 
@@ -226,8 +226,8 @@ class ControllerEntity(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "House climate controller",
-            "manufacturer": "House climate",
+            "name": DEVICE_NAME,
+            "manufacturer": NAME,
             "model": "Shared heat-pump controller",
         }
 

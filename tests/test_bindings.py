@@ -7,7 +7,8 @@ import tempfile
 import unittest
 
 from house_climate.bindings import (
-    BINDINGS_FILENAME, BindingsError, HouseBindings, PowerBindings, example_bindings, load_bindings,
+    BINDINGS_FILENAME, LEGACY_BINDINGS_FILENAME, BindingsError, HouseBindings, PowerBindings,
+    example_bindings, load_bindings,
 )
 from house_climate.house_policy import house_configuration
 
@@ -56,6 +57,28 @@ class PrivateBindingsTests(unittest.TestCase):
             (raw if section is None else raw[section])[key] = value
             with self.subTest(section=section, key=key), self.assertRaises(BindingsError):
                 HouseBindings.from_dict(raw)
+
+    def test_legacy_filename_keeps_existing_installations_working(self):
+        (self.root / LEGACY_BINDINGS_FILENAME).write_text(json.dumps(self.raw))
+        self.assertEqual(load_bindings(self.root), self.example)
+
+    def test_new_filename_is_authoritative_when_both_exist(self):
+        (self.root / LEGACY_BINDINGS_FILENAME).write_text(json.dumps(self.raw))
+        changed = deepcopy(self.raw)
+        changed["heads"]["primary"] = "climate.new_sleep_head"
+        self.path.write_text(json.dumps(changed))
+        self.assertEqual(load_bindings(self.root).heads["primary"], "climate.new_sleep_head")
+
+    def test_invalid_current_file_never_falls_back_to_different_equipment(self):
+        (self.root / LEGACY_BINDINGS_FILENAME).write_text(json.dumps(self.raw))
+        for contents in ("not json", "{}"):
+            self.path.write_text(contents)
+            with self.subTest(contents=contents), self.assertRaises(BindingsError):
+                load_bindings(self.root)
+        self.path.unlink()
+        self.path.symlink_to(self.root / "missing.json")
+        with self.assertRaises(BindingsError):
+            load_bindings(self.root)
 
     def test_missing_roles_and_wrong_domains_fail_closed(self):
         for section, role in (("heads", "primary"), ("rooms", "living"),

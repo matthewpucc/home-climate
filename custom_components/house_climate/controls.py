@@ -174,7 +174,7 @@ class NativeControls:
         self._stop_log_reason = reason
         try:
             _LOGGER.log(
-                level, "House Climate watchdog: %s; Off requested for all %d owned devices: %s",
+                level, "Home Climate watchdog: %s; Off requested for all %d owned devices: %s",
                 reason, len(self.owned), ", ".join(self.owned) or "none",
             )
         except Exception:
@@ -189,7 +189,7 @@ class NativeControls:
             self._stop_log_reason = message
         try:
             _LOGGER.error(
-                "House Climate watchdog: %s; Off requested for all %d owned devices: %s",
+                "Home Climate watchdog: %s; Off requested for all %d owned devices: %s",
                 message, len(self.owned), ", ".join(self.owned) or "none",
             )
         except Exception:
@@ -507,7 +507,7 @@ class NativeControls:
         if (not self.active or self._claiming or self._closing
                 or (self._task and not self._task.done())):
             return
-        self._task = self.hass.async_create_task(self.async_check(), "House Climate watchdog")
+        self._task = self.hass.async_create_task(self.async_check(), "Home Climate watchdog")
 
     async def _off(self, entity):
         receipt = self.auxiliary_off_started() if entity == self.config.heater_entity else None
@@ -526,12 +526,12 @@ class NativeControls:
             message = f"Could not stop {entity}: {exc}"
             if entity.startswith("fan."):
                 if self._fan_problems.get(entity) != message:
-                    _LOGGER.warning("House Climate watchdog: %s", message)
+                    _LOGGER.warning("Home Climate watchdog: %s", message)
                 self._fan_problems[entity] = message
             else:
                 if self.problem != message:
                     log = _LOGGER.error if self.recovering or not self.enabled else _LOGGER.warning
-                    log("House Climate watchdog: %s", message)
+                    log("Home Climate watchdog: %s", message)
                 self.problem = message
                 if entity == self.config.heater_entity:
                     self._auxiliary_off_error = message

@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "house-climate-controller"
-version = "0.7.0"
-description = "Fixed house climate policy and heater protection for Home Assistant"
+name = "home-climate-controller"
+version = "0.7.1"
+description = "Fixed Home Climate policy and heater protection for Home Assistant"
 requires-python = ">=3.11"
 dependencies = []
 license = {file = "LICENSE"}
@@ -15,6 +15,8 @@ readme = "README.md"
 test = ["Jinja2>=3.1.6,<4"]
 
 [project.scripts]
+home-climate = "house_climate.__main__:main"
+# Keep the original command usable for existing scripts.
 house-climate = "house_climate.__main__:main"
 
 [tool.setuptools]

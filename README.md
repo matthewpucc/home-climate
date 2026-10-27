@@ -1,4 +1,4 @@
-# House Climate
+# Home Climate
 
 A Home Assistant integration with a fixed operating policy for four heat-pump heads, room fans, and a battery-backed auxiliary heater. Operating rules live in source; actual device bindings stay in a private Home Assistant file. Setup has one live-command opt-in. Room climate cards still provide temporary temperature and range adjustments.
 
@@ -6,10 +6,12 @@ A Home Assistant integration with a fixed operating policy for four heat-pump he
 
 Use the [installation guide](docs/hacs.md) to add this repository to HACS as an **Integration**, or install the release ZIP.
 
-1. Place your private device map at `/config/house_climate_bindings.json` before installing or upgrading. [bindings.example.json](bindings.example.json) shows the schema with synthetic IDs.
+1. Place your private device map at `/config/home_climate_bindings.json` before installing or upgrading. [bindings.example.json](bindings.example.json) shows the schema with synthetic IDs.
 2. Install the integration and restart Home Assistant.
-3. Add **House Climate** under Settings → Devices & services, or let the existing entry migrate.
+3. Add **Home Climate** under Settings → Devices & services, or let the existing entry migrate.
 4. Leave live commands disabled to inspect plans, or opt in when ready; then turn on **Controller enabled**.
+
+Existing installs update in place. The old private filename `house_climate_bindings.json` still works; no file rename or entity reconfiguration is required.
 
 The controller starts disabled after an HA restart. When live commands are permitted, the living-room heater power guard remains active even while comfort control is disabled.
 

@@ -5,7 +5,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_state_change_event
 
-from .const import DOMAIN, SIGNAL_STATUS
+from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -23,8 +23,8 @@ class ControllerEnabled(SwitchEntity):
         self._attr_unique_id = f"{entry.entry_id}_enabled"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "House climate controller",
-            "manufacturer": "House climate",
+            "name": DEVICE_NAME,
+            "manufacturer": NAME,
             "model": "Shared heat-pump controller",
         }
 

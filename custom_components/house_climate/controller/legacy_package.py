@@ -110,4 +110,4 @@ def write_dashboard(path: str) -> None:
     entities += [helper(name) for name in NUMBERS]
     entities += [helper(name, "input_datetime") for name in TIMES]
     entities += ["input_datetime.hp_heartbeat", "binary_sensor.hp_living_probe_safe", "automation.hp_heater_watchdog"]
-    Path(path).write_text(json.dumps({"type": "entities", "title": "House climate controller", "entities": entities}, indent=2) + "\n")
+    Path(path).write_text(json.dumps({"type": "entities", "title": "Home Climate controller", "entities": entities}, indent=2) + "\n")
