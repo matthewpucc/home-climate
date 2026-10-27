@@ -240,9 +240,11 @@ class PolicyTests(unittest.TestCase):
         # Same current temperatures but no upward trend from the prior call.
         self.policy.sensors = Sensors(self.cfg)
         later = NIGHT + timedelta(seconds=30)
-        self.assertEqual(self.decide(later, primary=66.9).mode, "off")
+        # A comfort request safely inside the house reserve obeys dwell. A
+        # primary reading of 66.9°F would correctly trigger house protection.
+        self.assertEqual(self.decide(later, guest=69.5).mode, "off")
         later = NIGHT + timedelta(seconds=1250)
-        self.assertEqual(self.decide(later, primary=66.9).mode, "heat")
+        self.assertEqual(self.decide(later, guest=69.5).mode, "heat")
 
     def test_actual_limit_can_bypass_software_dwell(self):
         self.decide(office=73)

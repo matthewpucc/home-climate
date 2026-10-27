@@ -49,7 +49,7 @@ class AmbientStoppingTests(unittest.TestCase):
         self.cfg = configuration()
         self.settings = Settings.read({}, self.cfg)
 
-    def test_recorded_warm_probe_replay_stops_early_without_stopping_healthy_head(self):
+    def test_warm_probe_replay_stops_locally_then_protects_house_after_confirmation(self):
         # Keep two ambient sources cooler to exercise the raw gradient guard,
         # rather than an ordinary stop from the fused median reaching target.
         # The third source replays the observed warming trace from the watch.
@@ -70,7 +70,16 @@ class AmbientStoppingTests(unittest.TestCase):
             executor.step(plan, ha.states(), elapsed)
             if elapsed >= 15 and ha.data["climate.gradient"]["state"] == "off":
                 first_stopped = hot_probe if first_stopped is None else first_stopped
-            self.assertEqual(ha.data["climate.healthy"]["state"], "heat")
+            if elapsed < 60:
+                # An unconfirmed hot extreme stops only its own head. Healthy
+                # heads may keep running in the compatible shared direction.
+                self.assertEqual(ha.data["climate.healthy"]["state"], "heat")
+            else:
+                # Once that extreme is corroborated, house cooling protection
+                # outranks ordinary heating and requires a shared Off barrier.
+                self.assertEqual(plan.mode, "cool")
+                self.assertEqual(ha.data["climate.healthy"]["state"], "off")
+                self.assertEqual(executor.phase, "settling")
         self.assertEqual(first_stopped, 74.03)
         self.assertLess(first_stopped + .36, 75)  # Same observed residual rise.
         self.assertNotIn("gradient", executor.cycle_holds)

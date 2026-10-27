@@ -367,7 +367,7 @@ class RoomComfort:
     def _expiry_due(self, _now):
         self._remove_expiry = None
         if not self._closed:
-            self._expiry_task = self.hass.async_create_task(self._async_expire(), "House Climate comfort expiry")
+            self._expiry_task = self.hass.async_create_task(self._async_expire(), "Home Climate comfort expiry")
 
     async def _async_expire(self):
         async with self._lock:

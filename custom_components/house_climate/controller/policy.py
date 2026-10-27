@@ -7,7 +7,8 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from .config import Config, Settings
 from .sensors import Reading, Sensors, from_f, to_f
-from .temperature_guard import heating_cutoff_reached, opposite_limit_reached
+from .temperature_guard import heating_cutoff_reached
+from .head_guard import HeadGuard
 
 
 def native_target(fahrenheit: float, attrs: dict, unit: str, *, minimum_f: float | None = None) -> float:
@@ -77,6 +78,8 @@ class Plan:
     head_targets_f: dict[str, float] = field(default_factory=dict)
     head_call_targets_f: dict[str, float] = field(default_factory=dict)
     inhibited_heads: dict[str, str] = field(default_factory=dict)
+    head_constraints: dict = field(default_factory=dict)
+    head_protections: dict = field(default_factory=dict)
     heater_on: bool = False
     auxiliary_fan_only: bool = False
     fans: dict[str, int] = field(default_factory=dict)
@@ -96,6 +99,7 @@ class Policy:
     def __init__(self, config: Config):
         self.config = config
         self.sensors = Sensors(config)
+        self.head_guard = HeadGuard(config)
         self.calls: dict[tuple[str, str], bool] = {}
         self.selected_mode = "off"
         self.last_direction: str | None = None
@@ -161,6 +165,17 @@ class Policy:
                    "cool_requested": demands.get(name, {}).get("cool", {}).get("active", False)}
             for name, band in bands.items()
         }
+        self.head_guard.observe(rooms, plan.room_targets)
+        for (_head, mode), protection in self.head_guard.protections.items():
+            for name in protection["rooms"]:
+                # A recovering house call remains a real request even when an
+                # improving forecast would otherwise clear ordinary demand.
+                request = demands[name][mode]
+                request["active"] = True
+                score = request["score"]
+                request["score"] = (score[0], max(.05, score[1]), profiles[name].priority,
+                                    max(.05, score[3]))
+                plan.room_targets[name][f"{mode}_requested"] = True
         for key in list(self.calls):
             if key[0] not in rooms:
                 self.calls.pop(key)
@@ -226,6 +241,7 @@ class Policy:
                 continue
             for mode in ("heat", "cool"):
                 requests = []
+                protection = self.head_guard.protection(head, mode, rooms, plan.room_targets)
                 for name in names:
                     if name == self.config.auxiliary_room and mode == "heat" and heater_can_heat:
                         continue
@@ -255,15 +271,21 @@ class Policy:
                         except ValueError as exc:
                             plan.warnings.append(f"{head}: cooling unavailable because {exc}")
                             continue
-                # Immediate raw extremes stop aggravating a potentially unsafe area.
-                blocked = any(opposite_limit_reached(rooms[name], mode, LOW, HIGH) for name in names)
-                if blocked:
-                    plan.warnings.append(f"{head}: {mode} blocked by opposite temperature limit; airflow/capacity conflict")
+                constraint = self.head_guard.constraint(head, mode, rooms, plan.room_targets, states)
+                if constraint:
+                    plan.head_constraints.setdefault(head, {})[mode] = constraint
+                    plan.warnings.append(constraint["reason"])
                     continue
                 chosen = max(requests, key=lambda request: request["score"])
+                score = chosen["score"]
+                protection = self.head_guard.protection(head, mode, rooms, plan.room_targets)
+                if protection:
+                    # Keep a recovering protection call above soft comfort until
+                    # its originating room reaches its normal stop target.
+                    score = (score[0], max(.05, score[1]), score[2], score[3])
                 eligible[mode][head] = chosen["target"]
                 # Worst room wins in each safety/priority tier; room count cannot outvote a limit.
-                scores[mode] = tuple(max(a, b) for a, b in zip(scores[mode], chosen["score"]))
+                scores[mode] = tuple(max(a, b) for a, b in zip(scores[mode], score))
 
         available = [mode for mode in ("heat", "cool") if eligible[mode]]
         winner = max(available, key=lambda mode: (scores[mode], mode == self.selected_mode)) if available else "off"
@@ -274,8 +296,11 @@ class Policy:
                 self.candidate = (winner, now)
             held = (now - self.mode_since).total_seconds() if self.mode_since else float("inf")
             confirmed = (now - self.candidate[1]).total_seconds() >= self.config.switch_confirmation_seconds
-            # Actual out-of-range conditions may bypass comfort dwell, but never hardware off-time.
-            emergency = scores[winner][0] > scores[self.last_direction][0]
+            # House protection may bypass comfort dwell, but never hardware off-time.
+            emergency = scores[winner][0] > scores[self.last_direction][0] or (
+                scores[winner][1] > scores[self.last_direction][1]
+                and any(self.head_guard.protection(head, winner, rooms, plan.room_targets)
+                        for head in eligible[winner]))
             old_score = scores[self.last_direction]
             # For comfort-only switches require a meaningful advantage, not tiny fluctuations.
             advantage = scores[winner][:3] > old_score[:3] or scores[winner][3] > old_score[3] + .5
@@ -290,6 +315,10 @@ class Policy:
         self.selected_mode = winner
         plan.mode = winner
         plan.head_targets_f = eligible.get(winner, {})
+        plan.head_protections = {
+            head: protection for head in plan.head_targets_f
+            if (protection := self.head_guard.protection(head, winner, rooms, plan.room_targets))
+        }
         plan.head_call_targets_f = {
             key: call_target_f(self.config, self.config.heads[key], winner, target, states, climate_unit)
             for key, target in plan.head_targets_f.items()

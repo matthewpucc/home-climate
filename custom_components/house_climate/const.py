@@ -1,5 +1,8 @@
 """Shared native integration constants."""
+# Keep the registered domain stable so upgrades retain entities and storage.
 DOMAIN = "house_climate"
+NAME = "Home Climate"
+DEVICE_NAME = "Home Climate controller"
 CONF_CONFIG_FILE = "config_file"
 CONF_LIVE = "live"
 DEFAULT_CONFIG_FILE = "house_climate.toml"

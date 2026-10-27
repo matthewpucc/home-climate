@@ -25,8 +25,9 @@ class ControlCadenceTests(unittest.IsolatedAsyncioTestCase):
                 probe.entity_id, str(value), dict(old.attributes))
 
     async def start_control(self, *, living=68):
-        # 76F would trigger the immediate hard-limit decision exception. These
-        # tests deliberately exercise ordinary comfort demand below that limit.
+        # This initial reserve-zone call is already known to cadence. Losing
+        # its probes and restoring the same readings must not create a new
+        # protection edge or bypass the decision interval.
         self.temperatures("guest", 74.8)
         self.temperatures("living", living)
         self.decision_times = []
@@ -50,7 +51,7 @@ class ControlCadenceTests(unittest.IsolatedAsyncioTestCase):
             runtime.status.get("event") == "live"
             and runtime.status.get("phase") == "running"
             and self.hass.states.get(cfg.heads["guest"]).state == "cool"
-            and (living != 67 or self.hass.states.get(cfg.heater_entity).state == "heat")))
+            and (living >= 67.5 or self.hass.states.get(cfg.heater_entity).state == "heat")))
         # Start each scenario just after a full decision, leaving most of the
         # 600ms interval available for maintenance-only assertions.
         if time.monotonic() - self.decision_times[-1] >= .1:
@@ -133,7 +134,9 @@ class ControlCadenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.fault_count, 0)
 
     async def test_auxiliary_comfort_cutoff_is_fast_and_restart_waits_for_decision(self):
-        runtime, switch = await self.start_control(living=67)
+        # Ordinary auxiliary demand below 67.5°F, but above the 67°F house
+        # reserve. Re-entering the house reserve may legitimately replan early.
+        runtime, switch = await self.start_control(living=67.2)
         heater = runtime.config.heater_entity
         count = len(self.decision_times)
         # Below the independent 70F emergency cutoff, but above the active
@@ -143,7 +146,7 @@ class ControlCadenceTests(unittest.IsolatedAsyncioTestCase):
             while self.hass.states.get(heater).state != "off":
                 await asyncio.sleep(.005)
         self.assertEqual(len(self.decision_times), count)
-        self.temperatures("living", 67)
+        self.temperatures("living", 67.2)
         await self.assert_stays(
             runtime, lambda: self.hass.states.get(heater).state == "off", wake=True)
         self.assertEqual(len(self.decision_times), count)

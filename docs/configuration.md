@@ -1,6 +1,6 @@
 # Wiring and everyday controls
 
-Native House Climate uses a fixed house policy. Setup and Configure expose only **Allow live commands**. The **Controller enabled** device switch starts or pauses comfort control; a restart leaves it disabled. There is no room/schedule editor to work through.
+Native Home Climate uses a fixed house policy. Setup and Configure expose only **Allow live commands**. The **Controller enabled** device switch starts or pauses comfort control; a restart leaves it disabled. There is no room/schedule editor to work through.
 
 ## Room cards
 
@@ -10,7 +10,7 @@ The fixed primary schedule is 10 p.m.–5 a.m. at 68°F (67–69°F range), 5–
 
 ## Source mapping
 
-`custom_components/house_climate/controller/house_policy.py` contains schedules, priorities, and temperatures. Actual room/head/fan IDs are loaded from `/config/house_climate_bindings.json`; the repository contains only a synthetic example.
+`custom_components/house_climate/controller/house_policy.py` contains schedules, priorities, and temperatures. Actual room/head/fan IDs are loaded from `/config/home_climate_bindings.json`; the repository contains only a synthetic example.
 
 Assign the actual ambient probe IDs to each logical area in the private file. Prefer at least two independent sources where available; the shared-head areas still require their own measurements.
 
@@ -28,9 +28,11 @@ Electrical thresholds live in `custom_components/house_climate/power_guard.py`. 
 
 ## Private bindings
 
-Copy the prepared private file to `/config/house_climate_bindings.json` **before** upgrading. New installations can use `bindings.example.json` as a schema example; every example ID is synthetic.
+Copy the prepared private file to `/config/home_climate_bindings.json` **before** upgrading. New installations can use `bindings.example.json` as a schema example; every example ID is synthetic.
 
 The file has exactly five top-level sections: `heads`, `rooms`, `fans`, `heater`, and `power`. It accepts entity IDs only. Unknown fields, rule overrides, missing roles, and invalid domains are rejected. Missing private bindings fail closed rather than selecting guessed equipment.
+
+Existing `house_climate_bindings.json` files are accepted when the new filename is absent. When both exist, `home_climate_bindings.json` is authoritative; invalid or unreadable new wiring does not fall back to different equipment.
 
 Keep this file in HA's config directory, outside `custom_components`. Git ignores its standard filename, and installation/source packages explicitly exclude it. It survives HACS updates.
 

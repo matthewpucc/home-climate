@@ -9,14 +9,15 @@ from datetime import datetime
 from .config import Config, Settings
 from .policy import Plan, Policy
 from .sensors import Sensors
-from .temperature_guard import heating_cutoff_reached, opposite_limit_reached
+from .temperature_guard import heating_cutoff_reached
+from .head_guard import protection_requested
 
 
 class DecisionCadence:
     """Cache comfort requests; a maintenance tick may only make them safer.
 
     State events wake maintenance promptly without advancing the comfort timer.
-    Explicit settings/schedule changes and newly confirmed hard-limit breaches
+    Explicit settings/schedule changes and newly confirmed house-protection conditions
     are the exceptions. Executor mutations never reach the cached policy plan.
     """
 
@@ -72,33 +73,41 @@ class DecisionCadence:
     def _inhibit(self, head, reason):
         self.cached_plan.head_targets_f.pop(head, None)
         getattr(self.cached_plan, "head_call_targets_f", {}).pop(head, None)
+        self.cached_plan.head_protections.pop(head, None)
         self.cached_plan.inhibited_heads[head] = reason
+        self._safety_warnings = [warning for warning in self._safety_warnings
+                                 if not warning.startswith(f"{head}: ")]
         self._warning(f"{head}: {reason}; waiting for next comfort decision")
 
     def _trim(self, states, rooms):
         plan = self.cached_plan
         low, high = self.config.low_f, self.config.high_f
+        guard = self.policy.head_guard
+        guard.observe(rooms, plan.room_targets)
         for head, entity in self.config.heads.items():
             names = [name for name, room in self.config.zones.items() if room.head == head]
-            if any(name not in rooms for name in names):
-                self._inhibit(head, "temperature unavailable in an attached room")
-                continue
-            if plan.mode == "cool" and any(opposite_limit_reached(rooms[name], "cool", low, high) for name in names):
-                self._inhibit(head, "cooling blocked by opposite temperature limit")
-            elif plan.mode == "heat" and any(opposite_limit_reached(rooms[name], "heat", low, high) for name in names):
-                self._inhibit(head, "heating blocked by opposite temperature limit")
-            elif (plan.mode in ("heat", "cool")
-                  and getattr(self.config, f"head_{plan.mode}_call_offset_f", 0) > 0):
-                # A biased device setpoint deliberately keeps its internal
-                # thermostat calling. External probes must therefore stop it at
-                # the opposite comfort edge even between slow decisions.
-                for name in names:
-                    target = plan.room_targets.get(name, {})
-                    boundary = target.get("low_f" if plan.mode == "cool" else "high_f")
-                    temperature = rooms[name].temperature
-                    if boundary is not None and (temperature <= boundary if plan.mode == "cool" else temperature >= boundary):
-                        self._inhibit(head, f"{plan.mode} stopped at opposite room comfort limit")
-                        break
+            requested = {mode for mode in ("heat", "cool")
+                         if any(plan.room_targets.get(name, {}).get(f"{mode}_requested")
+                                for name in names)}
+            if (plan.mode in ("heat", "cool")
+                    and (head in plan.head_targets_f or head in plan.inhibited_heads)):
+                requested.add(plan.mode)
+            details = {}
+            for mode in requested:
+                detail = guard.constraint(head, mode, rooms, plan.room_targets, states)
+                if detail:
+                    details[mode] = detail
+            if details:
+                plan.head_constraints[head] = details
+            else:
+                plan.head_constraints.pop(head, None)
+            if plan.mode in ("heat", "cool") and (detail := details.get(plan.mode)):
+                self._inhibit(head, detail["reason"])
+            protection = guard.protection(head, plan.mode, rooms, plan.room_targets)
+            if protection and head in plan.head_targets_f:
+                plan.head_protections[head] = protection
+            else:
+                plan.head_protections.pop(head, None)
             modes = states.get(entity, {}).get("attributes", {}).get("hvac_modes") or []
             if plan.mode in ("heat", "cool") and modes and plan.mode not in modes:
                 self._inhibit(head, f"{plan.mode} unavailable (HA modes: {', '.join(modes)})")
@@ -152,9 +161,13 @@ class DecisionCadence:
         rooms, sensor_warnings = self.sensors.read(states, now, climate_unit)
         signature = self._settings_signature(settings, now)
         emergencies = {(name, direction) for name, room in rooms.items()
-                       for direction, outside in (("heat", room.confirmed_low < self.config.low_f),
-                                                  ("cool", room.confirmed_high > self.config.high_f))
-                       if outside}
+                       for direction in ("heat", "cool")
+                       if protection_requested(self.config, room, direction)}
+        # Loss of a source is not evidence that its previous danger resolved.
+        # Restore of that same known condition waits for the normal decision;
+        # a newly dangerous valid reading still gets prompt protection priority.
+        emergencies.update(condition for condition in self._emergencies
+                           if condition[0] not in rooms)
         if (self.cached_plan is None or stamp >= self.next_decision or signature != self._signature
                 or emergencies - self._emergencies):
             # Carry maintenance evidence into the policy's separate sensor reader.

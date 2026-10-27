@@ -12,7 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.temperature import display_temp
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from .const import DOMAIN, SIGNAL_STATUS
+from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 
 PRESET_SCHEDULE = "Schedule"
 PRESET_TEMPORARY = "Temporary"
@@ -41,8 +41,8 @@ class RoomControl:
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "House climate controller",
-            "manufacturer": "House climate",
+            "name": DEVICE_NAME,
+            "manufacturer": NAME,
             "model": "Shared heat-pump controller",
         }
 

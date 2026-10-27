@@ -70,7 +70,7 @@ class ComfortProfileTests(unittest.TestCase):
         self.assertTrue(plan.room_targets["gamma"]["comfort_enabled"])
         self.assertEqual(plan.fans["fan.test_rest"], 0)
 
-    def test_two_rooms_sharing_head_still_use_normal_direction_arbitration(self):
+    def test_incompatible_shared_room_comfort_blocks_both_directions_despite_priority(self):
         self.settings.room_profiles = {
             "alpha": Profile(target_f=74, low_f=73, high_f=75, priority=1),
             "beta": Profile(target_f=68, low_f=67, high_f=69, priority=5),
@@ -81,9 +81,14 @@ class ComfortProfileTests(unittest.TestCase):
         )
         self.assertTrue(plan.room_targets["alpha"]["heat_requested"])
         self.assertTrue(plan.room_targets["beta"]["cool_requested"])
-        self.assertEqual(plan.mode, "cool")
-        self.assertEqual(plan.head_targets_f, {"shared": 68})
-        self.assertTrue(any("Simultaneous heat/cool" in warning for warning in plan.warnings))
+        # Priority cannot start a biased call already past another attached
+        # area's opposite comfort edge. Neither request concerns a house limit.
+        self.assertEqual(plan.mode, "off")
+        self.assertEqual(plan.head_targets_f, {})
+        blocked = plan.head_constraints["shared"]
+        self.assertEqual(blocked["cool"]["room"], "alpha")
+        self.assertEqual(blocked["heat"]["room"], "beta")
+        self.assertEqual({detail["kind"] for detail in blocked.values()}, {"comfort_limit"})
 
     def test_removing_override_resumes_schedule_without_mutating_config(self):
         room = self.config.zones["gamma"]

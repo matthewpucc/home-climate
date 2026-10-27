@@ -8,7 +8,8 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
-BINDINGS_FILENAME = "house_climate_bindings.json"
+BINDINGS_FILENAME = "home_climate_bindings.json"
+LEGACY_BINDINGS_FILENAME = "house_climate_bindings.json"
 HEAD_ROLES = frozenset({"bonus", "guest", "primary", "living"})
 ROOM_ROLES = frozenset({"office", "entertainment", "guest", "primary", "living"})
 FAN_ROLES = frozenset({"primary", "guest", "office", "entertainment"})
@@ -126,26 +127,31 @@ def _unique_object(pairs):
 
 
 def load_bindings(config_dir):
-    """Read the fixed private filename; never guess entities or use example data."""
+    """Prefer current wiring; accept the old filename only when current is absent."""
     root = Path(config_dir).resolve()
-    path = (root / BINDINGS_FILENAME).resolve()
+    source = root / BINDINGS_FILENAME
+    # lexists semantics: a broken symlink is a bad current file, not permission
+    # to silently select different equipment from the legacy file.
+    if not source.exists() and not source.is_symlink():
+        source = root / LEGACY_BINDINGS_FILENAME
+    path = source.resolve()
     if not path.is_relative_to(root):
-        raise BindingsError(f"{BINDINGS_FILENAME} must stay inside Home Assistant's config directory")
+        raise BindingsError(f"{source.name} must stay inside Home Assistant's config directory")
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise BindingsError(
             f"Add your private {BINDINGS_FILENAME} to Home Assistant's config directory first") from None
     except OSError:
-        raise BindingsError(f"Could not read private {BINDINGS_FILENAME}") from None
+        raise BindingsError(f"Could not read private {source.name}") from None
     except UnicodeError:
-        raise BindingsError(f"{BINDINGS_FILENAME} must contain valid JSON entity bindings") from None
+        raise BindingsError(f"{source.name} must contain valid JSON entity bindings") from None
     if len(text) > 65536:
-        raise BindingsError(f"{BINDINGS_FILENAME} is too large for device wiring")
+        raise BindingsError(f"{source.name} is too large for device wiring")
     try:
         raw = json.loads(text, object_pairs_hook=_unique_object)
     except (json.JSONDecodeError, UnicodeError):
-        raise BindingsError(f"{BINDINGS_FILENAME} must contain valid JSON entity bindings") from None
+        raise BindingsError(f"{source.name} must contain valid JSON entity bindings") from None
     return HouseBindings.from_dict(raw)
 
 
