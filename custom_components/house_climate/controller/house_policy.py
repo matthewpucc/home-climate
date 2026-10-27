@@ -83,6 +83,8 @@ def house_configuration(previous=None, bindings=None):
             "profile": {"target_f": 72, "low_f": 71, "high_f": 73,
                         "half_band_f": 1, "priority": 1},
         }
+        if key in bindings.windows:
+            rooms[identities[key]]["windows"] = list(bindings.windows[key])
         if previous_rooms:
             old = previous_rooms.get(identities[key], {})
             if isinstance(old, dict) and isinstance(old.get("area_id"), str):

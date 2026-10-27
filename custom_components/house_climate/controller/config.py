@@ -63,6 +63,12 @@ class Zone:
     area_id: str | None = None
     profile: Profile = field(default_factory=Profile)
     schedules: tuple[Period, ...] = ()
+    windows: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not isinstance(self.windows, (list, tuple)):
+            raise ValueError("Room windows must list binary_sensor entity IDs")
+        object.__setattr__(self, "windows", tuple(self.windows))
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,8 @@ class Config:
                     "profile": profile_data(room.profile), "schedules": [], "fans": []}
             if room.area_id:
                 data["area_id"] = room.area_id
+            if room.windows:
+                data["windows"] = list(room.windows)
             for period in room.schedules:
                 data["schedules"].append({"start": settings.clock(period.start).isoformat(),
                     "end": settings.clock(period.end).isoformat(), "name": period.name, **profile_data(period.profile)})
@@ -220,6 +228,11 @@ class Config:
                 raise ValueError(f"Configure temperature probes for {room.name or key}")
             if len({p.entity_id for p in room.probes}) != len(room.probes):
                 raise ValueError("Duplicate probe entity in a room")
+            if any(not isinstance(entity, str) or not re.fullmatch(r"binary_sensor\.[a-z0-9_]+", entity)
+                   for entity in room.windows):
+                raise ValueError("Room windows must use binary_sensor entity IDs")
+            if len(set(room.windows)) != len(room.windows):
+                raise ValueError("Duplicate window contact in a room")
             for probe in room.probes:
                 if type(probe.report_on_change) is not bool:
                     raise ValueError("Probe report_on_change must be a boolean")

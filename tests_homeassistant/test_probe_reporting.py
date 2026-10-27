@@ -135,6 +135,7 @@ class ProbeReportingTests(unittest.IsolatedAsyncioTestCase):
         room_id = "guest"
         room = cfg.zones[room_id]
         old_room = asdict(room)
+        old_room.pop("windows", None)  # This field did not exist in the saved format.
         for probe in old_room["probes"]:
             probe.pop("report_on_change", None)
         old_payload = {

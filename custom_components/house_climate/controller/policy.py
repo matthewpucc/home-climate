@@ -90,6 +90,7 @@ class Plan:
     fan_head_assists: dict[str, str] = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
     room_targets: dict = field(default_factory=dict)
+    window_states: dict = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 

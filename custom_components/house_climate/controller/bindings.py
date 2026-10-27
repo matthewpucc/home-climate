@@ -1,7 +1,7 @@
 """Private device wiring for the fixed house policy; no operating-rule options."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
 import re
@@ -23,9 +23,11 @@ class BindingsError(ValueError):
     """Missing or invalid private wiring must prevent equipment control."""
 
 
-def _keys(value, expected, label):
-    if not isinstance(value, dict) or set(value) != set(expected):
-        raise BindingsError(f"{label} must contain exactly: {', '.join(sorted(expected))}")
+def _keys(value, expected, label, *, optional=()):
+    required, allowed = set(expected), set(expected) | set(optional)
+    if not isinstance(value, dict) or not required <= set(value) <= allowed:
+        detail = f"; optional: {', '.join(sorted(optional))}" if optional else ""
+        raise BindingsError(f"{label} must contain exactly: {', '.join(sorted(expected))}{detail}")
 
 
 def _entity(value, domain, label):
@@ -66,9 +68,10 @@ class HouseBindings:
     fans: Mapping[str, str]
     heater: str
     power: PowerBindings
+    windows: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self):
-        if not all(isinstance(value, Mapping) for value in (self.heads, self.rooms, self.fans)):
+        if not all(isinstance(value, Mapping) for value in (self.heads, self.rooms, self.fans, self.windows)):
             raise BindingsError("House bindings must use named device-role mappings")
         heads, selected_rooms, fans = dict(self.heads), dict(self.rooms), dict(self.fans)
         _keys(heads, HEAD_ROLES, "heads")
@@ -90,15 +93,27 @@ class HouseBindings:
                 raise BindingsError("Each room must use its own distinct ambient probes")
             rooms[role] = values
             probes.update(values)
+        if set(self.windows) - ROOM_ROLES:
+            raise BindingsError("windows must use configured room roles")
+        windows = {}
+        for role, selected in self.windows.items():
+            if not isinstance(selected, (list, tuple)):
+                raise BindingsError(f"windows.{role} must list binary_sensor entity IDs")
+            values = tuple(_entity(entity, "binary_sensor", f"windows.{role}") for entity in selected)
+            if len(set(values)) != len(values):
+                raise BindingsError("Duplicate window contact in a room")
+            # One explicitly mapped opening may affect multiple configured rooms.
+            windows[role] = values
         if not isinstance(self.power, PowerBindings) or self.power.heater != heater:
             raise BindingsError("The power guard must control the bound auxiliary heater")
         object.__setattr__(self, "heads", MappingProxyType(heads))
         object.__setattr__(self, "rooms", MappingProxyType(rooms))
         object.__setattr__(self, "fans", MappingProxyType(fans))
+        object.__setattr__(self, "windows", MappingProxyType(windows))
 
     @classmethod
     def from_dict(cls, raw):
-        _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings")
+        _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings", optional={"windows"})
         _keys(raw["heads"], HEAD_ROLES, "heads")
         _keys(raw["rooms"], ROOM_ROLES, "rooms")
         _keys(raw["fans"], FAN_ROLES, "fans")
@@ -106,15 +121,24 @@ class HouseBindings:
         for role, selected in raw["rooms"].items():
             if not isinstance(selected, list):
                 raise BindingsError(f"rooms.{role} must list ambient sensor entity IDs")
+        windows = raw.get("windows", {})
+        if not isinstance(windows, dict):
+            raise BindingsError("windows must map room roles to binary_sensor entity lists")
+        for role, selected in windows.items():
+            if not isinstance(selected, list):
+                raise BindingsError(f"windows.{role} must list binary_sensor entity IDs")
         power = PowerBindings(heater=raw["heater"], **raw["power"])
-        return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power)
+        return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power, windows)
 
     def to_dict(self):
         power = asdict(self.power)
         power.pop("heater")
-        return {"heads": dict(self.heads),
+        result = {"heads": dict(self.heads),
                 "rooms": {role: list(probes) for role, probes in self.rooms.items()},
                 "fans": dict(self.fans), "heater": self.heater, "power": power}
+        if self.windows:
+            result["windows"] = {role: list(entities) for role, entities in self.windows.items()}
+        return result
 
 
 def _unique_object(pairs):

@@ -57,6 +57,7 @@ def controller_entity_ids(config):
     entities = {
         *config.climate_entities, *config.fans.values(),
         *(probe.entity_id for room in config.zones.values() for probe in room.probes),
+        *(entity for room in config.zones.values() for entity in room.windows),
         config.entity("enabled"), config.entity("heater_owned"),
         config.entity("heartbeat", "input_datetime"),
         config.entity("status", "input_text"),
@@ -466,6 +467,7 @@ class ControllerRuntime:
         self.hass = hass
         self.config = config
         self.live = live
+        self._window_entities = frozenset(entity for room in config.zones.values() for entity in room.windows)
         self.stop_event = threading.Event()
         self.wake_event = threading.Event()
         self.controls = None
@@ -593,6 +595,12 @@ class ControllerRuntime:
         if self.stop_event.is_set():
             return
         old, new = event.data.get("old_state"), event.data.get("new_state")
+        if event.data["entity_id"] in self._window_entities:
+            if ((old.state if old else None) != (new.state if new else None)
+                    or (old.attributes.get("restored") is True if old else False)
+                    != (new.attributes.get("restored") is True if new else False)):
+                self.wake_event.set()
+            return
         unavailable = (None, "unknown", "unavailable")
         old_state, new_state = old.state if old else None, new.state if new else None
         old_modes = frozenset(old.attributes.get("hvac_modes") or ()) if old else frozenset()
@@ -618,7 +626,7 @@ class ControllerRuntime:
         if self.power_guard is not None:
             self.power_guard.async_start()
         self._remove_climate_listener = async_track_state_change_event(
-            self.hass, self.config.climate_entities, self._async_climate_changed
+            self.hass, [*self.config.climate_entities, *self._window_entities], self._async_climate_changed
         )
         self.finished = self.hass.loop.create_future()
         self.thread = threading.Thread(

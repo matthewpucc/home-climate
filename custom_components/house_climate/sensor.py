@@ -399,7 +399,7 @@ class ControllerStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("mode", "phase", "reasons", "warnings", "head_targets_f", "head_call_targets_f",
-                 "heater_on", "auxiliary_fan_only", "fans", "room_targets", "error",
+                 "heater_on", "auxiliary_fan_only", "fans", "room_targets", "window_states", "error",
                  "last_error", "last_fault_at", "fault_count",
                  "control_enabled", "control_block_reason", "pending_fans",
                  "configuration_reload_pending", "configuration_reload_reason",
@@ -729,6 +729,8 @@ class RoomPlan(RoomEntity):
                    if config.heads[head] in status.get("head_stop_reasons", {}) else {}),
                 **({"pending_head_command": status["pending_head_commands"][config.heads[head]]}
                    if config.heads[head] in status.get("pending_head_commands", {}) else {}),
+                **({"window": status["window_states"][self.room_id]}
+                   if self.room_id in status.get("window_states", {}) else {}),
                 **status.get("room_targets", {}).get(self.room_id, {})}
 
 

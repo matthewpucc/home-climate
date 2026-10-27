@@ -11,6 +11,7 @@ from .policy import Plan, Policy
 from .sensors import Sensors
 from .temperature_guard import heating_cutoff_reached
 from .head_guard import protection_requested
+from .windows import WindowContacts
 
 
 class DecisionCadence:
@@ -26,6 +27,7 @@ class DecisionCadence:
         self.clock = clock or time.monotonic
         self.policy = policy if policy is not None else Policy(config)
         self.sensors = Sensors(config)
+        self.window_contacts = WindowContacts(config, clock=self.clock)
         self.cached_plan: Plan | None = None
         self.next_decision = 0.0
         self._signature = None
@@ -40,6 +42,7 @@ class DecisionCadence:
     def reset(self):
         self.policy = Policy(self.config)
         self.sensors = Sensors(self.config)
+        self.window_contacts = WindowContacts(self.config, clock=self.clock)
         self.cached_plan = None
         self.next_decision = 0.0
         self._signature = None
@@ -230,6 +233,9 @@ class DecisionCadence:
         self.policy.head_requests = {head: self.cached_plan.mode for head in self.cached_plan.head_targets_f}
         plan = deepcopy(self.cached_plan)
         plan.rooms = {name: asdict(room) for name, room in rooms.items()}
+        # Contact diagnostics advance on maintenance without changing comfort
+        # requests or starting a new conditioning decision.
+        plan.window_states = self.window_contacts.observe(states, now, monotonic_now=stamp)
         from .recovery_inputs import signature
         plan.recovery_inputs = signature(self.config, states, now, settings, climate_unit)
         plan.warnings = list(dict.fromkeys(self._decision_warnings + sensor_warnings + self._safety_warnings))

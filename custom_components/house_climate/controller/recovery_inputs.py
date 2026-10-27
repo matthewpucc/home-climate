@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from .sensors import probe_value
+from .windows import contact_inputs
 
 
 def signature(config, states, now, settings, climate_unit="°F"):
@@ -36,6 +37,6 @@ def signature(config, states, now, settings, climate_unit="°F"):
         if isinstance(modes, (list, tuple)) and all(isinstance(mode, str) for mode in modes):
             metadata["hvac_modes"] = sorted(set(modes))
         heads.append((entity, state.get("state"), metadata))
-    material = [probes, heads, profiles, settings.numbers,
+    material = [probes, heads, profiles, contact_inputs(config, states), settings.numbers,
                 {key: value.isoformat() for key, value in settings.times.items()}, settings.toggles]
     return hashlib.sha256(json.dumps(material, sort_keys=True, default=str).encode()).hexdigest()
