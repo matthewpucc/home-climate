@@ -1,9 +1,9 @@
-# Window contacts (draft)
+# Window contacts
 
-This draft adds optional private window wiring, diagnostics, and sustained-effect
-comfort behavior. It lowers affected-direction comfort priority and can yield the
-room's opposing soft shared-head boundary. Hard protection remains independent.
-The running 0.7.3 integration is unchanged by this development branch.
+Home Climate 0.8.0 adds optional private window wiring, diagnostics, and
+sustained-effect comfort behavior. It lowers affected-direction comfort priority
+and can yield the room's opposing soft shared-head boundary. Hard protection
+remains independent.
 
 Keep device bindings private. An optional `windows` object in
 `home_climate_bindings.json` maps existing room roles to contact entities:
@@ -64,6 +64,6 @@ request, the affected room can still receive conditioning. Window and outdoor
 timer boundaries publish a monotonic validity deadline so an old repair plan
 cannot authorize a reload after the underlying policy state should change.
 
-This branch intentionally retains the current release version. A version decision,
-full validation, and explicit merge/release approval remain necessary before it
-ships.
+Automated policy and Home Assistant registry tests cover these rules. They do
+not establish physical room response, sensor placement, airflow, or equipment
+capacity; check the reported evidence when validating an installation.
