@@ -406,8 +406,8 @@ class ControllerStatus(ControllerEntity):
                  "device_issues", "waiting_devices", "recovery_details",
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
-                 "head_stop_reasons", "pending_head_commands", "head_constraints",
-                 "head_protections") if key in status} | heartbeat_attributes(status)
+                 "head_stop_reasons", "head_transition_history", "pending_head_commands", "head_constraints",
+                 "head_protections", "unavailable_mode_requests", "mode_scores") if key in status} | heartbeat_attributes(status)
 
 
 class HeaterPowerStatus(ControllerEntity):
@@ -550,8 +550,8 @@ class RecoveryStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
-                 "integration_recovery", "cycle_holds", "head_stop_reasons", "pending_head_commands",
-                 "head_constraints", "head_protections") if key in status} | heartbeat_attributes(status)
+                 "integration_recovery", "cycle_holds", "head_stop_reasons", "head_transition_history", "pending_head_commands",
+                 "head_constraints", "head_protections", "unavailable_mode_requests", "mode_scores") if key in status} | heartbeat_attributes(status)
 
 
 class CurrentIssues(ControllerEntity):

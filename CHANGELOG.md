@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.3
+
+- Stop transfer fans when planned, reported, or residual source conditioning would move their destination away from its target. Preserve useful idle transfer, compatible conditioning assistance, and independent fan schedules.
+- Use separate post-stop temperature evidence for new forecast requests instead of projecting completed conditioning as continued drift. Preserve raw temperature-stop forecasts, genuine new trends, and actual house-limit protection.
+- Recheck unstarted forecast-only requests during minimum-Off waits and cancel them when their evidence clears. Track started protection origins per room so a new forecast does not inherit another room's recovery hold.
+- Learn stable, device-identity and operating-context capability baselines locally. Treat missing modes as recovery evidence only when those modes were previously established; do not assume every head supports Heat.
+- Confirm persistent capability loss with at least three explicit failed refresh/rechecks, spaced 60 seconds apart, over at least 120 seconds before repair. Reset consecutive failures when capabilities return; retain bounded reload attempts and 15/30/60-minute backoff until stable recovery.
+- Coordinate owning-integration repair with current-input revalidation, queued-command fencing, actual service-job draining, healthy-head Off confirmation, and fresh post-reload Off feedback. A reload is not an Off acknowledgement, and incomplete mode restoration does not by itself keep otherwise valid calls blocked.
+- Retain ownership across delayed or cancelled service callers until their actual actuator jobs finish. Require superseding Off evidence after late positive completions, and reject stale stops from a previous ownership or repair generation.
+- Add a bounded per-head transition history that distinguishes command requests, service returns, acknowledgements, and reported states. An unexpected Off report alone does not prove a controller-issued stop or physical compressor cycle.
+
 ## 0.7.2
 
 - Prioritize house-temperature protection over another attached room's soft comfort preference, while preserving immediate raw/forecast opposing house cutoffs, missing-probe inhibition, and hardware acknowledgement/off timers.

@@ -135,6 +135,24 @@ class IntegrationReloadTests(unittest.IsolatedAsyncioTestCase):
         self.reload.assert_not_awaited()
         self.assertEqual(self.manager.diagnostics["reload_status"], "Idle")
 
+    async def test_stable_capability_learning_does_not_reset_generic_recovery_budget(self):
+        for at in (0, 60, 120):
+            self.clock.return_value = at
+            self.hass.states.async_set(self.head, "off", {"hvac_modes": ["off", "heat", "cool"]})
+            self.manager.observe({"event": "live", "recovery_details": {}})
+        status = self.status(self.head, reason="Command acknowledgement timed out")
+        for at in (180, 300):
+            self.clock.return_value = at
+            self.manager.observe(status)
+        await self.manager._task
+        self.assertEqual(self.manager._attempts[self.owner.entry_id], 1)
+        self.clock.return_value = 1200
+        self.manager.observe(status)
+        await self.manager._task
+        self.assertEqual(self.manager._attempts[self.owner.entry_id], 2)
+        self.manager.observe(status)
+        self.assertEqual(self.manager._attempts[self.owner.entry_id], 2)
+
     async def test_command_timeout_on_available_entity_can_trigger_reload(self):
         self.hass.states.async_set(self.head, "off", {"hvac_modes": ["off", "cool"]})
         status = self.status(self.head, reason="Command acknowledgement timed out")

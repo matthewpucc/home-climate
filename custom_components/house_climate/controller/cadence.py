@@ -79,11 +79,11 @@ class DecisionCadence:
                                  if not warning.startswith(f"{head}: ")]
         self._warning(f"{head}: {reason}; waiting for next comfort decision")
 
-    def _trim(self, states, rooms):
+    def _trim(self, states, rooms, now, climate_unit="°F"):
         plan = self.cached_plan
         low, high = self.config.low_f, self.config.high_f
         guard = self.policy.head_guard
-        guard.observe(rooms, plan.room_targets)
+        guard.observe(rooms, plan.room_targets, states)
         for head, entity in self.config.heads.items():
             names = [name for name, room in self.config.zones.items() if room.head == head]
             requested = {mode for mode in ("heat", "cool")
@@ -104,11 +104,40 @@ class DecisionCadence:
             if plan.mode in ("heat", "cool") and (detail := details.get(plan.mode)):
                 self._inhibit(head, detail["reason"])
             protection = guard.protection(head, plan.mode, rooms, plan.room_targets)
+            if (head in plan.head_targets_f and states.get(entity, {}).get("state") != plan.mode
+                    and not protection and any((name, plan.mode) in self.policy.forecast_pending for name in names)):
+                # Revalidate unstarted cached requests before minimum-Off or
+                # delayed dispatch can turn an obsolete forecast into a call.
+                needed = False
+                for name in names:
+                    if name not in rooms or name not in plan.room_targets:
+                        continue
+                    target = plan.room_targets[name]
+                    fresh = self.policy.demand(name, rooms[name],
+                        (target["low_f"], target["high_f"], target["target_f"]),
+                        target["priority"], running_modes=set(), update=False)
+                    if fresh.get(plan.mode, {}).get("active"):
+                        needed = True
+                    elif (name, plan.mode) in self.policy.forecast_pending:
+                        self.policy.forecast_pending.discard((name, plan.mode))
+                        self.policy.calls[name, plan.mode] = False
+                        target[f"{plan.mode}_requested"] = False
+                if not needed:
+                    self._inhibit(head, f"Pending {plan.mode} request cleared before activation")
             if protection and head in plan.head_targets_f:
                 plan.head_protections[head] = protection
             else:
                 plan.head_protections.pop(head, None)
             modes = states.get(entity, {}).get("attributes", {}).get("hvac_modes") or []
+            unmet = {}
+            for mode in requested:
+                if request := self.policy.unavailable_request(
+                        head, mode, rooms, plan.room_targets, states, climate_unit):
+                    unmet[mode] = request
+            if unmet:
+                plan.unavailable_mode_requests[head] = unmet
+            else:
+                plan.unavailable_mode_requests.pop(head, None)
             if plan.mode in ("heat", "cool") and modes and plan.mode not in modes:
                 self._inhibit(head, f"{plan.mode} unavailable (HA modes: {', '.join(modes)})")
 
@@ -155,10 +184,27 @@ class DecisionCadence:
                     plan.fans[fan.entity_id] = 0
                     self.policy.transfer_on[key] = False
                     self._warning(f"Circulation fan {fan.entity_id}: assisted head is inhibited and ambient transfer is not useful; waiting for next comfort decision")
+        # Fresh head feedback can reveal conditioned air even when the ambient
+        # gradient still looks useful. Maintenance only removes cached fan calls.
+        prior_warnings = set(plan.warnings)
+        self.policy.trim_transfer_fans(plan, states, rooms, now)
+        for warning in plan.warnings:
+            if warning not in prior_warnings:
+                self._warning(warning)
 
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit="°F", *, monotonic_now=None):
         stamp = self.clock() if monotonic_now is None else monotonic_now
-        rooms, sensor_warnings = self.sensors.read(states, now, climate_unit)
+        bands = {name: self.policy.band(name, settings, now) for name in self.config.zones}
+        targets = {name: self.policy.stop_targets(band) for name, band in bands.items()}
+        rooms, sensor_warnings = self.sensors.read(states, now, climate_unit,
+                                                  targets=targets, calls=self.policy.calls,
+                                                  head_requests=self.policy.head_requests)
+        # A queued forecast can become a genuine comfort/house demand between
+        # slow decisions. Preserve that stronger provenance and its ordinary
+        # target-reaching hysteresis if the original forecast later clears.
+        for name, mode in list(self.policy.forecast_pending):
+            if name in rooms and self.policy.actual_demand(rooms[name], bands[name], mode):
+                self.policy.forecast_pending.discard((name, mode))
         signature = self._settings_signature(settings, now)
         emergencies = {(name, direction) for name, room in rooms.items()
                        for direction in ("heat", "cool")
@@ -180,8 +226,11 @@ class DecisionCadence:
             self._decision_warnings = [warning for warning in self.cached_plan.warnings if warning not in sensor_warnings]
             self._safety_warnings = []
         self._emergencies = emergencies
-        self._trim(states, rooms)
+        self._trim(states, rooms, now, climate_unit)
+        self.policy.head_requests = {head: self.cached_plan.mode for head in self.cached_plan.head_targets_f}
         plan = deepcopy(self.cached_plan)
         plan.rooms = {name: asdict(room) for name, room in rooms.items()}
+        from .recovery_inputs import signature
+        plan.recovery_inputs = signature(self.config, states, now, settings, climate_unit)
         plan.warnings = list(dict.fromkeys(self._decision_warnings + sensor_warnings + self._safety_warnings))
         return plan

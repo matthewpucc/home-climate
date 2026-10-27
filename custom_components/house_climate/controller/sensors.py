@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from collections.abc import Mapping
 from datetime import datetime
 from statistics import median
 
 from .config import Config, Probe
+from .temperature_guard import STOP_MARGIN_F
 
 
 def to_f(value: float, unit: str) -> float:
@@ -57,6 +59,33 @@ class Reading:
     confirmed_high: float
     slope_f_per_minute: float
     sources: int
+    coast_after_mode: str | None = None
+    coast_slope_f_per_minute: float | None = None
+    post_stop_forecast: bool = False
+
+
+def forecast_slope(reading, mode):
+    """Start forecasts may use post-stop evidence; raw stop guards never do."""
+    def value(key, default=None):
+        return reading.get(key, default) if isinstance(reading, Mapping) else getattr(reading, key, default)
+    opposite = "cool" if mode == "heat" else "heat"
+    if value("post_stop_forecast", False) or value("coast_after_mode") == opposite:
+        return float(value("coast_slope_f_per_minute") or 0)
+    return float(value("slope_f_per_minute", 0))
+
+
+def forecast_extreme(reading, mode, minutes):
+    key = "confirmed_low" if mode == "heat" else "confirmed_high"
+    extreme = float(reading.get(key) if isinstance(reading, Mapping) else getattr(reading, key))
+    slope = forecast_slope(reading, mode)
+    return extreme + (min(0, slope) if mode == "heat" else max(0, slope)) * minutes
+
+
+@dataclass
+class Coast:
+    mode: str
+    stopped: bool = False
+    history: deque = field(default_factory=deque)
 
 
 class Sensors:
@@ -64,8 +93,80 @@ class Sensors:
         self.config = config
         self.history: dict[str, deque] = {}
         self.extremes: dict[tuple[str, str, str], datetime] = {}
+        self.conditioned: dict[str, str] = {}
+        self.coasts: dict[str, Coast] = {}
 
-    def read(self, states: dict, now: datetime, climate_unit: str = "°F") -> tuple[dict[str, Reading], list[str]]:
+    def _forecast_context(self, rooms, states, now, targets, calls, head_requests):
+        """Do not project completed conditioning as ten more minutes of drift.
+
+        Only a room's own observed conditioning request can establish this
+        context. An attached warm room that did not ask for Heat must retain
+        its hot forecast even while its shared head heats another area.
+        """
+        for name, zone in self.config.zones.items():
+            room = rooms.get(name)
+            if room is None:
+                coast = self.coasts.get(name)
+                if coast:
+                    coast.history.clear()
+                continue
+            observed = states.get(self.config.heads[zone.head], {})
+            mode = observed.get("state") if observed.get("attributes", {}).get("hvac_modes") else None
+            stops = targets.get(name)
+            if stops is None:
+                continue
+            coast = self.coasts.get(name)
+            if mode in ("heat", "cool"):
+                requested = head_requests.get(zone.head) == mode
+                reached = room.temperature >= stops[mode] if mode == "heat" else room.temperature <= stops[mode]
+                if self.conditioned.get(name) not in (None, mode):
+                    self.conditioned.pop(name, None)
+                if requested and calls.get((name, mode)):
+                    self.conditioned[name] = mode
+                    # A real renewed request in the same direction starts a
+                    # new conditioning interval rather than an old coast.
+                    if coast and not reached:
+                        self.coasts.pop(name, None)
+                        coast = None
+            previous = self.conditioned.get(name)
+            if previous:
+                reached = room.temperature >= stops[previous] if previous == "heat" else room.temperature <= stops[previous]
+                future = forecast_extreme(room, previous, self.config.forecast_minutes)
+                reserve_needed = (future <= self.config.low_f + STOP_MARGIN_F if previous == "heat"
+                                  else future >= self.config.high_f - STOP_MARGIN_F)
+                # Reaching a nominal target does not complete a call whose
+                # same-direction reserve evidence still requires conditioning.
+                # A subsequent unexplained Off must retain that recovery need.
+                if reached and not reserve_needed and coast is None:
+                    coast = self.coasts[name] = Coast(previous)
+            if coast is None:
+                continue
+            slope = 0.0
+            if mode == "off":
+                coast.stopped = True
+            if coast.stopped and mode in ("off", "heat", "cool"):
+                # Keep this newer evidence across shared-head restarts. Such
+                # a run can create a genuine trend for this room even when
+                # only another attached area requested the conditioning.
+                if coast.history and (now - coast.history[-1][0]).total_seconds() > self.config.sensor_stale_seconds:
+                    coast.history.clear()
+                if not coast.history or coast.history[-1][0] != now:
+                    coast.history.append((now, room.temperature))
+                while coast.history and (now - coast.history[0][0]).total_seconds() > 600:
+                    coast.history.popleft()
+                elapsed = (now - coast.history[0][0]).total_seconds()
+                if elapsed >= 60:
+                    slope = max(-.1, min(.1, (room.temperature - coast.history[0][1]) * 60 / elapsed))
+            else:
+                # Until Off is observed, or while head metadata is unknown,
+                # there is no new trustworthy post-stop forecast evidence.
+                coast.history.clear()
+            rooms[name] = replace(room, coast_after_mode=coast.mode,
+                                  coast_slope_f_per_minute=slope,
+                                  post_stop_forecast=coast.stopped)
+
+    def read(self, states: dict, now: datetime, climate_unit: str = "°F", *,
+             targets=None, calls=None, head_requests=None) -> tuple[dict[str, Reading], list[str]]:
         result, warnings = {}, []
         for name, zone in self.config.zones.items():
             label = zone.name or name
@@ -112,4 +213,6 @@ class Sensors:
             slope = (center - history[0][1]) * 60 / elapsed if elapsed >= 60 else 0
             slope = max(-.1, min(.1, slope))
             result[name] = Reading(center, min(values.values()), max(values.values()), low, high, slope, len(values))
+        if targets is not None and calls is not None:
+            self._forecast_context(result, states, now, targets, calls, head_requests or {})
         return result, warnings

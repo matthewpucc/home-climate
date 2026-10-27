@@ -6,9 +6,10 @@ import math
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from .config import Config, Settings
-from .sensors import Reading, Sensors, from_f, to_f
+from .sensors import Reading, Sensors, forecast_slope, from_f, to_f
 from .temperature_guard import heating_cutoff_reached
 from .head_guard import HeadGuard
+from .airflow import TransferAirflow
 
 
 def native_target(fahrenheit: float, attrs: dict, unit: str, *, minimum_f: float | None = None) -> float:
@@ -80,6 +81,9 @@ class Plan:
     inhibited_heads: dict[str, str] = field(default_factory=dict)
     head_constraints: dict = field(default_factory=dict)
     head_protections: dict = field(default_factory=dict)
+    unavailable_mode_requests: dict = field(default_factory=dict)
+    mode_scores: dict = field(default_factory=dict)
+    recovery_inputs: str | None = None
     heater_on: bool = False
     auxiliary_fan_only: bool = False
     fans: dict[str, int] = field(default_factory=dict)
@@ -101,12 +105,39 @@ class Policy:
         self.sensors = Sensors(config)
         self.head_guard = HeadGuard(config)
         self.calls: dict[tuple[str, str], bool] = {}
+        self.forecast_pending: set[tuple[str, str]] = set()
+        self.head_requests: dict[str, str] = {}
         self.selected_mode = "off"
         self.last_direction: str | None = None
         self.mode_since: datetime | None = None
         self.candidate: tuple[str, datetime] | None = None
         self.heater_on = False
         self.transfer_on: dict[str, bool] = {}
+        self.transfer_airflow = TransferAirflow(config)
+
+    def trim_transfer_fans(self, plan, states, rooms, now):
+        """An ambient gradient cannot override possible conditioned discharge."""
+        self.transfer_airflow.observe(states, now, plan)
+        for key, fan in self.config.fan_controls.items():
+            if fan.strategy != "transfer":
+                continue
+            destination = rooms.get(fan.room)
+            target = plan.room_targets.get(fan.room, {}).get("target_f")
+            if destination is None or target is None:
+                continue
+            source_head = self.config.zones[fan.source_room].head
+            direction = self.transfer_airflow.opposing_direction(
+                source_head, destination.temperature, target)
+            if direction:
+                if plan.fans.get(fan.entity_id, 0):
+                    label = self.config.zones[fan.room].name or fan.room
+                    warning = (f"Transfer fan {fan.entity_id}: {direction} at its source could move "
+                               f"{label} away from its {target:g}°F target; fan stopped")
+                    if warning not in plan.warnings:
+                        plan.warnings.append(warning)
+                plan.fans[fan.entity_id] = 0
+                plan.fan_head_assists.pop(fan.entity_id, None)
+                self.transfer_on[key] = False
 
     def band(self, name: str, settings: Settings, now: datetime) -> tuple[float, float, float]:
         profile = settings.profile(self.config.zones[name], now, self.config.timezone, name)
@@ -118,26 +149,44 @@ class Policy:
         return (max(low, settings.value(profile.low_f) if profile.low_f is not None else target - half),
                 min(high, settings.value(profile.high_f) if profile.high_f is not None else target + half), target)
 
-    def demand(self, name: str, reading: Reading, band: tuple, priority: float) -> dict:
+    def demand(self, name: str, reading: Reading, band: tuple, priority: float, *, running_modes=None,
+               update=True) -> dict:
         LOW, HIGH = self.config.low_f, self.config.high_f
         low, high, target = band
-        drift = reading.slope_f_per_minute * self.config.forecast_minutes
-        future_low, future_high = reading.confirmed_low + drift, reading.confirmed_high + drift
+        heat_drift = forecast_slope(reading, "heat") * self.config.forecast_minutes
+        cool_drift = forecast_slope(reading, "cool") * self.config.forecast_minutes
+        future_low, future_high = reading.confirmed_low + heat_drift, reading.confirmed_high + cool_drift
         # Comfort follows the fused room estimate. Persistent probe extremes
         # remain independent evidence for system-limit protection below.
-        temperature, future_temperature = reading.temperature, reading.temperature + drift
+        temperature = reading.temperature
         heat_edge, cool_edge = max(low, LOW + 1), min(high, HIGH - 1)
-        heat_stop = target if low > LOW else LOW + 1.5
-        cool_stop = target if high < HIGH else HIGH - 1.5
+        stops = self.stop_targets(band)
+        heat_stop, cool_stop = stops["heat"], stops["cool"]
         heat = self.calls.get((name, "heat"), False)
         cool = self.calls.get((name, "cool"), False)
+        previously_active = {"heat": heat, "cool": cool}
+        if running_modes is not None:
+            # A requested call that has not started has no target-reaching
+            # hysteresis to retain after its original evidence clears.
+            if (name, "heat") in self.forecast_pending and "heat" not in running_modes:
+                heat = False
+            if (name, "cool") in self.forecast_pending and "cool" not in running_modes:
+                cool = False
         heat = (temperature < heat_stop or future_low < LOW + 1) if heat else (temperature < heat_edge or future_low < LOW + 1)
         cool = (temperature > cool_stop or future_high > HIGH - 1) if cool else (temperature > cool_edge or future_high > HIGH - 1)
-        self.calls[name, "heat"], self.calls[name, "cool"] = heat, cool
+        if update:
+            self.calls[name, "heat"], self.calls[name, "cool"] = heat, cool
+            for mode, active in (("heat", heat), ("cool", cool)):
+                key = (name, mode)
+                actual = self.actual_demand(reading, band, mode)
+                if not active or actual or (running_modes is not None and mode in running_modes):
+                    self.forecast_pending.discard(key)
+                elif not actual and not previously_active[mode]:
+                    self.forecast_pending.add(key)
         output = {}
         for mode, active, amount, violation, guard in (
-            ("heat", heat, heat_stop - min(temperature, future_temperature), LOW - reading.confirmed_low, LOW + 1 - future_low),
-            ("cool", cool, max(temperature, future_temperature) - cool_stop, reading.confirmed_high - HIGH, future_high - (HIGH - 1)),
+            ("heat", heat, heat_stop - min(temperature, temperature + heat_drift), LOW - reading.confirmed_low, LOW + 1 - future_low),
+            ("cool", cool, max(temperature, temperature + cool_drift) - cool_stop, reading.confirmed_high - HIGH, future_high - (HIGH - 1)),
         ):
             amount = max(.05, amount) if active else 0
             output[mode] = {
@@ -146,14 +195,70 @@ class Policy:
             }
         return output
 
+    def stop_targets(self, band):
+        low, high, target = band
+        return {"heat": target if low > self.config.low_f else self.config.low_f + 1.5,
+                "cool": target if high < self.config.high_f else self.config.high_f - 1.5}
+
+    def actual_demand(self, reading, band, mode):
+        if mode == "heat":
+            return (reading.temperature < max(band[0], self.config.low_f + 1)
+                    or reading.confirmed_low <= self.config.low_f + 1)
+        return (reading.temperature > min(band[1], self.config.high_f - 1)
+                or reading.confirmed_high >= self.config.high_f - 1)
+
+    def unavailable_request(self, head, mode, rooms, targets, states, climate_unit="°F"):
+        """Fresh unmet demand without changing call latches or eligibility."""
+        entity = self.config.heads[head]
+        attrs = states.get(entity, {}).get("attributes", {})
+        modes = set(attrs.get("hvac_modes") or ())
+        missing = sorted({"off", mode} - modes)
+        if not modes or not missing or self.head_guard.constraint(head, mode, rooms, targets, states):
+            return None
+        floor = self.config.head_cool_min_f.get(entity) if mode == "cool" else None
+        if floor is not None:
+            try:
+                native_target(floor, attrs, climate_unit, minimum_f=floor)
+            except ValueError:
+                return None
+            except (KeyError, TypeError, OverflowError):
+                pass
+        heater = states.get(self.config.heater_entity, {}) if self.config.heater_entity else {}
+        heater_modes = heater.get("attributes", {}).get("hvac_modes") or ()
+        auxiliary_available = (self.config.heater_entity and heater.get("state") not in
+                               (None, "unknown", "unavailable")
+                               and (not heater_modes or {"off", "heat"} <= set(heater_modes)))
+        requests = []
+        for name, zone in self.config.zones.items():
+            if zone.head != head or name not in rooms or name not in targets:
+                continue
+            if name == self.config.auxiliary_room and mode == "heat" and auxiliary_available:
+                continue
+            target = targets[name]
+            band = (target["low_f"], target["high_f"], target["target_f"])
+            demand = self.demand(name, rooms[name], band, target["priority"],
+                                 running_modes={states.get(entity, {}).get("state")}, update=False)[mode]
+            if demand["active"]:
+                requests.append(demand)
+        if not requests:
+            return None
+        chosen = max(requests, key=lambda request: request["score"])
+        score = chosen["score"]
+        if self.head_guard.protection(head, mode, rooms, targets):
+            score = (score[0], max(.05, score[1]), score[2], score[3])
+        return {"score": score, "target_f": chosen["target"], "missing_modes": missing}
+
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F") -> Plan:
-        rooms, warnings = self.sensors.read(states, now, climate_unit)
-        plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings)
         LOW, HIGH = self.config.low_f, self.config.high_f
         profiles = {key: settings.profile(room, now, self.config.timezone, key) for key, room in self.config.zones.items()}
-        plan.fans = {entity: 0 for entity in self.config.fans.values()}
         bands = {name: self.band(name, settings, now) for name in self.config.zones}
-        demands = {name: self.demand(name, reading, bands[name], profiles[name].priority)
+        rooms, warnings = self.sensors.read(states, now, climate_unit,
+                                            targets={name: self.stop_targets(band) for name, band in bands.items()},
+                                            calls=self.calls, head_requests=self.head_requests)
+        plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings)
+        plan.fans = {entity: 0 for entity in self.config.fans.values()}
+        demands = {name: self.demand(name, reading, bands[name], profiles[name].priority,
+                                    running_modes={states.get(self.config.heads[self.config.zones[name].head], {}).get("state")})
                    for name, reading in rooms.items()}
         # Report the exact active profile used for this decision. Presentation
         # must not re-evaluate schedules in a different timezone or helper snapshot.
@@ -165,20 +270,28 @@ class Policy:
                    "cool_requested": demands.get(name, {}).get("cool", {}).get("active", False)}
             for name, band in bands.items()
         }
-        self.head_guard.observe(rooms, plan.room_targets)
+        self.head_guard.observe(rooms, plan.room_targets, states)
         for (_head, mode), protection in self.head_guard.protections.items():
             for name in protection["rooms"]:
                 # A recovering house call remains a real request even when an
                 # improving forecast would otherwise clear ordinary demand.
                 request = demands[name][mode]
+                previously_requested = request["active"]
                 request["active"] = True
                 score = request["score"]
                 request["score"] = (score[0], max(.05, score[1]), profiles[name].priority,
                                     max(.05, score[3]))
                 plan.room_targets[name][f"{mode}_requested"] = True
+                self.calls[name, mode] = True
+                reading = rooms[name]
+                actual = self.actual_demand(reading, bands[name], mode)
+                if (not previously_requested and not actual
+                        and name not in protection.get("started_rooms", protection["rooms"])):
+                    self.forecast_pending.add((name, mode))
         for key in list(self.calls):
             if key[0] not in rooms:
                 self.calls.pop(key)
+                self.forecast_pending.discard(key)
 
         # The auxiliary thermostat uses external room probes, never its own sensor.
         auxiliary = rooms.get(self.config.auxiliary_room)
@@ -250,7 +363,13 @@ class Policy:
                 if not requests:
                     continue
                 modes = states.get(self.config.heads[head], {}).get("attributes", {}).get("hvac_modes") or []
-                if modes and mode not in modes:
+                if modes and not {"off", mode} <= set(modes):
+                    # Keep the unmet request visible to recovery after mode
+                    # filtering, but never prioritize a call blocked by current
+                    # room/house constraints. This is evidence, not eligibility.
+                    if missing_request := self.unavailable_request(
+                            head, mode, rooms, plan.room_targets, states, climate_unit):
+                        plan.unavailable_mode_requests.setdefault(head, {})[mode] = missing_request
                     labels = ", ".join(self.config.zones[name].name or name for name in names)
                     plan.warnings.append(
                         f"{labels}: {mode} requested but unavailable (HA modes: {', '.join(modes)})")
@@ -314,7 +433,9 @@ class Policy:
             self.candidate = None
         self.selected_mode = winner
         plan.mode = winner
+        plan.mode_scores = {mode: score for mode, score in scores.items()}
         plan.head_targets_f = eligible.get(winner, {})
+        self.head_requests = {head: winner for head in plan.head_targets_f}
         plan.head_protections = {
             head: protection for head in plan.head_targets_f
             if (protection := self.head_guard.protection(head, winner, rooms, plan.room_targets))
@@ -344,6 +465,7 @@ class Policy:
                 if plan.fans[fan.entity_id]:
                     plan.fan_head_assists[fan.entity_id] = head
                 self.transfer_on[key] = True
+        self.trim_transfer_fans(plan, states, rooms, now)
         if winner != "off":
             plan.reasons.append(f"{winner}: " + ", ".join(plan.head_targets_f))
         else:
@@ -352,4 +474,6 @@ class Policy:
             plan.reasons.append("Auxiliary heating using external room probes")
         elif plan.auxiliary_fan_only:
             plan.reasons.append("Auxiliary heater circulating air in fan-only mode")
+        from .recovery_inputs import signature
+        plan.recovery_inputs = signature(self.config, states, now, settings, climate_unit)
         return plan

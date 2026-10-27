@@ -35,6 +35,9 @@ class NativeControls:
         self.heartbeat = 0.0
         self.heartbeat_monotonic = 0.0
         self.inflight = 0
+        self.service_inflight = 0
+        self._stop_jobs = {}
+        self.repair_gate = None
         self.ownership_generation = 0
         self.auxiliary_inflight = 0
         self._auxiliary_heat_possible = False
@@ -44,6 +47,13 @@ class NativeControls:
         self._auxiliary_heartbeat_off_ack = False
         self._auxiliary_stop_pending = False
         self._auxiliary_stop_epoch = 0
+        self._head_inflight = {entity: 0 for entity in config.heads.values()}
+        self._head_possible = set()
+        self._head_stop_epochs = {entity: 0 for entity in config.heads.values()}
+        self._head_stop_pending = set()
+        self._head_off_baselines = {}
+        self._head_off_receipts = {}
+        self._uncertain_device_jobs = set()
         self.problem = None
         self._auxiliary_off_error = None
         self._stop_log_reason = None
@@ -216,7 +226,8 @@ class NativeControls:
             if not self.live:
                 raise HAError("Enable live commands in Configure → System settings first")
             self.config.validate(live=True)
-            if self.recovering or (self.owned and not self.enabled):
+            if (self.recovering or (self.owned and not self.enabled)
+                    or (not self.enabled and self.service_inflight)):
                 raise HAError("Waiting for previously owned devices to acknowledge off")
             self.problem = None
             self._stop_log_reason = None
@@ -261,6 +272,8 @@ class NativeControls:
                                     or self.recovering or self._closing):
                                 raise HAError("Control is disabled or still stopping")
                             if not self.owned:
+                                if self.service_inflight:
+                                    raise HAError("Previous device services are still running; ownership claim deferred")
                                 devices = tuple([*self.config.climate_entities,
                                                  *self.config.fans.values()])
                                 pending = tuple(entity for entity in self.pending_fans
@@ -322,6 +335,81 @@ class NativeControls:
         self._auxiliary_heartbeat_off_receipt = False
         self._auxiliary_heartbeat_off_ack = False
         self._auxiliary_stop_pending = False
+
+    def _head_marker(self, entity):
+        state = self.hass.states.get(entity)
+        return ((state.state, state.last_reported, state.last_updated,
+                 state.attributes.get("hvac_action")) if state is not None else None)
+
+    def _ack_head_off(self, entity):
+        state = self.hass.states.get(entity)
+        acknowledged = bool(
+            not self._head_inflight.get(entity, 0)
+            and self._head_off_receipts.get(entity)
+                == (self.ownership_generation, self._head_stop_epochs.get(entity))
+            and state is not None and state.state == "off"
+            and state.attributes.get("hvac_action") not in ("heating", "cooling")
+            and self._head_marker(entity) != self._head_off_baselines.get(entity))
+        if acknowledged:
+            self._head_possible.discard(entity)
+            self._head_stop_pending.discard(entity)
+        return acknowledged
+
+    @callback
+    def head_activation_started(self, entity):
+        if entity not in self._head_inflight:
+            return
+        self._head_inflight[entity] += 1
+        self._head_possible.add(entity)
+        self._head_stop_epochs[entity] += 1
+        self._head_stop_pending.discard(entity)
+        self._head_off_receipts.pop(entity, None)
+
+    @callback
+    def head_activation_finished(self, entity):
+        if entity not in self._head_inflight:
+            return
+        self._head_inflight[entity] -= 1
+        if (entity in self._head_stop_pending or self.recovering
+                or not self.enabled or self._closing):
+            # A prior Off can precede the actual completion of a timed-out
+            # positive service, even when HA still caches that same Off state.
+            self._head_stop_epochs[entity] += 1
+            self._head_stop_pending.add(entity)
+            self._head_off_baselines[entity] = self._head_marker(entity)
+            self._head_off_receipts.pop(entity, None)
+
+    @callback
+    def head_off_started(self, entity):
+        if entity not in self._head_inflight or entity not in self._head_possible:
+            return None
+        if entity not in self._head_stop_pending:
+            self._head_stop_epochs[entity] += 1
+            self._head_stop_pending.add(entity)
+            self._head_off_baselines[entity] = self._head_marker(entity)
+            self._head_off_receipts.pop(entity, None)
+        return (self.ownership_generation, self._head_stop_epochs[entity])
+
+    @callback
+    def head_off_finished(self, entity, receipt):
+        if (entity in self._head_stop_pending
+                and receipt == (self.ownership_generation, self._head_stop_epochs.get(entity))):
+            self._head_off_receipts[entity] = receipt
+            self._ack_head_off(entity)
+        elif entity in self._head_stop_pending:
+            # This report arrived from a stop predating a later positive
+            # completion. It cannot be reused by a newer no-report receipt.
+            self._head_off_baselines[entity] = self._head_marker(entity)
+            self._head_off_receipts.pop(entity, None)
+
+    @callback
+    def activation_job_uncertain(self, entity):
+        if entity not in self.config.climate_entities:
+            return
+        self._uncertain_device_jobs.add(entity)
+        self.problem = f"Device service cancelled after dispatch; completion remains uncertain: {entity}"
+        self._publish()
+        self._schedule_check()
 
     def _check_auxiliary_heartbeat_deadline(self, instant):
         if (not self.config.heater_entity or self.config.heater_entity not in self.owned
@@ -413,6 +501,10 @@ class NativeControls:
                 and receipt == (self.ownership_generation, self._auxiliary_stop_epoch)):
             self._auxiliary_heartbeat_off_receipt = True
             self._ack_auxiliary_heartbeat_off()
+        elif receipt is not None and self._auxiliary_stop_pending:
+            self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
+            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_ack = False
 
     @callback
     def confirm_heartbeat(self, *, generation=None):
@@ -442,6 +534,8 @@ class NativeControls:
                 or self._claiming or self._closing
                 or entity not in self.owned):
             raise HAError("Controller is disabled or stopping; activation blocked")
+        if entity in self._uncertain_device_jobs:
+            raise HAError("A prior device service has uncertain completion; activation blocked")
         instant = time.monotonic()
         age = instant - self.heartbeat_monotonic
         if not 0 <= age <= self.config.heartbeat_timeout_seconds:
@@ -456,12 +550,20 @@ class NativeControls:
                 and not self.probes_safe(self._probe_states())):
             raise HAError("External room probes block auxiliary heat")
 
+    def check_stop(self, entity):
+        if entity not in self.owned and entity not in self.pending_fans:
+            raise HAActivationDeferred("Stop belongs to a device no longer owned by this controller")
+
     def _is_off(self, entity):
         if (entity == self.config.heater_entity and self.power_guard is not None
                 and self.power_guard.power_cut_confirmed):
             # The dedicated outlet is physically Off; the now-unpowered Dyson
             # integration cannot be required to produce another report.
             return True
+        if entity in self._uncertain_device_jobs:
+            return False
+        if entity in self._head_possible:
+            return self._ack_head_off(entity)
         state = self.hass.states.get(entity)
         return bool(state and state.state == "off"
                     and state.attributes.get("hvac_action") not in ("heating", "cooling"))
@@ -471,7 +573,8 @@ class NativeControls:
             critical = tuple(entity for entity in self.owned if entity.startswith("climate."))
             auxiliary_safe = (not (self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked)
                               or self._ack_auxiliary_heartbeat_off())
-            if (self.owned and not self.inflight and not self.auxiliary_inflight and auxiliary_safe
+            if (self.owned and not self.inflight and not self.service_inflight
+                    and not self.auxiliary_inflight and auxiliary_safe
                     and all(self._is_off(entity) for entity in critical)):
                 pending = tuple(dict.fromkeys([
                     *self.pending_fans,
@@ -510,17 +613,55 @@ class NativeControls:
         self._task = self.hass.async_create_task(self.async_check(), "Home Climate watchdog")
 
     async def _off(self, entity):
-        receipt = self.auxiliary_off_started() if entity == self.config.heater_entity else None
+        # Watchdog stops have the same actual handler lifetime as worker stops.
+        # A reported Off before the handler returns cannot release ownership.
+        generation = self.ownership_generation
+        repair_epoch = self.repair_gate.capture(entity, activation=False) if self.repair_gate else None
+        self.service_inflight += 1
+        task = self.hass.async_create_background_task(
+            self._off_job(entity, generation, repair_epoch), "Home Climate watchdog device stop", eager_start=False)
+
+        self._stop_jobs[task] = entity
+
+        def finished(job):
+            self._stop_jobs.pop(job, None)
+            self.service_inflight -= 1
+            if not job.cancelled():
+                job.exception()
+            else:
+                self.activation_job_uncertain(entity)
+            self._schedule_check()
+
+        task.add_done_callback(finished)
+        done, _pending = await asyncio.wait({task}, timeout=5)
+        return bool(task.result()) if done else False
+
+    def stop_jobs(self, entities):
+        return tuple(task for task, entity in self._stop_jobs.items()
+                     if entity in entities and not task.done())
+
+    async def _off_job(self, entity, generation, repair_epoch):
+        if generation != self.ownership_generation:
+            return False
         try:
-            async with asyncio.timeout(5):
-                await self.hass.services.async_call(
-                    entity.split(".", 1)[0],
-                    "set_hvac_mode" if entity.startswith("climate.") else "turn_off",
-                    {"entity_id": entity, **({"hvac_mode": "off"} if entity.startswith("climate.") else {})},
-                    blocking=True,
-                )
+            self.check_stop(entity)
+            if self.repair_gate:
+                self.repair_gate.check(entity, repair_epoch, activation=False)
+        except HAActivationDeferred:
+            return False
+        receipt = self.auxiliary_off_started() if entity == self.config.heater_entity else None
+        head_receipt = self.head_off_started(entity)
+        try:
+            await self.hass.services.async_call(
+                entity.split(".", 1)[0],
+                "set_hvac_mode" if entity.startswith("climate.") else "turn_off",
+                {"entity_id": entity, **({"hvac_mode": "off"} if entity.startswith("climate.") else {})},
+                blocking=True,
+            )
             if entity == self.config.heater_entity:
                 self.auxiliary_off_finished(receipt)
+            if head_receipt is not None:
+                self.head_off_finished(entity, head_receipt)
             return True
         except Exception as exc:
             message = f"Could not stop {entity}: {exc}"
@@ -605,7 +746,8 @@ class NativeControls:
                     self._publish()
 
     async def async_close(self):
-        if not self.active and self._closing and not self.owned and not self.inflight:
+        if (not self.active and self._closing and not self.owned
+                and not self.inflight and not self.service_inflight):
             return True
         self._closing = True
         closed = False
@@ -617,7 +759,7 @@ class NativeControls:
                 await asyncio.shield(self._task)
             # The check lock also waits for a claim already saving ownership.
             await self.async_check()
-            if self.owned or self.inflight:
+            if self.owned or self.inflight or self.service_inflight:
                 # Keep subscriptions alive for unresolved critical ownership.
                 return False
             # Fan-only cleanup survives in storage and resumes on next load.

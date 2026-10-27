@@ -18,6 +18,7 @@ from .const import SIGNAL_STATUS
 from .controller.__main__ import run_loop
 from .controller.ha import HAActivationDeferred, HAError
 from .recovery import RecoveryManager
+from .repair_gate import RepairGate
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +42,14 @@ class HeartbeatState:
     request: HeartbeatRequest | None = None
     blocked: bool = False
     reason: str | None = None
+
+
+@dataclass
+class ServiceOperation:
+    entity: str | None
+    activation: bool
+    started: bool = False
+    controls: object | None = None
 
 
 def controller_entity_ids(config):
@@ -106,6 +115,10 @@ class NativeAPI:
         self._heartbeat_lock = threading.Lock()
         self._heartbeat = HeartbeatState()
         self._heartbeat_token = 0
+        self.repair_gate = RepairGate(config.heads.values())
+        self._service_jobs = {}
+        self._uncertain_service_entities = set()
+        self.service_notify = None
 
     def request(self, path, body=None):
         if body is not None and not self.live:
@@ -126,7 +139,10 @@ class NativeAPI:
                 self._queue_heartbeat()
                 return []
         activation = self._is_activation(path, body)
-        generation = None
+        actuator = bool(body is not None and path.startswith(("services/climate/", "services/fan/")))
+        repair_epoch = (self.repair_gate.capture(body.get("entity_id"), activation=activation)
+                        if actuator else None)
+        generation = self.controls._snapshot["generation"] if self.controls is not None and actuator else None
         if self.controls is not None and activation:
             issue = self.heartbeat_issue
             if issue:
@@ -136,7 +152,8 @@ class NativeAPI:
         deadline = time.monotonic() + timeout
         dispatch = NativeActivationDispatch(deadline) if self.controls is not None and activation else None
         future = asyncio.run_coroutine_threadsafe(
-            self._async_request(path, body, deadline, generation=generation, dispatch=dispatch), self.hass.loop
+            self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
+                                repair_epoch=repair_epoch), self.hass.loop
         )
         try:
             return future.result(timeout=timeout + 1)
@@ -269,6 +286,7 @@ class NativeAPI:
                     "last_changed": state.last_changed.isoformat(),
                     "last_updated": state.last_updated.isoformat(),
                     "last_reported": state.last_reported.isoformat(),
+                    **({"integration_repair": repair} if (repair := self.repair_gate.overlay(entity_id)) else {}),
                 })
         if self.controls is not None:
             states = self.controls.overlay({state["entity_id"]: state for state in result})
@@ -278,7 +296,8 @@ class NativeAPI:
             return [{"entity_id": entity, **state} for entity, state in states.items()]
         return result
 
-    async def _async_request(self, path, body, deadline, *, generation=None, dispatch=None):
+    async def _async_request(self, path, body, deadline, *, generation=None, dispatch=None,
+                             repair_epoch=None):
         # Cancelling the worker's future is not enough: a queued coroutine can
         # start before its cancellation callback when the loop resumes.
         remaining = deadline - time.monotonic()
@@ -315,6 +334,80 @@ class NativeAPI:
                       and not (service == "turn_off"
                                or (service == "set_hvac_mode" and body.get("hvac_mode") == "off")
                                or (service == "set_percentage" and body.get("percentage") == 0)))
+        if domain in ("climate", "fan"):
+            self.repair_gate.check(body.get("entity_id"), repair_epoch, activation=activation)
+        # The actual service has a separate lifetime from this caller. A worker
+        # timeout/cancellation must not erase a dispatched device operation.
+        operation = ServiceOperation(body.get("entity_id"), activation, controls=controls)
+        task = self.hass.async_create_background_task(
+            self._async_service_job(path, domain, service, body, deadline, activation,
+                                    generation, dispatch, repair_epoch, operation),
+            "Home Climate device service", eager_start=False)
+        self._service_jobs[task] = operation
+        if controls is not None:
+            # Registered queued Off jobs also outlive their callers. They must
+            # drain before an old ownership lease can be released or reclaimed.
+            controls.service_inflight += 1
+        task.add_done_callback(self._service_job_done)
+        try:
+            done, _pending = await asyncio.wait({task}, timeout=remaining)
+            if not done:
+                raise TimeoutError()
+            task.result()
+        except (HAError, TimeoutError):
+            raise
+        except Exception as exc:
+            raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
+        return []
+
+    def _service_job_done(self, task):
+        operation = self._service_jobs.pop(task, None)
+        if operation is not None and operation.controls is not None:
+            operation.controls.service_inflight -= 1
+            operation.controls._schedule_check()
+        if task.cancelled() and operation and operation.started and operation.activation:
+            self._uncertain_service_entities.add(operation.entity)
+            if self.controls is not None:
+                self.controls.activation_job_uncertain(operation.entity)
+        if not task.cancelled():
+            task.exception()  # Retrieve errors even if the original caller timed out.
+        if self.service_notify is not None:
+            self.service_notify()
+
+    def service_jobs(self, entities):
+        entities = set(entities)
+        native = tuple(task for task, operation in self._service_jobs.items()
+                       if operation.entity in entities and not task.done())
+        watchdog = self.controls.stop_jobs(entities) if self.controls is not None else ()
+        return (*native, *watchdog)
+
+    def uncertain_service_jobs(self, entities):
+        uncertain = self._uncertain_service_entities.intersection(entities)
+        if self.controls is not None:
+            uncertain |= self.controls._uncertain_device_jobs.intersection(entities)
+        return sorted(uncertain)
+
+    async def _async_service_job(self, path, domain, service, body, deadline, activation,
+                                  generation, dispatch, repair_epoch, operation):
+        if time.monotonic() >= deadline:
+            if dispatch is not None and dispatch.abandon_if_queued():
+                raise HAActivationDeferred("Head service expired before actual dispatch")
+            raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
+        controls = self.controls
+        if domain in ("climate", "fan"):
+            self.repair_gate.check(body.get("entity_id"), repair_epoch, activation=activation)
+            if (controls is not None and generation is not None
+                    and generation != controls.ownership_generation):
+                raise HAActivationDeferred("Device service belongs to an earlier controller lease (ownership changed)")
+            if controls is not None and not activation:
+                controls.check_stop(body.get("entity_id"))
+        if activation:
+            if self.repair_gate.manages(body.get("entity_id")):
+                state = self.hass.states.get(body["entity_id"])
+                mode = body.get("hvac_mode") or (state.state if state is not None else None)
+                if (state is None or state.state in ("unknown", "unavailable")
+                        or not {"off", mode} <= set(state.attributes.get("hvac_modes") or ())):
+                    raise HAActivationDeferred("Head mode unavailable in fresh metadata at dispatch")
         if controls and activation:
             issue = self.heartbeat_issue
             with self._heartbeat_lock:
@@ -330,15 +423,19 @@ class NativeAPI:
             dispatch.begin()
         if controls and activation:
             controls.inflight += 1
+            controls.head_activation_started(body.get("entity_id"))
             if body.get("entity_id") == controls.config.heater_entity:
                 controls.auxiliary_activation_started(body)
         auxiliary_off = bool(
             controls and body.get("entity_id") == controls.config.heater_entity
             and service == "set_hvac_mode" and body.get("hvac_mode") == "off")
         off_receipt = controls.auxiliary_off_started() if auxiliary_off else None
+        head_off_receipt = (controls.head_off_started(body.get("entity_id"))
+                            if controls and domain == "climate" and service == "set_hvac_mode"
+                            and body.get("hvac_mode") == "off" else None)
         try:
-            async with asyncio.timeout(remaining):
-                await self.hass.services.async_call(domain, service, body, blocking=True)
+            operation.started = True
+            await self.hass.services.async_call(domain, service, body, blocking=True)
         except (HAError, TimeoutError):
             raise
         except Exception as exc:
@@ -346,9 +443,12 @@ class NativeAPI:
         else:
             if auxiliary_off:
                 controls.auxiliary_off_finished(off_receipt)
+            if controls and head_off_receipt is not None:
+                controls.head_off_finished(body.get("entity_id"), head_off_receipt)
         finally:
             if controls and activation:
                 controls.inflight -= 1
+                controls.head_activation_finished(body.get("entity_id"))
                 if body.get("entity_id") == controls.config.heater_entity:
                     controls.auxiliary_activation_finished()
                 controls._schedule_check()
@@ -389,10 +489,15 @@ class ControllerRuntime:
         self._logged_heartbeat_issue = None
         self._stop_lock = asyncio.Lock()
         self._shutdown_progress = asyncio.Event()
+        self.api.service_notify = self._async_service_jobs_changed
         self._options_reload_task = None
         self._configuration_reload_pending = False
         self._configuration_reload_reason = None
         self.recovery = RecoveryManager(hass, self)
+
+    @callback
+    def _async_service_jobs_changed(self):
+        self._shutdown_progress.set()
 
     async def async_setup_controls(self, entry_id):
         from .comfort import RoomComfort
@@ -400,11 +505,13 @@ class ControllerRuntime:
                                    self._async_comfort_changed, self.wake_event)
         try:
             await self.comfort.async_load()
+            await self.recovery.capabilities.async_load(entry_id)
             if not self.config.legacy:
                 from .controls import NativeControls
                 self.controls = NativeControls(self.hass, self.config, self.live, entry_id,
                                                self._async_controls_changed)
                 self.api.controls = self.controls
+                self.controls.repair_gate = self.api.repair_gate
                 await self.controls.async_load()
             if self.house_policy:
                 from .power_guard import HeaterPowerGuard
@@ -729,7 +836,9 @@ class ControllerRuntime:
                 return False
             await self.hass.async_add_executor_job(self.thread.join)
         controls_closed = await self._async_close_controls(wait_for_ack)
-        closed = controls_closed and recovery_closed
+        devices = (*self.config.climate_entities, *self.config.fans.values())
+        jobs_closed = not self.api.service_jobs(devices) and not self.api.uncertain_service_jobs(devices)
+        closed = controls_closed and recovery_closed and jobs_closed
         if closed:
             if self.power_guard is not None:
                 guard_closed = await self.power_guard.async_close()
@@ -743,6 +852,10 @@ class ControllerRuntime:
                 self._logged_unload_blockers = None
         else:
             self._warn_unload_deferred(recovery_pending=not recovery_closed)
+            if not jobs_closed:
+                _LOGGER.warning(
+                    "Controller unload deferred; device service jobs are still running or uncertain; "
+                    "the runtime retains ownership until completion is established")
         if closed and self._remove_climate_listener:
             self._remove_climate_listener()
             self._remove_climate_listener = None
