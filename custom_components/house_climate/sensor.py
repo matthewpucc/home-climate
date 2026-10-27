@@ -7,7 +7,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN, SIGNAL_STATUS
+from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 from .controller.sensors import from_f, to_f
 
 
@@ -111,6 +111,147 @@ def climate_label(config, entity_id):
         room = config.zones[config.auxiliary_room]
         return f"{room.name or config.auxiliary_room} auxiliary heater"
     return entity_id
+
+
+def guard_temperature(value, display_unit, digits=1):
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value):
+        converted = from_f(value, display_unit)
+        return f"{converted:.{digits}f}".rstrip("0").rstrip(".") + display_unit
+    return None
+
+
+def guard_display_unit(entity):
+    # Attributes can be inspected before an entity has been attached to HA.
+    return (entity.hass.config.units.temperature_unit if entity.hass is not None
+            else UnitOfTemperature.FAHRENHEIT)
+
+
+def guard_room_label(label):
+    return label if len(label) <= 48 else label[:47] + "…"
+
+
+def current_head_constraints(status, head=None, config=None):
+    """Ignore old or opposite-mode constraints on a head that is being served."""
+    if not has_plan(status):
+        return []
+    result = []
+    recovering = {*status.get("device_issues", {}), *status.get("recovery_details", {}),
+                  *status.get("waiting_devices", [])}
+    for key, directions in status.get("head_constraints", {}).items():
+        if head is not None and key != head:
+            continue
+        if key in status.get("head_targets_f", {}):
+            continue
+        if config is not None and config.heads.get(key) in recovering:
+            continue
+        for mode in dict.fromkeys((status.get("mode"), "cool", "heat")):
+            detail = directions.get(mode)
+            if mode in ("heat", "cool") and isinstance(detail, dict):
+                if config is not None and not any(
+                        room.head == key and status.get("room_targets", {}).get(name, {}).get(f"{mode}_requested")
+                        for name, room in config.zones.items()):
+                    continue
+                result.append((key, mode, detail))
+    return result
+
+
+def head_constraint_message(config, status, head, mode, detail, display_unit):
+    """Put the actual room and limit before warnings can truncate the state."""
+    room_id = detail.get("room")
+    room = config.zones.get(room_id)
+    label = guard_room_label((room.name or room_id) if room else detail.get("room_name") or "Attached room")
+    temperature = guard_temperature(detail.get("temperature_f"), display_unit)
+    boundary = guard_temperature(detail.get("boundary_f"), display_unit)
+    required = guard_temperature(detail.get("required_f"), display_unit)
+    # Small Fahrenheit headroom can round to the same tenth in Celsius. Keep
+    # the comparison understandable instead of saying "21.9 needs 21.9".
+    if temperature == boundary and detail.get("temperature_f") != detail.get("boundary_f"):
+        temperature = guard_temperature(detail.get("temperature_f"), display_unit, 2)
+        boundary = guard_temperature(detail.get("boundary_f"), display_unit, 2)
+    if temperature == required and detail.get("temperature_f") != detail.get("required_f"):
+        temperature = guard_temperature(detail.get("temperature_f"), display_unit, 2)
+        required = guard_temperature(detail.get("required_f"), display_unit, 2)
+    action = "cooling" if mode == "cool" else "heating"
+    kind = detail.get("kind")
+    if kind == "comfort_rearm" and temperature and required:
+        text = f"{label} {temperature} needs {required} before {action} restarts"
+    elif kind == "comfort_limit" and temperature and boundary:
+        value, edge = detail["temperature_f"], detail["boundary_f"]
+        relation = "below" if value < edge else "above" if value > edge else "at"
+        limit = "floor" if mode == "cool" else "ceiling"
+        text = f"{label} {temperature} is {relation} its {boundary} comfort {limit}"
+    elif kind == "house_limit" and temperature and boundary:
+        text = f"{label}: {action} blocked by {boundary} house guard (reading {temperature}"
+        projected = guard_temperature(detail.get("projected_f"), display_unit)
+        if projected and projected != temperature:
+            text += f", forecast {projected}"
+        text += ")"
+    else:
+        text = detail.get("reason") or f"{label}: {action} blocked"
+    waiting = [guard_room_label(zone.name or key) for key, zone in config.zones.items()
+               if zone.head == head and key != room_id
+               and status.get("room_targets", {}).get(key, {}).get(f"{mode}_requested")]
+    if waiting:
+        # The explanation remains useful on both room cards sharing one head.
+        text = text.removesuffix(f"; {action} waits")
+        text += "; " + ", ".join(waiting) + f" {action} waits"
+    elif kind == "comfort_limit":
+        text += f"; {action} waits"
+    return text
+
+
+def head_constraint_messages(config, status, display_unit, head=None):
+    return [head_constraint_message(config, status, key, mode, detail, display_unit)
+            for key, mode, detail in current_head_constraints(status, head, config)]
+
+
+def head_protection_messages(config, status, display_unit, head=None):
+    """Protection is a planned exception to comfort, never actuator feedback."""
+    if not has_plan(status):
+        return []
+    result = []
+    recovering = {*status.get("device_issues", {}), *status.get("recovery_details", {}),
+                  *status.get("waiting_devices", [])}
+    for key, detail in status.get("head_protections", {}).items():
+        mode = detail.get("mode")
+        if ((head is not None and head != key) or key not in status.get("head_targets_f", {})
+                or mode != status.get("mode") or mode not in ("heat", "cool")
+                or config.heads.get(key) in recovering):
+            continue
+        origins = [guard_room_label(config.zones[name].name or name) for name in detail.get("rooms", [])
+                   if name in config.zones]
+        action = "Cooling" if mode == "cool" else "Heating"
+        text = action + " for " + (", ".join(origins) + " house protection" if origins else "house protection")
+        relaxed = []
+        for name, room in config.zones.items():
+            target = status.get("room_targets", {}).get(name, {})
+            temperature = status.get("rooms", {}).get(name, {}).get("temperature")
+            boundary = target.get("low_f" if mode == "cool" else "high_f")
+            if (room.head != key or target.get("comfort_enabled") is not True
+                    or not isinstance(temperature, (int, float)) or not isinstance(boundary, (int, float))):
+                continue
+            if (temperature <= boundary if mode == "cool" else temperature >= boundary):
+                relaxed.append(guard_room_label(room.name or name))
+        if relaxed:
+            limit = "floor" if mode == "cool" else "ceiling"
+            text += "; " + ", ".join(relaxed) + f" comfort {limit} relaxed"
+            result.append(text)
+    return result
+
+
+def head_guard_messages(config, status, display_unit, head=None):
+    return (head_protection_messages(config, status, display_unit, head)
+            + head_constraint_messages(config, status, display_unit, head))
+
+
+def current_issue_messages(config, status, display_unit):
+    blockers = current_head_constraints(status, config=config)
+    messages = [head_constraint_message(config, status, head, mode, detail, display_unit)
+                for head, mode, detail in blockers]
+    reasons = [detail.get("reason") for _, _, detail in blockers if detail.get("reason")]
+    messages.extend(warning for warning in plan_warnings(status)
+                    if not any(reason in warning for reason in reasons))
+    return list(dict.fromkeys(messages))
 
 
 def capability_message(detail):
@@ -226,8 +367,8 @@ class ControllerEntity(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_{key}"
         self._attr_device_info = {
             "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": "House climate controller",
-            "manufacturer": "House climate",
+            "name": DEVICE_NAME,
+            "manufacturer": NAME,
             "model": "Shared heat-pump controller",
         }
 
@@ -265,7 +406,8 @@ class ControllerStatus(ControllerEntity):
                  "device_issues", "waiting_devices", "recovery_details",
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
-                 "head_stop_reasons", "pending_head_commands") if key in status} | heartbeat_attributes(status)
+                 "head_stop_reasons", "pending_head_commands", "head_constraints",
+                 "head_protections") if key in status} | heartbeat_attributes(status)
 
 
 class HeaterPowerStatus(ControllerEntity):
@@ -317,14 +459,18 @@ class Overview(ControllerEntity):
             return short("Live plan · " + issue)
         preview = status["event"] == "shadow"
         prefix = "Preview only · " if preview else "Live plan · "
+        guards = head_guard_messages(self.runtime.config, status, guard_display_unit(self))
         if preview and status.get("control_block_reason"):
             prefix += status["control_block_reason"] + " · "
-        if not preview and (wait := phase_message(status)):
+        if (not preview and (wait := phase_message(status))
+                and (wait != "Ready; no heat-pump demand" or not guards)):
             prefix += wait + " · "
         if not preview and (hold := cycle_hold_summary(status)):
             prefix += hold + " · "
         if not preview and visible_pending_heads(status):
             prefix += "Waiting for head confirmation · "
+        if guards:
+            prefix += guards[0] + " · "
         warnings = plan_warnings(status)
         if warnings:
             prefix += f'{len(warnings)} warning(s) · '
@@ -342,6 +488,11 @@ class Overview(ControllerEntity):
         elif status.get("auxiliary_fan_only"):
             text += "; auxiliary fan-only " + ("would be on" if preview else "requested")
         return short(prefix + text)
+
+    @property
+    def extra_state_attributes(self):
+        status = self.runtime.status
+        return {key: status[key] for key in ("head_constraints", "head_protections") if key in status}
 
 
 class RecoveryStatus(ControllerEntity):
@@ -364,7 +515,8 @@ class RecoveryStatus(ControllerEntity):
             return short(message + (" · " + reload_message if reload_message else ""))
         if status["event"] == "shadow":
             reason = status.get("control_block_reason")
-            messages = ["Preview only", reason, reload_message]
+            guards = head_guard_messages(self.runtime.config, status, guard_display_unit(self))
+            messages = ["Preview only", reason, reload_message, *guards]
             return short(" · ".join(message for message in messages if message))
         if issue := heartbeat_issue(status):
             return short(issue)
@@ -387,8 +539,10 @@ class RecoveryStatus(ControllerEntity):
         for entity_id, detail in visible_pending_heads(status).items():
             message = pending_head_message(detail, self.hass.config.units.temperature_unit)
             messages.append(f"{climate_label(self.runtime.config, entity_id)}: {message}")
-        if wait := phase_message(status):
+        guards = head_guard_messages(self.runtime.config, status, guard_display_unit(self))
+        if (wait := phase_message(status)) and (wait != "Ready; no heat-pump demand" or not guards):
             messages.append(wait)
+        messages.extend(guards)
         return short("; ".join(messages) or "Ready")
 
     @property
@@ -396,7 +550,8 @@ class RecoveryStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
-                 "integration_recovery", "cycle_holds", "head_stop_reasons", "pending_head_commands") if key in status} | heartbeat_attributes(status)
+                 "integration_recovery", "cycle_holds", "head_stop_reasons", "pending_head_commands",
+                 "head_constraints", "head_protections") if key in status} | heartbeat_attributes(status)
 
 
 class CurrentIssues(ControllerEntity):
@@ -411,7 +566,7 @@ class CurrentIssues(ControllerEntity):
         status = self.runtime.status
         if not has_plan(status):
             return short(inactive_message(status))
-        issues = plan_warnings(status)
+        issues = current_issue_messages(self.runtime.config, status, guard_display_unit(self))
         if status.get("control_block_reason"):
             issues.insert(0, status["control_block_reason"])
         if issue := heartbeat_issue(status):
@@ -420,7 +575,10 @@ class CurrentIssues(ControllerEntity):
 
     @property
     def extra_state_attributes(self):
-        return {"warnings": plan_warnings(self.runtime.status)} | heartbeat_attributes(self.runtime.status)
+        status = self.runtime.status
+        return {"warnings": current_issue_messages(self.runtime.config, status, guard_display_unit(self)),
+                **{key: status[key] for key in ("head_constraints", "head_protections") if key in status}
+                } | heartbeat_attributes(status)
 
 
 class LastFault(ControllerEntity):
@@ -536,9 +694,17 @@ class RoomPlan(RoomEntity):
                 action = f'{status["mode"]} {head} to {self.temperature(target)}'
         else:
             action = f"keep {head} off"
-            waiting = [mode for mode in ("heat", "cool") if limits[f"{mode}_requested"]]
-            if waiting:
-                action += " (" + "/".join(waiting) + " requested)"
+            blockers = head_constraint_messages(config, status, self.hass.config.units.temperature_unit, room.head)
+            if blockers:
+                action += "; " + blockers[0]
+            else:
+                waiting = [mode for mode in ("heat", "cool") if limits[f"{mode}_requested"]]
+                if waiting:
+                    action += " (" + "/".join(waiting) + " requested)"
+        if target is not None:
+            protection = head_protection_messages(config, status, self.hass.config.units.temperature_unit, room.head)
+            if protection:
+                action += "; " + protection[0]
         text = plan_prefix(status) + action
         if self.room_id not in status.get("rooms", {}):
             text = "No usable temperature · " + text
@@ -555,6 +721,10 @@ class RoomPlan(RoomEntity):
                                       if room.head == head],
                 "head_target_f": status.get("head_targets_f", {}).get(head),
                 "head_call_target_f": status.get("head_call_targets_f", {}).get(head),
+                **({"head_constraints": status["head_constraints"][head]}
+                   if head in status.get("head_constraints", {}) else {}),
+                **({"head_protection": status["head_protections"][head]}
+                   if head in status.get("head_protections", {}) else {}),
                 **({"last_stop": status["head_stop_reasons"][config.heads[head]]}
                    if config.heads[head] in status.get("head_stop_reasons", {}) else {}),
                 **({"pending_head_command": status["pending_head_commands"][config.heads[head]]}

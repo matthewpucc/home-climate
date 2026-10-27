@@ -4,10 +4,10 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
 const ASSETS = [
-  "house-climate-integration.zip",
-  "house-climate-public-repository.zip",
-  "house-climate-local.tar.gz",
-  "house-climate-registry.tar.gz",
+  "home-climate-integration.zip",
+  "home-climate-public-repository.zip",
+  "home-climate-local.tar.gz",
+  "home-climate-registry.tar.gz",
 ];
 
 async function optional(request) {
@@ -75,7 +75,7 @@ async function publish({ github, context, core, root = process.cwd() }) {
   if (!release) {
     release = (await github.rest.repos.createRelease({
       ...repo, tag_name: tag, target_commitish: context.sha,
-      name: `House Climate ${tag}`, body: notes, draft: true, prerelease: false,
+      name: `Home Climate ${tag}`, body: notes, draft: true, prerelease: false,
     })).data;
   }
 
@@ -89,7 +89,7 @@ async function publish({ github, context, core, root = process.cwd() }) {
     });
   }
   release = (await github.rest.repos.updateRelease({
-    ...repo, release_id: release.id, name: `House Climate ${tag}`,
+    ...repo, release_id: release.id, name: `Home Climate ${tag}`,
     body: notes, draft: false, prerelease: false, make_latest: "true",
   })).data;
   core.info(`Published ${release.html_url}`);

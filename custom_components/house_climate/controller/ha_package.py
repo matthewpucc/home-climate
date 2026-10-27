@@ -29,12 +29,12 @@ def package(config: Config) -> dict:
     entity = config.entity
     result = {
         "input_boolean": {
-            f"{prefix}_enabled": {"name": "House Climate enabled", "initial": False},
-            f"{prefix}_heater_owned": {"name": "House Climate controller ownership"},
+            f"{prefix}_enabled": {"name": "Home Climate enabled", "initial": False},
+            f"{prefix}_heater_owned": {"name": "Home Climate controller ownership"},
         },
         "input_datetime": {f"{prefix}_heartbeat": {
-            "name": "House Climate heartbeat", "has_date": True, "has_time": True}},
-        "input_text": {f"{prefix}_status": {"name": "House Climate status", "max": 255}},
+            "name": "Home Climate heartbeat", "has_date": True, "has_time": True}},
+        "input_text": {f"{prefix}_status": {"name": "Home Climate status", "max": 255}},
     }
     if not config.heater_entity:
         return result
@@ -94,8 +94,8 @@ def package(config: Config) -> dict:
             {"action": "climate.set_hvac_mode", "target": {"entity_id": config.heater_entity},
              "data": {"hvac_mode": "off"}},
             {"action": "persistent_notification.create", "data": {
-                "notification_id": f"{prefix}_auxiliary_watchdog", "title": "House Climate auxiliary watchdog",
-                "message": "Auxiliary heater stopped: controller disabled, heartbeat expired, or external probes unsafe/unavailable. Check House Climate.",
+                "notification_id": f"{prefix}_auxiliary_watchdog", "title": "Home Climate auxiliary watchdog",
+                "message": "Auxiliary heater stopped: controller disabled, heartbeat expired, or external probes unsafe/unavailable. Check Home Climate.",
             }},
         ],
     }]
@@ -119,4 +119,4 @@ def write_dashboard(path: str, config: Config | None = None) -> None:
         entities += [config.entity("auxiliary_probe_safe", "binary_sensor"), config.entity("auxiliary_watchdog", "automation")]
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps({"type": "entities", "title": "House Climate", "entities": entities}, indent=2) + "\n")
+    destination.write_text(json.dumps({"type": "entities", "title": "Home Climate", "entities": entities}, indent=2) + "\n")

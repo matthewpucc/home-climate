@@ -12,7 +12,7 @@ for kind in ("local", "registry"):
     config = dict(metadata)
     if kind == "local":
         config.pop("image")
-    with tarfile.open(OUTPUT / f"house-climate-{kind}.tar.gz", "w:gz") as archive:
+    with tarfile.open(OUTPUT / f"home-climate-{kind}.tar.gz", "w:gz") as archive:
         payload = (json.dumps(config, indent=2) + "\n").encode()
         info = tarfile.TarInfo("house_climate/config.json")
         info.size, info.mode = len(payload), 0o644

@@ -1,4 +1,4 @@
-# House Climate
+# Home Climate
 
 A Home Assistant integration with a fixed operating policy for four heat-pump heads, room fans, and a battery-backed auxiliary heater. Operating rules live in source; actual device bindings stay in a private Home Assistant file. Setup has one live-command opt-in. Room climate cards still provide temporary temperature and range adjustments.
 
@@ -6,10 +6,12 @@ A Home Assistant integration with a fixed operating policy for four heat-pump he
 
 Use the [installation guide](docs/hacs.md) to add this repository to HACS as an **Integration**, or install the release ZIP.
 
-1. Place your private device map at `/config/house_climate_bindings.json` before installing or upgrading. [bindings.example.json](bindings.example.json) shows the schema with synthetic IDs.
+1. Place your private device map at `/config/home_climate_bindings.json` before installing or upgrading. [bindings.example.json](bindings.example.json) shows the schema with synthetic IDs.
 2. Install the integration and restart Home Assistant.
-3. Add **House Climate** under Settings → Devices & services, or let the existing entry migrate.
+3. Add **Home Climate** under Settings → Devices & services, or let the existing entry migrate.
 4. Leave live commands disabled to inspect plans, or opt in when ready; then turn on **Controller enabled**.
+
+Existing installs update in place. The old private filename `house_climate_bindings.json` still works; no file rename or entity reconfiguration is required.
 
 The controller starts disabled after an HA restart. When live commands are permitted, the living-room heater power guard remains active even while comfort control is disabled.
 
@@ -30,6 +32,8 @@ Schedules use America/Los_Angeles. All rooms retain the 66–75°F house bounds.
 Room control uses external ambient probes. Heat-pump readings remain available for equipment setpoint compensation, but cannot make a warm room appear cold. Living uses its assigned ambient probes rather than the heater's thermometer. A real cold-corner measurement remains valid without an invented calibration offset.
 
 The system makes comfort decisions every 90 seconds. Fifteen-second maintenance checks handle temperature cutoffs and acknowledgements. Five-minute acknowledged head runs and three-minute off periods reduce unnecessary cycling; protection and equipment recovery can override a run.
+
+A shared head checks every attached area before starting. Comfort-only restarts need 0.5°F of headroom from the opposing comfort edges. Confirmed/forecast house protection can override those soft preferences until the affected area recovers, while the opposing house cutoffs and hardware timing stay enforced. Plan and recovery entities identify the room and threshold responsible for a wait.
 
 See [operating rules](docs/control.md) and [wiring and dashboard controls](docs/configuration.md).
 

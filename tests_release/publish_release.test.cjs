@@ -8,14 +8,14 @@ const { test } = require("node:test");
 const publish = require("../scripts/publish_release.cjs");
 
 function fixture(t, { existing = null, tag = null, failUpload = false, lookupError = null, draftOnly = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "house-climate-release-"));
+  const root = mkdtempSync(join(tmpdir(), "home-climate-release-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   mkdirSync(join(root, "custom_components/house_climate"), { recursive: true });
   mkdirSync(join(root, "dist"));
   writeFileSync(join(root, "custom_components/house_climate/manifest.json"), '{"version":"0.4.2"}');
   writeFileSync(join(root, "CHANGELOG.md"), "# Changelog\n\n## 0.4.2\n\n- Current fix.\n\n## 0.4.1\n\n- Previous fix.\n");
-  const assets = ["house-climate-integration.zip", "house-climate-public-repository.zip",
-                  "house-climate-local.tar.gz", "house-climate-registry.tar.gz"];
+  const assets = ["home-climate-integration.zip", "home-climate-public-repository.zip",
+                  "home-climate-local.tar.gz", "home-climate-registry.tar.gz"];
   for (const name of assets) writeFileSync(join(root, "dist", name), "test archive");
   const calls = [];
   const notFound = () => { throw Object.assign(new Error("Not found"), { status: 404 }); };
@@ -62,8 +62,10 @@ test("publishes a checked commit only after uploading every bundle", async (t) =
   assert.equal(f.calls[0].args.ref, "refs/tags/v0.4.2");
   assert.equal(f.calls[1].args.body, "- Current fix.");
   assert.equal(f.calls[1].args.draft, true);
+  assert.equal(f.calls[1].args.name, "Home Climate v0.4.2");
   assert.deepEqual(f.calls.filter((c) => c.name === "upload").map((c) => c.args.name), f.assets);
   assert.equal(f.calls.at(-1).args.draft, false);
+  assert.equal(f.calls.at(-1).args.name, "Home Climate v0.4.2");
 });
 
 test("published releases stay unchanged on later commits with the same version", async (t) => {
@@ -79,7 +81,7 @@ test("failed uploads leave the release unpublished", async (t) => {
 });
 
 test("retrying the original run resumes its draft and replaces incomplete assets", async (t) => {
-  const f = fixture(t, { existing: { id: 42, draft: true, assets: [{ id: 1, name: "house-climate-integration.zip" }] }, tag: "a".repeat(40) });
+  const f = fixture(t, { existing: { id: 42, draft: true, assets: [{ id: 1, name: "home-climate-integration.zip" }] }, tag: "a".repeat(40) });
   await publish(f);
   assert.equal(f.calls[0].name, "delete");
   assert.equal(f.calls.at(-1).name, "publish");
@@ -93,7 +95,7 @@ test("an existing tag on a different commit is never moved", async (t) => {
 });
 
 test("missing bundles or notes stop publishing before mutations", async (t) => {
-  for (const missing of ["dist/house-climate-registry.tar.gz", "CHANGELOG.md"]) {
+  for (const missing of ["dist/home-climate-registry.tar.gz", "CHANGELOG.md"]) {
     const f = fixture(t);
     rmSync(join(f.root, missing));
     await assert.rejects(publish(f));

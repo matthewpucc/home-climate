@@ -6,9 +6,9 @@ from datetime import datetime, timezone
 
 from .config import Config
 from .ha import HAActivationDeferred, HAError
+from .head_guard import head_constraint
 from .policy import Plan, call_target_f, native_target
 from .sensors import from_f, to_f
-from .temperature_guard import opposite_limit_reached
 
 
 class ControlFault(RuntimeError):
@@ -415,6 +415,8 @@ class Executor:
             requested_mode = previous["requested_mode"]
         if reason is None:
             inhibition = plan.inhibited_heads.get(key) if plan else None
+            constraint = (getattr(plan, "head_constraints", {}).get(key, {}).get(requested_mode)
+                          if plan else None)
             if inhibition:
                 kind, reason = "safety", f"Off requested: {inhibition}"
             elif entity in self.recoveries:
@@ -422,6 +424,9 @@ class Executor:
             elif entity in self.capability_blocks:
                 block = self.capability_blocks[entity]
                 kind, reason = block.get("kind", "capability"), f"Off requested: {block['reason']}"
+            elif (constraint and constraint.get("reason")
+                  and (not self._shared_stop_context or self._shared_stop_context[0] == "no_demand")):
+                kind, reason = constraint.get("kind", "constraint"), f"Off requested: {constraint['reason']}"
             elif self._shared_stop_context:
                 kind, reason = self._shared_stop_context
             else:
@@ -490,6 +495,7 @@ class Executor:
         cycle = self.head_cycles[entity]
         observed = states.get(entity, {})
         if (key in getattr(plan, "inhibited_heads", {})
+                or getattr(plan, "head_constraints", {}).get(key, {}).get(self.direction)
                 or entity in self.pending or entity in self.recoveries
                 or entity in self.capability_blocks
                 or not self.ready(observed) or observed.get("state") != self.direction
@@ -523,14 +529,23 @@ class Executor:
                 if not all(math.isfinite(value) for value in
                            (low, high, lower, upper, temperature)):
                     return False
-                if opposite_limit_reached(reading, self.direction, self.config.low_f, self.config.high_f):
-                    return False
-                if self.direction == "cool" and temperature <= lower:
-                    return False
-                if self.direction == "heat" and temperature >= upper:
-                    return False
+                # Unbiased legacy calls retain their conservative minimum-run
+                # veto. Biased calls share policy/maintenance's house-priority
+                # and comfort rules, including fresh protection validation.
+                if getattr(self.config, f"head_{self.direction}_call_offset_f", 0) <= 0:
+                    if self.direction == "cool" and temperature <= lower:
+                        return False
+                    if self.direction == "heat" and temperature >= upper:
+                        return False
             except (KeyError, TypeError, ValueError):
                 return False
+        try:
+            if head_constraint(
+                    self.config, key, self.direction, plan.rooms, plan.room_targets,
+                    protection=getattr(plan, "head_protections", {}).get(key)):
+                return False
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
         return bool(names) and comfort_enabled
 
     def _retain_minimum_runs(self, plan, states, now):

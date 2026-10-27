@@ -6,7 +6,7 @@ import probatio as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
 
-from .const import DOMAIN
+from .const import DOMAIN, NAME
 from .house_policy import HOUSE_POLICY
 from .configuration import entry_configuration
 
@@ -39,7 +39,7 @@ class HouseClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors, detail = {"base": "invalid_config"}, str(exc)
             else:
                 return self.async_create_entry(
-                    title="House Climate", data={"policy": HOUSE_POLICY, "live": live})
+                    title=NAME, data={"policy": HOUSE_POLICY, "live": live})
         return self.async_show_form(
             step_id="user", data_schema=_schema(), errors=errors,
             description_placeholders={"detail": detail}, last_step=True)

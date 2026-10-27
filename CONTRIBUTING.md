@@ -16,6 +16,8 @@ The canonical controller is `custom_components/house_climate/controller/`. It is
 
 Keep behavior dependent on configuration, never on display names or particular manufacturers.
 
+The registered HA domain, storage keys, helper IDs, add-on slug, legacy configuration paths, and Python import package retain `house_climate` for upgrade compatibility. Use Home Climate in visible names and `home-climate` for new CLI commands. Keep the shared legacy process-lock path so mixed versions cannot control the same equipment concurrently.
+
 ## Checks
 
 Core (Python 3.11+):
@@ -23,8 +25,8 @@ Core (Python 3.11+):
 ```sh
 python -m pip install -e '.[test]'
 python -m unittest discover -s tests -v
-python -m house_climate --config config.example.toml check-config
-python -m house_climate --config config.example.toml demo
+home-climate --config config.example.toml check-config
+home-climate --config config.example.toml demo
 ```
 
 Native integration (Python 3.14):

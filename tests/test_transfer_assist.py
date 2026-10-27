@@ -81,7 +81,11 @@ class SharedHeadTransferTests(unittest.TestCase):
             with self.subTest(mode=mode, destination=destination):
                 self.setup_policy(self.with_third_shared_room())
                 plan = self.decide({"alpha": destination, "beta": source,
-                                    "gamma": 68, "delta": requester})
+                                    "gamma": 68, "delta": requester},
+                                   # Exercise fan assistance during an existing
+                                   # call, rather than a new start too close to
+                                   # another area's opposite comfort edge.
+                                   mutate=lambda data: data[self.cfg.heads["shared"]].update(state=mode))
                 self.assertEqual(plan.mode, mode)
                 self.assertIn("shared", plan.head_targets_f)
                 self.assertEqual(self.fan(plan), 0)

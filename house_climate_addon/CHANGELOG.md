@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.2
+
+- Prioritize house-temperature protection over another attached room's soft comfort preference, while preserving immediate raw/forecast opposing house cutoffs, missing-probe inhibition, and hardware acknowledgement/off timers.
+- Carry protective calls until the originating room returns to its target or safe interior, avoiding repeated starts and stops at the protection threshold.
+- Require 0.5°F of room headroom before comfort-only restarts and retain per-head comfort cutoffs across decision intervals. This is a restart deadband, not a guarantee of five-minute operation.
+- Explain the blocking room, measured temperature, comfort boundary, and protection override in plan/recovery states and structured diagnostics.
+
+- Rename the integration, add-on, device labels, logs, generated dashboards, release bundles, and documentation to Home Climate.
+- Refresh the old default integration title while preserving custom names, registered entities, settings, storage, and add-on identity.
+- Prefer private `home_climate_bindings.json` wiring and continue reading `house_climate_bindings.json` when the new file is absent. Both filenames stay excluded from public archives.
+- Add the `home-climate` command while retaining the previous command as a compatibility alias.
+
 ## 0.7.0
 
 - Replace the native room/schedule editor with a fixed operating policy and private device-role bindings. Keep one live-command opt-in and the existing dashboard temperature/range cards.

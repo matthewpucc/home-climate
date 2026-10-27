@@ -53,14 +53,14 @@ class CadenceTests(unittest.TestCase):
             executor.step(plan, ha.states(), stamp)
         self.assertEqual(ha.data[cfg.heads["shared"]]["state"], "cool")
         for stamp in range(1, 90):
-            plan = self.tick(stamp, gamma=74)
+            plan = self.tick(stamp, gamma=72.5)
             executor.step(plan, ha.states(), stamp)
             self.assertNotIn("second", plan.head_targets_f)
         self.assertEqual(self.policy.decide.call_count, 1)
         self.assertFalse(any(call[2].get("entity_id") == cfg.heads["second"] and
                              call[2].get("hvac_mode") == "cool" for call in ha.calls))
         self.assertEqual(self.cadence.status()["decision_remaining_seconds"], 1)
-        plan = self.tick(90, gamma=74)
+        plan = self.tick(90, gamma=72.5)
         self.assertEqual(self.policy.decide.call_count, 2)
         self.assertIn("second", plan.head_targets_f)
         self.assertEqual(self.cadence.status()["decision_interval_seconds"], 90)
@@ -73,7 +73,7 @@ class CadenceTests(unittest.TestCase):
         self.assertNotIn("shared", stopped.head_targets_f)
         self.assertNotIn("shared", stopped.head_call_targets_f)
         self.assertIn("opposite room comfort limit", stopped.inhibited_heads["shared"])
-        self.assertNotIn("shared", self.tick(30, alpha=74).head_targets_f)
+        self.assertNotIn("shared", self.tick(30, alpha=73).head_targets_f)
         self.assertEqual(self.policy.decide.call_count, 1)
         self.assertIn("shared", self.tick(90).head_targets_f)
 
@@ -92,7 +92,7 @@ class CadenceTests(unittest.TestCase):
     def test_biased_call_checks_every_attached_room_comfort_edge(self):
         raw = configuration()
         raw["rooms"]["beta"]["profile"] = {"target_f": 70, "half_band_f": .5}
-        self.setup_controller(raw, temperatures={"alpha": 74, "beta": 70, "gamma": 68},
+        self.setup_controller(raw, temperatures={"alpha": 73, "beta": 70, "gamma": 68},
                               head_cool_call_offset_f=5)
         self.assertIn("shared", self.tick(0).head_targets_f)
         stopped = self.tick(15, beta=69.5)
@@ -102,11 +102,12 @@ class CadenceTests(unittest.TestCase):
 
     def test_persistent_outlier_does_not_replace_median_comfort_feedback(self):
         raw = configuration()
-        raw["rooms"]["alpha"]["sensors"].append({"entity_id": "sensor.test_extra"})
+        raw["rooms"]["alpha"]["sensors"].extend(
+            {"entity_id": f"sensor.test_extra_{i}"} for i in range(3))
         self.setup_controller(raw, head_cool_call_offset_f=5)
         self.assertIn("shared", self.tick(0).head_targets_f)
-        # Two sources agree that the room is at target. A third source is cold
-        # enough to cross the comfort edge, but remains above the hard guard.
+        # Most sources agree that the room is at target. A persistent colder
+        # source crosses the comfort edge but remains above the hard guard.
         self.tick(10, alpha=72)
         probe = self.cfg.zones["alpha"].probes[0].entity_id
         self.data[probe]["state"] = "71"
@@ -119,7 +120,10 @@ class CadenceTests(unittest.TestCase):
         self.assertEqual(self.policy.decide.call_count, 1)
         # Raw global protection still acts immediately, even with that same
         # comfortable median and before the normal 90-second decision.
-        self.data[probe]["state"] = "66.2"
+        # A newly cold independent source exercises raw protection before
+        # positive outlier confirmation can request the opposite direction.
+        cold_probe = self.cfg.zones["alpha"].probes[-1].entity_id
+        self.data[cold_probe]["state"] = "66.2"
         stopped = self.tick(80)
         self.assertEqual(stopped.rooms["alpha"]["temperature"], 72)
         self.assertNotIn("shared", stopped.head_targets_f)
@@ -153,23 +157,28 @@ class CadenceTests(unittest.TestCase):
         self.assertEqual(self.policy.decide.call_count, 1)
         self.assertIn("shared", self.tick(90).head_targets_f)
 
-    def test_raw_opposite_limit_in_any_attached_zone_trims_without_redecision(self):
+    def test_new_opposing_house_protection_blocks_both_shared_directions(self):
         self.setup_controller()
         self.tick(0)
         blocked = self.tick(15, beta=66.2)
-        self.assertNotIn("shared", blocked.head_targets_f)
-        self.assertIn("opposite temperature limit", blocked.inhibited_heads["shared"])
-        self.assertEqual(self.policy.decide.call_count, 1)
+        # Confirmed cold-room protection can request heat immediately; the old
+        # cooling call is still ineligible and hardware sequencing stays separate.
+        # The other attached area is already hot enough to forbid heating,
+        # so neither direction is safe for this shared head.
+        self.assertEqual(blocked.mode, "off")
+        self.assertEqual(blocked.head_constraints["shared"]["cool"]["kind"], "house_limit")
+        self.assertEqual(blocked.head_constraints["shared"]["heat"]["kind"], "house_limit")
+        self.assertEqual(self.policy.decide.call_count, 2)
         self.assertNotIn("shared", self.tick(30, beta=71).head_targets_f)
-        self.assertIn("shared", self.tick(90).head_targets_f)
+        self.assertIn("shared", self.tick(105).head_targets_f)
 
     def test_heat_also_stops_at_raw_opposite_limit(self):
         self.setup_controller(temperatures={"alpha": 70, "beta": 71, "gamma": 68})
         self.assertEqual(self.tick(0).mode, "heat")
         stopped = self.tick(15, beta=74.8)
-        self.assertNotIn("shared", stopped.head_targets_f)
-        self.assertIn("heating blocked", stopped.inhibited_heads["shared"])
-        self.assertEqual(self.policy.decide.call_count, 1)
+        self.assertEqual(stopped.mode, "cool")
+        self.assertEqual(stopped.head_constraints["shared"]["heat"]["kind"], "house_limit")
+        self.assertEqual(self.policy.decide.call_count, 2)
 
     def test_lost_mode_capability_trims_only_that_head_and_latches(self):
         self.setup_controller(temperatures={"alpha": 74, "beta": 71, "gamma": 70})
@@ -192,38 +201,40 @@ class CadenceTests(unittest.TestCase):
 
     def test_auxiliary_heat_uses_fresh_comfort_cutoff_and_latches(self):
         self.setup_controller(self.auxiliary_config(),
-                              temperatures={"alpha": 67, "beta": 71, "gamma": 68})
+                              temperatures={"alpha": 67.2, "beta": 71, "gamma": 68})
         self.assertTrue(self.tick(0).heater_on)
         self.assertFalse(self.tick(15, alpha=69).heater_on)
-        self.assertFalse(self.tick(30, alpha=67).heater_on)
+        self.assertFalse(self.tick(30, alpha=67.2).heater_on)
         self.assertEqual(self.policy.decide.call_count, 1)
-        self.assertTrue(self.tick(90, alpha=67).heater_on)
+        self.assertTrue(self.tick(90, alpha=67.2).heater_on)
 
     def test_fast_auxiliary_cutoff_resets_thermostat_hysteresis(self):
         self.setup_controller(self.auxiliary_config(),
-                              temperatures={"alpha": 67, "beta": 71, "gamma": 68})
+                              temperatures={"alpha": 67.2, "beta": 71, "gamma": 68})
         self.assertTrue(self.tick(0).heater_on)
         self.assertFalse(self.tick(15, alpha=69).heater_on)
         # After the cutoff, a new full decision requires the low edge (67.5),
         # rather than carrying an old heating latch through a fresh safety stop.
         self.assertFalse(self.tick(90, alpha=68.2).heater_on)
-        self.assertTrue(self.tick(180, alpha=67).heater_on)
+        self.assertTrue(self.tick(180, alpha=67.2).heater_on)
 
     def test_missing_auxiliary_probes_stop_heat_and_do_not_restart_on_restore(self):
         self.setup_controller(self.auxiliary_config(),
-                              temperatures={"alpha": 67, "beta": 71, "gamma": 68})
+                              temperatures={"alpha": 67.2, "beta": 71, "gamma": 68})
         self.assertTrue(self.tick(0).heater_on)
         for probe in self.cfg.zones["alpha"].probes:
             self.data[probe.entity_id]["state"] = "unavailable"
         self.assertFalse(self.tick(15).heater_on)
-        self.assertFalse(self.tick(30, alpha=67).heater_on)
+        self.assertFalse(self.tick(30, alpha=67.2).heater_on)
         self.assertTrue(self.tick(90).heater_on)
 
     def test_auxiliary_fan_only_cold_guard_is_fast_and_latched(self):
         self.setup_controller(self.auxiliary_config(),
                               temperatures={"alpha": 70, "beta": 71, "gamma": 68})
         self.assertTrue(self.tick(0).auxiliary_fan_only)
-        self.assertFalse(self.tick(15, alpha=66.2).auxiliary_fan_only)
+        probe = self.cfg.zones["alpha"].probes[0].entity_id
+        self.data[probe]["state"] = "66.2"
+        self.assertFalse(self.tick(15).auxiliary_fan_only)
         self.assertFalse(self.tick(30, alpha=70).auxiliary_fan_only)
         self.assertEqual(self.policy.decide.call_count, 1)
         self.assertTrue(self.tick(90).auxiliary_fan_only)
@@ -231,16 +242,20 @@ class CadenceTests(unittest.TestCase):
     def test_circulation_stops_on_cold_or_missing_room_and_stays_off(self):
         for missing in (False, True):
             with self.subTest(missing=missing):
-                self.setup_controller()
+                self.setup_controller(temperatures={"alpha": 73, "beta": 71, "gamma": 68})
                 self.assertEqual(self.tick(0).fans["fan.test_airflow"], 60)
                 if missing:
                     for probe in self.cfg.zones["alpha"].probes:
                         self.data[probe.entity_id]["state"] = "unavailable"
                     stopped = self.tick(15)
                 else:
-                    stopped = self.tick(15, alpha=66.2)
+                    # One new outlier stops airflow before corroborated cold
+                    # evidence advances the slow comfort timer.
+                    probe = self.cfg.zones["alpha"].probes[0].entity_id
+                    self.data[probe]["state"] = "66.2"
+                    stopped = self.tick(15)
                 self.assertEqual(stopped.fans["fan.test_airflow"], 0)
-                self.assertEqual(self.tick(30, alpha=74).fans["fan.test_airflow"], 0)
+                self.assertEqual(self.tick(30, alpha=73).fans["fan.test_airflow"], 0)
                 self.assertEqual(self.policy.decide.call_count, 1)
                 self.assertEqual(self.tick(90).fans["fan.test_airflow"], 60)
 
@@ -294,7 +309,8 @@ class CadenceTests(unittest.TestCase):
 
     def test_fast_reader_confirmation_is_preserved_for_emergency_decision(self):
         raw = configuration()
-        raw["rooms"]["alpha"]["sensors"].append({"entity_id": "sensor.test_extra"})
+        raw["rooms"]["alpha"]["sensors"].extend(
+            {"entity_id": f"sensor.test_extra_{i}"} for i in range(3))
         self.setup_controller(raw, temperatures={"alpha": 72, "beta": 71, "gamma": 68})
         self.assertEqual(self.tick(0).mode, "off")
         probe = self.cfg.zones["alpha"].probes[0].entity_id

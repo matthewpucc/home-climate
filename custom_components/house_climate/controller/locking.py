@@ -11,6 +11,7 @@ def live_lock(path: Path | None = None):
         import fcntl
     except ImportError:
         raise RuntimeError("Live mode currently requires Linux/macOS process locking") from None
+    # Share the original lock with older processes during a branding upgrade.
     path = path or Path(tempfile.gettempdir()) / "house-climate-live.lock"
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:

@@ -1,10 +1,10 @@
 {
-  "title": "House Climate",
+  "title": "Home Climate",
   "config": {
     "step": {
       "user": {
-        "title": "House Climate",
-        "description": "Copy your private house_climate_bindings.json into Home Assistant's configuration directory before saving. Schedules, priorities, sensor choices, equipment limits, and recovery behavior follow the house operating rules. Use the room thermostat cards and desired-temperature controls for daily adjustments; holds last until the next schedule change. Live mode keeps the heater power guard active even when comfort control is stopped. Comfort control also requires the Controller enabled switch after startup.\n\n{detail}",
+        "title": "Home Climate",
+        "description": "Copy your private home_climate_bindings.json into Home Assistant's configuration directory before saving. Schedules, priorities, sensor choices, equipment limits, and recovery behavior follow the house operating rules. Use the room thermostat cards and desired-temperature controls for daily adjustments; holds last until the next schedule change. Live mode keeps the heater power guard active even when comfort control is stopped. Comfort control also requires the Controller enabled switch after startup.\n\n{detail}",
         "data": {
           "live": "Allow live equipment commands"
         },
@@ -23,8 +23,8 @@
   "options": {
     "step": {
       "init": {
-        "title": "House Climate",
-        "description": "Copy your private house_climate_bindings.json into Home Assistant's configuration directory before saving. Schedules, priorities, sensor choices, equipment limits, and recovery behavior follow the house operating rules. Use the room thermostat cards and desired-temperature controls for daily adjustments; holds last until the next schedule change. Live mode keeps the heater power guard active even when comfort control is stopped. Comfort control also requires the Controller enabled switch after startup.\n\n{detail}",
+        "title": "Home Climate",
+        "description": "Copy your private home_climate_bindings.json into Home Assistant's configuration directory before saving. Schedules, priorities, sensor choices, equipment limits, and recovery behavior follow the house operating rules. Use the room thermostat cards and desired-temperature controls for daily adjustments; holds last until the next schedule change. Live mode keeps the heater power guard active even when comfort control is stopped. Comfort control also requires the Controller enabled switch after startup.\n\n{detail}",
         "data": {
           "live": "Allow live equipment commands"
         },

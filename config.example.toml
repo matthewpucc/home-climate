@@ -1,5 +1,5 @@
 # Optional standalone/import example. Native HA users can configure everything
-# through Settings > Devices & services > House Climate > Configure.
+# through Settings > Devices & services > Home Climate > Configure.
 # All stored temperatures and deltas use Fahrenheit; HA forms use your local units.
 schema_version = 2
 timezone = "Etc/UTC"

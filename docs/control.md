@@ -12,9 +12,17 @@ The source thresholds reserve 1°F before the house bounds: stop heating by 74°
 
 The reserved margin responds to the observed room overshoot after a delayed Off. It is not a guarantee against arbitrary Wi-Fi outages, delayed probes, residual heat, or external loads.
 
+## Shared-area comfort and house protection
+
+A head serving several areas has to account for every attached area. Ordinary cooling stops at any area's lower comfort edge; ordinary heating stops at its upper edge. A comfort-only start or restart requires 0.5°F of headroom from those opposing edges. A cutoff remains latched across the 90-second decisions until that headroom returns, so a tiny rebound does not immediately start another short call. The margin reduces avoidable cycling; it cannot guarantee a five-minute run against changing loads or delayed measurements.
+
+House protection takes priority over these soft comfort preferences. Confirmed ambient extremes and the existing forecast can request cooling near 74°F or heating near 67°F, reserving room before the 75°F/66°F bounds. A protective call may continue past another area's soft comfort edge until its originating area returns to its target or safe interior. Raw and forecast opposing house cutoffs always remain in force. If one attached area is too hot while another is too cold to condition safely, the head stays off and reports that conflict.
+
+The same head eligibility rules apply to mode arbitration, fresh maintenance, and minimum-run retention. A protective call can bypass a comfort direction hold, but still requires device availability, acknowledged Off, settling, and hardware minimum off time. Room-card profile changes re-evaluate the current limits; they do not relax house protection.
+
 ## Timing and fan behavior
 
-Comfort decisions run every 90 seconds; maintenance runs every 15 seconds. An acknowledged head run normally lasts at least 5 minutes, and a stopped head waits 3 minutes before restarting. A run begins after both the mode and exact target are confirmed. Safety, missing measurements, direction changes, and recovery may stop it sooner.
+Comfort decisions run every 90 seconds; maintenance runs every 15 seconds. An acknowledged head run normally lasts at least 5 minutes, and a stopped head waits 3 minutes before restarting. A run begins after both the mode and exact target are confirmed. House protection, an opposing comfort boundary on ordinary calls, missing measurements, direction changes, and recovery may stop it sooner.
 
 Primary's purifier is 60% from 10 p.m.–5 a.m. and off otherwise. Guest circulation accompanies conditioning. Office and entertainment fans move the bonus head's air toward the office. The living Dyson may circulate without heat where the room plan calls for it.
 
@@ -40,7 +48,7 @@ The cutoff latch and restoration ownership persist through restart. Restoration 
 
 ## Visibility and stopping
 
-The device exposes room plans, controller/recovery status, current issues, last controller fault, and a separate heater-power-guard status. Local device warnings are distinct from controller faults.
+The device exposes room plans, controller/recovery status, current issues, last controller fault, and a separate heater-power-guard status. Local device warnings are distinct from controller faults. Shared-room constraints name the blocking room, current temperature, required headroom, and waiting request; protection overrides are identified separately. Full structured constraints remain available when a sensor state is shortened for HA's 255-character limit.
 
 Pausing comfort requests equipment Off and retains ownership until shutdown is confirmed. A settings save waits for cleanup before reloading. A Home Assistant unload also waits for ambiguous in-flight commands to become safe; it must not allow an old delayed activation to energize a heater after the guard has unloaded.
 

@@ -1,4 +1,4 @@
-"""Native Home Assistant lifecycle for the house climate controller."""
+"""Native Home Assistant lifecycle for the home climate controller."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -9,7 +9,7 @@ from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers.start import async_at_started
 
 from .configuration import generate_configuration, entry_configuration, validate_actuators
-from .const import CONF_LIVE, DOMAIN
+from .const import CONF_LIVE, DOMAIN, NAME
 from .runtime import ControllerRuntime
 
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.CLIMATE, Platform.NUMBER]
@@ -17,7 +17,7 @@ PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.CLIMATE
 
 async def async_setup_entry(hass, entry):
     if DOMAIN in hass.data:
-        raise ConfigEntryError("Another house climate controller is already loaded")
+        raise ConfigEntryError("Another home climate controller is already loaded")
     values = {**entry.data, **entry.options}
     live = values.get(CONF_LIVE, False)
     bindings = None
@@ -46,6 +46,9 @@ async def async_setup_entry(hass, entry):
                 recent = True
             if recent:
                 raise ConfigEntryNotReady("An existing controller lease is active; stop the add-on or standalone controller first")
+    # Refresh only the old default title; user-assigned titles remain theirs.
+    if getattr(entry, "title", None) in {"House Climate", "House climate", "House climate controller"}:
+        hass.config_entries.async_update_entry(entry, title=NAME)
     runtime = ControllerRuntime(
         hass, config, live, house_policy=values.get("policy") == "house",
         power_bindings=bindings.power if bindings is not None else None)
