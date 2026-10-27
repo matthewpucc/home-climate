@@ -8,6 +8,7 @@ from datetime import datetime
 from statistics import median
 
 from .config import Config, Probe
+from .protection_context import limits
 from .temperature_guard import STOP_MARGIN_F
 
 
@@ -96,7 +97,14 @@ class Sensors:
         self.conditioned: dict[str, str] = {}
         self.coasts: dict[str, Coast] = {}
 
-    def _forecast_context(self, rooms, states, now, targets, calls, head_requests):
+    def confirmation_deadline(self, now, monotonic_now):
+        """An existing outlier confirmation can change protection without a report."""
+        remaining = [self.config.sensor_confirmation_seconds - (now - since).total_seconds()
+                     for since in self.extremes.values()]
+        pending = [monotonic_now + seconds for seconds in remaining if seconds > 0]
+        return min(pending) if pending else None
+
+    def _forecast_context(self, rooms, states, now, targets, calls, head_requests, protection=None):
         """Do not project completed conditioning as ten more minutes of drift.
 
         Only a room's own observed conditioning request can establish this
@@ -132,8 +140,9 @@ class Sensors:
             if previous:
                 reached = room.temperature >= stops[previous] if previous == "heat" else room.temperature <= stops[previous]
                 future = forecast_extreme(room, previous, self.config.forecast_minutes)
-                reserve_needed = (future <= self.config.low_f + STOP_MARGIN_F if previous == "heat"
-                                  else future >= self.config.high_f - STOP_MARGIN_F)
+                low, high = limits(self.config, protection)
+                reserve_needed = (future <= low + STOP_MARGIN_F if previous == "heat"
+                                  else future >= high - STOP_MARGIN_F)
                 # Reaching a nominal target does not complete a call whose
                 # same-direction reserve evidence still requires conditioning.
                 # A subsequent unexplained Off must retain that recovery need.
@@ -166,7 +175,7 @@ class Sensors:
                                   post_stop_forecast=coast.stopped)
 
     def read(self, states: dict, now: datetime, climate_unit: str = "°F", *,
-             targets=None, calls=None, head_requests=None) -> tuple[dict[str, Reading], list[str]]:
+             targets=None, calls=None, head_requests=None, protection=None) -> tuple[dict[str, Reading], list[str]]:
         result, warnings = {}, []
         for name, zone in self.config.zones.items():
             label = zone.name or name
@@ -214,5 +223,5 @@ class Sensors:
             slope = max(-.1, min(.1, slope))
             result[name] = Reading(center, min(values.values()), max(values.values()), low, high, slope, len(values))
         if targets is not None and calls is not None:
-            self._forecast_context(result, states, now, targets, calls, head_requests or {})
+            self._forecast_context(result, states, now, targets, calls, head_requests or {}, protection)
         return result, warnings

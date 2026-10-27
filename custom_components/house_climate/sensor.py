@@ -407,7 +407,7 @@ class ControllerStatus(ControllerEntity):
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
                  "head_stop_reasons", "head_transition_history", "pending_head_commands", "head_constraints",
-                 "head_protections", "unavailable_mode_requests", "mode_scores") if key in status} | heartbeat_attributes(status)
+                 "head_protections", "unavailable_mode_requests", "mode_scores", "protection_context") if key in status} | heartbeat_attributes(status)
 
 
 class HeaterPowerStatus(ControllerEntity):
@@ -731,6 +731,10 @@ class RoomPlan(RoomEntity):
                    if config.heads[head] in status.get("pending_head_commands", {}) else {}),
                 **({"window": status["window_states"][self.room_id]}
                    if self.room_id in status.get("window_states", {}) else {}),
+                **({"window_effect": status["protection_context"]["window_effects"][self.room_id]}
+                   if self.room_id in status.get("protection_context", {}).get("window_effects", {}) else {}),
+                **({"protection_emergencies": status["protection_context"]["emergencies"][self.room_id]}
+                   if self.room_id in status.get("protection_context", {}).get("emergencies", {}) else {}),
                 **status.get("room_targets", {}).get(self.room_id, {})}
 
 

@@ -23,6 +23,7 @@ from custom_components.house_climate.controller.__main__ import preflight
 from custom_components.house_climate.controller.executor import Executor
 from custom_components.house_climate.controller.ha_package import watchdog_signature
 from custom_components.house_climate.controller.policy import Policy
+from custom_components.house_climate.controller.protection import ProtectionTemperatures
 from custom_components.house_climate.sensor import ControllerStatus
 from tests.test_controller import config, fixture, add_helpers
 
@@ -294,7 +295,8 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(form["data_schema"]({})["live"])
         result = await flow.async_step_user({"live": False})
         self.assertEqual(result["type"], "create_entry")
-        self.assertEqual(result["data"], {"policy": "house", "live": False})
+        self.assertEqual(result["data"], {"policy": "house", "live": False,
+                                          "protection": ProtectionTemperatures().to_dict()})
         self.assertFalse(hasattr(flow, "async_step_import_file"))
         flow._async_current_entries = Mock(return_value=[object()])
         self.assertEqual((await flow.async_step_user())["type"], "abort")

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 
 from .config import Config, Settings
@@ -11,7 +11,7 @@ from .policy import Plan, Policy
 from .sensors import Sensors
 from .temperature_guard import heating_cutoff_reached
 from .head_guard import protection_requested
-from .windows import WindowContacts
+from .protection_context import limits
 
 
 class DecisionCadence:
@@ -25,9 +25,9 @@ class DecisionCadence:
     def __init__(self, config: Config, policy=None, clock=None):
         self.config = config
         self.clock = clock or time.monotonic
-        self.policy = policy if policy is not None else Policy(config)
+        self.policy = policy if policy is not None else Policy(config, clock=self.clock)
         self.sensors = Sensors(config)
-        self.window_contacts = WindowContacts(config, clock=self.clock)
+        self.window_contacts = self.policy.operating.contacts
         self.cached_plan: Plan | None = None
         self.next_decision = 0.0
         self._signature = None
@@ -40,9 +40,9 @@ class DecisionCadence:
         return self.config.decision_interval_seconds
 
     def reset(self):
-        self.policy = Policy(self.config)
+        self.policy = Policy(self.config, clock=self.clock)
         self.sensors = Sensors(self.config)
-        self.window_contacts = WindowContacts(self.config, clock=self.clock)
+        self.window_contacts = self.policy.operating.contacts
         self.cached_plan = None
         self.next_decision = 0.0
         self._signature = None
@@ -65,9 +65,17 @@ class DecisionCadence:
                 if profile[key] is not None:
                     profile[key] = settings.value(profile[key])
             profiles.append((name, tuple(sorted(profile.items()))))
+        context = self.policy.context
+        effects = tuple(sorted((name, mode) for name, directions in context.window_effects.items()
+                               for mode, detail in directions.items() if detail.get("active")))
+        emergencies = tuple(sorted((name, mode, bool(detail.get("measured")))
+                                   for name, directions in context.emergencies.items()
+                                   for mode, detail in directions.items() if detail.get("active")))
+        protection = (context.low_f, context.high_f, context.outdoor_regime,
+                      context.tie_mode, context.preferred_emergency_mode, emergencies)
         return (tuple(profiles), tuple(sorted(settings.numbers.items())),
                 tuple(sorted((key, value.isoformat()) for key, value in settings.times.items())),
-                tuple(sorted(settings.toggles.items())))
+                tuple(sorted(settings.toggles.items())), effects, protection)
 
     def _warning(self, message):
         if message not in self._safety_warnings:
@@ -84,7 +92,10 @@ class DecisionCadence:
 
     def _trim(self, states, rooms, now, climate_unit="°F"):
         plan = self.cached_plan
-        low, high = self.config.low_f, self.config.high_f
+        low, high = limits(self.config, self.policy.context)
+        plan.window_states = self.policy.context.window_states
+        plan.protection_context = self.policy.context.as_dict()
+        plan.decision_valid_until_monotonic = self.policy.context.valid_until_monotonic
         guard = self.policy.head_guard
         guard.observe(rooms, plan.room_targets, states)
         for head, entity in self.config.heads.items():
@@ -197,11 +208,26 @@ class DecisionCadence:
 
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit="°F", *, monotonic_now=None):
         stamp = self.clock() if monotonic_now is None else monotonic_now
+        environment = self.policy.operating.environment(states, now, monotonic_now=stamp)
+        self.policy.context = environment
+        profiles = {name: settings.profile(room, now, self.config.timezone, name)
+                    for name, room in self.config.zones.items()}
+        self.policy._profiles = profiles
         bands = {name: self.policy.band(name, settings, now) for name in self.config.zones}
-        targets = {name: self.policy.stop_targets(band) for name, band in bands.items()}
+        targets = {name: self.policy.stop_targets(band, comfort_enabled=profiles[name].comfort_enabled)
+                   for name, band in bands.items()}
         rooms, sensor_warnings = self.sensors.read(states, now, climate_unit,
                                                   targets=targets, calls=self.policy.calls,
-                                                  head_requests=self.policy.head_requests)
+                                                  head_requests=self.policy.head_requests, protection=environment)
+        context = self.policy.operating.rooms(environment, states, rooms, bands, profiles, settings, now,
+                                             monotonic_now=stamp)
+        if context.enabled:
+            deadline = self.sensors.confirmation_deadline(now, stamp)
+            if deadline is not None:
+                current = context.valid_until_monotonic
+                context = replace(context, valid_until_monotonic=deadline if current is None else min(current, deadline))
+        self.policy.context = context
+        self.policy.head_guard.context = context
         # A queued forecast can become a genuine comfort/house demand between
         # slow decisions. Preserve that stronger provenance and its ordinary
         # target-reaching hysteresis if the original forecast later clears.
@@ -211,7 +237,7 @@ class DecisionCadence:
         signature = self._settings_signature(settings, now)
         emergencies = {(name, direction) for name, room in rooms.items()
                        for direction in ("heat", "cool")
-                       if protection_requested(self.config, room, direction)}
+                       if protection_requested(self.config, room, direction, context=context, name=name)}
         # Loss of a source is not evidence that its previous danger resolved.
         # Restore of that same known condition waits for the normal decision;
         # a newly dangerous valid reading still gets prompt protection priority.
@@ -223,7 +249,7 @@ class DecisionCadence:
             # In particular, persistent-outlier confirmation must not restart at
             # every slow decision or wait another interval after a safety breach.
             self.policy.sensors = deepcopy(self.sensors)
-            self.cached_plan = self.policy.decide(states, now, settings, climate_unit)
+            self.cached_plan = self.policy.decide(states, now, settings, climate_unit, context=context)
             self.next_decision = stamp + self.interval
             self._signature = signature
             self._decision_warnings = [warning for warning in self.cached_plan.warnings if warning not in sensor_warnings]
@@ -233,9 +259,9 @@ class DecisionCadence:
         self.policy.head_requests = {head: self.cached_plan.mode for head in self.cached_plan.head_targets_f}
         plan = deepcopy(self.cached_plan)
         plan.rooms = {name: asdict(room) for name, room in rooms.items()}
-        # Contact diagnostics advance on maintenance without changing comfort
-        # requests or starting a new conditioning decision.
-        plan.window_states = self.window_contacts.observe(states, now, monotonic_now=stamp)
+        plan.window_states = context.window_states
+        plan.protection_context = context.as_dict()
+        plan.decision_valid_until_monotonic = context.valid_until_monotonic
         from .recovery_inputs import signature
         plan.recovery_inputs = signature(self.config, states, now, settings, climate_unit)
         plan.warnings = list(dict.fromkeys(self._decision_warnings + sensor_warnings + self._safety_warnings))

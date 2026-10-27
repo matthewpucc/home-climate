@@ -179,6 +179,7 @@ class WindowContactTests(unittest.TestCase):
             for result in (reference, observed):
                 result.pop("window_states")
                 result.pop("recovery_inputs")
+                result.pop("decision_valid_until_monotonic")
             self.assertEqual(observed, reference)
 
     def test_window_never_suppresses_raw_shared_room_protection(self):

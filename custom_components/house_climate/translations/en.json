@@ -4,12 +4,30 @@
     "step": {
       "user": {
         "title": "Home Climate",
-        "description": "Copy your private home_climate_bindings.json into Home Assistant's configuration directory before saving. Schedules, priorities, sensor choices, equipment limits, and recovery behavior follow the house operating rules. Use the room thermostat cards and desired-temperature controls for daily adjustments; holds last until the next schedule change. Live mode keeps the heater power guard active even when comfort control is stopped. Comfort control also requires the Controller enabled switch after startup.\n\n{detail}",
+        "description": "Copy your private home_climate_bindings.json into Home Assistant's configuration directory before saving. Room schedules and comfort priorities follow the house rules. Protection settings are separate from thermostat comfort ranges and apply together when saved. Use room cards for temporary daily adjustments. Live mode permits the heater power guard even when comfort control is stopped. Comfort control also requires Controller enabled after startup.\n\n{detail}",
         "data": {
-          "live": "Allow live equipment commands"
+          "live": "Allow live equipment commands",
+          "normal_heating_floor_f": "Normal heating protection floor (\u00b0F)",
+          "freezing_heating_floor_f": "Heating floor in freezing weather (\u00b0F)",
+          "freezing_outdoor_below_f": "Outdoor reference temperature (\u00b0F)",
+          "emergency_cooling_at_f": "Cooling emergency threshold (\u00b0F)",
+          "release_hysteresis_f": "Protection release margin (\u00b0F)",
+          "transition_deadband_f": "Outdoor transition band (\u00b0F)",
+          "qualification_seconds": "Outdoor regime qualification (seconds)",
+          "boundary_tie_mode": "Boundary-regime emergency tie preference",
+          "unknown_outdoor_tie_mode": "Unknown-outdoor emergency tie preference"
         },
         "data_description": {
-          "live": "Off previews plans. On activates the heater power guard and permits comfort control when Controller enabled is on."
+          "live": "Off previews plans. On activates the heater power guard and permits comfort control when Controller enabled is on.",
+          "normal_heating_floor_f": "Heating protection threshold in the qualified normal outdoor regime. Room comfort targets stay separate.",
+          "freezing_heating_floor_f": "Heating protection threshold in the qualified freezing outdoor regime; also used conservatively when outdoor conditions are unknown.",
+          "freezing_outdoor_below_f": "The outdoor reference for selecting normal, freezing, and boundary regimes.",
+          "emergency_cooling_at_f": "A room at or above this temperature requests cooling protection regardless of comfort priority.",
+          "release_hysteresis_f": "Temperature recovery required inside the active protection threshold before releasing a protection request.",
+          "transition_deadband_f": "The outdoor band used when qualifying regime changes. It does not add a delay to indoor emergency checks.",
+          "qualification_seconds": "How long outdoor conditions must persist before a regime change. Indoor protection checks add no qualification delay.",
+          "boundary_tie_mode": "Preference for equally severe heating and cooling violations in the qualified boundary regime. Larger measured violations always win.",
+          "unknown_outdoor_tie_mode": "Preference for equally severe violations when no valid outdoor reading is available. Larger measured violations always win."
         }
       }
     },
@@ -24,12 +42,30 @@
     "step": {
       "init": {
         "title": "Home Climate",
-        "description": "Copy your private home_climate_bindings.json into Home Assistant's configuration directory before saving. Schedules, priorities, sensor choices, equipment limits, and recovery behavior follow the house operating rules. Use the room thermostat cards and desired-temperature controls for daily adjustments; holds last until the next schedule change. Live mode keeps the heater power guard active even when comfort control is stopped. Comfort control also requires the Controller enabled switch after startup.\n\n{detail}",
+        "description": "Copy your private home_climate_bindings.json into Home Assistant's configuration directory before saving. Room schedules and comfort priorities follow the house rules. Protection settings are separate from thermostat comfort ranges and apply together when saved. Use room cards for temporary daily adjustments. Live mode permits the heater power guard even when comfort control is stopped. Comfort control also requires Controller enabled after startup.\n\n{detail}",
         "data": {
-          "live": "Allow live equipment commands"
+          "live": "Allow live equipment commands",
+          "normal_heating_floor_f": "Normal heating protection floor (\u00b0F)",
+          "freezing_heating_floor_f": "Heating floor in freezing weather (\u00b0F)",
+          "freezing_outdoor_below_f": "Outdoor reference temperature (\u00b0F)",
+          "emergency_cooling_at_f": "Cooling emergency threshold (\u00b0F)",
+          "release_hysteresis_f": "Protection release margin (\u00b0F)",
+          "transition_deadband_f": "Outdoor transition band (\u00b0F)",
+          "qualification_seconds": "Outdoor regime qualification (seconds)",
+          "boundary_tie_mode": "Boundary-regime emergency tie preference",
+          "unknown_outdoor_tie_mode": "Unknown-outdoor emergency tie preference"
         },
         "data_description": {
-          "live": "Off previews plans. On activates the heater power guard and permits comfort control when Controller enabled is on."
+          "live": "Off previews plans. On activates the heater power guard and permits comfort control when Controller enabled is on.",
+          "normal_heating_floor_f": "Heating protection threshold in the qualified normal outdoor regime. Room comfort targets stay separate.",
+          "freezing_heating_floor_f": "Heating protection threshold in the qualified freezing outdoor regime; also used conservatively when outdoor conditions are unknown.",
+          "freezing_outdoor_below_f": "The outdoor reference for selecting normal, freezing, and boundary regimes.",
+          "emergency_cooling_at_f": "A room at or above this temperature requests cooling protection regardless of comfort priority.",
+          "release_hysteresis_f": "Temperature recovery required inside the active protection threshold before releasing a protection request.",
+          "transition_deadband_f": "The outdoor band used when qualifying regime changes. It does not add a delay to indoor emergency checks.",
+          "qualification_seconds": "How long outdoor conditions must persist before a regime change. Indoor protection checks add no qualification delay.",
+          "boundary_tie_mode": "Preference for equally severe heating and cooling violations in the qualified boundary regime. Larger measured violations always win.",
+          "unknown_outdoor_tie_mode": "Preference for equally severe violations when no valid outdoor reading is available. Larger measured violations always win."
         }
       }
     },

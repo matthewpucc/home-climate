@@ -8,6 +8,8 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
+from .config import Probe, parse_outdoor_probes
+
 BINDINGS_FILENAME = "home_climate_bindings.json"
 LEGACY_BINDINGS_FILENAME = "house_climate_bindings.json"
 HEAD_ROLES = frozenset({"bonus", "guest", "primary", "living"})
@@ -69,6 +71,7 @@ class HouseBindings:
     heater: str
     power: PowerBindings
     windows: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    outdoor: tuple[Probe, ...] = ()
 
     def __post_init__(self):
         if not all(isinstance(value, Mapping) for value in (self.heads, self.rooms, self.fans, self.windows)):
@@ -110,10 +113,14 @@ class HouseBindings:
         object.__setattr__(self, "rooms", MappingProxyType(rooms))
         object.__setattr__(self, "fans", MappingProxyType(fans))
         object.__setattr__(self, "windows", MappingProxyType(windows))
+        try:
+            object.__setattr__(self, "outdoor", parse_outdoor_probes(self.outdoor))
+        except (TypeError, ValueError) as exc:
+            raise BindingsError(str(exc)) from None
 
     @classmethod
     def from_dict(cls, raw):
-        _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings", optional={"windows"})
+        _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings", optional={"windows", "outdoor"})
         _keys(raw["heads"], HEAD_ROLES, "heads")
         _keys(raw["rooms"], ROOM_ROLES, "rooms")
         _keys(raw["fans"], FAN_ROLES, "fans")
@@ -128,7 +135,10 @@ class HouseBindings:
             if not isinstance(selected, list):
                 raise BindingsError(f"windows.{role} must list binary_sensor entity IDs")
         power = PowerBindings(heater=raw["heater"], **raw["power"])
-        return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power, windows)
+        outdoor = raw.get("outdoor", [])
+        if not isinstance(outdoor, list) or any(not isinstance(item, dict) for item in outdoor):
+            raise BindingsError("outdoor must list explicit current-temperature source objects")
+        return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power, windows, outdoor)
 
     def to_dict(self):
         power = asdict(self.power)
@@ -138,6 +148,11 @@ class HouseBindings:
                 "fans": dict(self.fans), "heater": self.heater, "power": power}
         if self.windows:
             result["windows"] = {role: list(entities) for role, entities in self.windows.items()}
+        if self.outdoor:
+            result["outdoor"] = [
+                {key: value for key, value in {"entity_id": probe.entity_id, "source": probe.source,
+                  "attribute": probe.attribute, "unit": probe.unit}.items() if value is not None}
+                for probe in self.outdoor]
         return result
 
 

@@ -36,8 +36,11 @@ def entry_configuration(config_dir, values, bindings=None):
     from .house_policy import HOUSE_POLICY, house_configuration, load_bindings
 
     if values.get("policy") == HOUSE_POLICY:
+        from .controller.protection import ProtectionTemperatures
+        protection = ProtectionTemperatures.from_dict(values["protection"]) if "protection" in values else ProtectionTemperatures()
         config = house_configuration(values.get("configuration"),
-                                     bindings if bindings is not None else load_bindings(config_dir))
+                                     bindings if bindings is not None else load_bindings(config_dir),
+                                     protection)
         config.validate(live=live)
         return config
     if "configuration" not in values:

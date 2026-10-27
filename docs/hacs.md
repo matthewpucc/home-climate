@@ -13,13 +13,13 @@ For manual installation, copy `custom_components/house_climate` from the release
 First place your private device map at `/config/home_climate_bindings.json`. Do this before upgrading an existing entry, too. A prepared map avoids retyping device IDs; the public `bindings.example.json` contains synthetic examples only.
 
 1. Open Settings → Devices & services → Add integration → **Home Climate**.
-2. Select whether device commands are allowed. Leaving this off gives a shadow preview with no writes.
+2. Select whether device commands are allowed and review the separate protection temperatures. Leaving live commands off gives a shadow preview with no writes.
 3. Inspect room climate cards and plan/status entities on the device page.
 4. When ready, turn on **Controller enabled**.
 
-The operating policy is fixed. Update the private bindings file when equipment entities change; update the source when operating rules change. There is no room/schedule editor.
+The comfort policy is fixed. Update the private bindings file when equipment entities change; update the source when schedules or comfort priorities change. There is no room/schedule editor.
 
-Configure contains only the live-command opt-in. Room temperature/range changes belong on the dashboard cards and hold until the next schedule change. Upgrades preserve existing entity identities and compatible temporary holds.
+Configure contains the live-command opt-in and separate [protection settings](protection-temperatures.md). Room temperature/range changes belong on the dashboard cards and hold until the next schedule change. Upgrades preserve existing entity identities and compatible temporary holds.
 
 The living-room heater power guard is independent of the comfort switch once live commands are permitted. It can cut a manually operated heater for overload, low battery, or missing safety telemetry. It never switches network equipment or the Elite's overall AC output.
 

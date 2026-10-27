@@ -9,6 +9,7 @@ import re
 
 from .config import Config
 from .bindings import BindingsError, HouseBindings, ROOM_ROLES
+from .protection import ProtectionTemperatures
 
 HOUSE_POLICY = "house"
 HOUSE_TIMEZONE = "America/Los_Angeles"
@@ -60,9 +61,12 @@ def room_identities(previous=None, bindings=None):
     return identities
 
 
-def house_configuration(previous=None, bindings=None):
+def house_configuration(previous=None, bindings=None, protection=None):
     """Return fresh, validated fixed rules; previous tuning cannot override them."""
     bindings = _bindings(bindings)
+    protection = ProtectionTemperatures() if protection is None else protection
+    if not isinstance(protection, ProtectionTemperatures):
+        protection = ProtectionTemperatures.from_dict(protection)
     identities = room_identities(previous, bindings)
     previous_rooms = previous.get("rooms", {}) if isinstance(previous, dict) else {}
     if not isinstance(previous_rooms, dict):
@@ -123,6 +127,11 @@ def house_configuration(previous=None, bindings=None):
         "schema_version": 2, "timezone": HOUSE_TIMEZONE,
         "helper_prefix": "house_climate", "heads": dict(bindings.heads), "rooms": rooms,
         "low_f": 66, "high_f": 75,
+        "protection": protection.to_dict(),
+        "outdoor_probes": [{key: value for key, value in {
+            "entity_id": probe.entity_id, "source": probe.source,
+            "attribute": probe.attribute, "unit": probe.unit}.items() if value is not None}
+            for probe in bindings.outdoor],
         "poll_seconds": 15, "decision_interval_seconds": 90,
         "head_minimum_run_seconds": 300, "head_minimum_off_seconds": 180,
         "head_activation_timeout_seconds": 120,

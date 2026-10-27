@@ -1,4 +1,4 @@
-"""New setup is one opt-in form, with no nested drafts or advanced menus."""
+"""Setup saves permission and protection together, without nested drafts."""
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -12,6 +12,7 @@ from homeassistant.helpers import config_validation as cv
 
 from custom_components.house_climate.config_flow import HouseClimateConfigFlow, HouseClimateOptionsFlow
 from custom_components.house_climate.controller.bindings import BINDINGS_FILENAME, example_bindings
+from custom_components.house_climate.controller.protection import ProtectionTemperatures
 from tests_homeassistant import test_native as fixtures
 
 
@@ -57,15 +58,17 @@ class FixedFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await manager.async_init("house_climate", context={"source": "user"})
         return manager, result, entry
 
-    async def test_real_setup_serializes_only_live_opt_in_and_saves_in_one_step(self):
+    async def test_real_setup_serializes_atomic_settings_and_saves_in_one_step(self):
         manager, form, _ = await self.start()
         fields = probatio.to_field_list(form["data_schema"], custom_serializer=cv.custom_serializer)
-        self.assertEqual([field["name"] for field in fields], ["live"])
+        self.assertEqual([field["name"] for field in fields],
+                         ["live", *ProtectionTemperatures().to_dict()])
         self.assertEqual(form["step_id"], "user")
         self.assertFalse(form["data_schema"]({})["live"])
         saved = await manager.async_configure(form["flow_id"], {"live": False})
         self.assertEqual(saved["type"], "create_entry")
-        self.assertEqual(saved["data"], {"policy": "house", "live": False})
+        self.assertEqual(saved["data"], {"policy": "house", "live": False,
+                                         "protection": ProtectionTemperatures().to_dict()})
         self.assertEqual(self.calls, [])
 
     async def test_options_use_latest_live_permission_and_save_no_tuning(self):
@@ -74,7 +77,8 @@ class FixedFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(form["step_id"], "init")
         self.assertTrue(form["data_schema"]({})["live"])
         saved = await manager.async_configure(form["flow_id"], {"live": False})
-        self.assertEqual(saved["data"], {"policy": "house", "live": False})
+        self.assertEqual(saved["data"], {"policy": "house", "live": False,
+                                         "protection": ProtectionTemperatures().to_dict()})
         self.assertEqual(entry.options, {"live": True})
         self.assertEqual(self.calls, [])
 
