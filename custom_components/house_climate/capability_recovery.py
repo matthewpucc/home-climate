@@ -9,12 +9,14 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import logging
+import math
 import time
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import entity_registry as er
 
 from .capabilities import CapabilityEvidence
+from .controller.protection_context import emergency_magnitudes
 
 _LOGGER = logging.getLogger(__name__)
 RECHECK_SECONDS = 60
@@ -105,6 +107,14 @@ class CapabilityRecovery:
             if selected in ("heat", "cool"):
                 if selected == mode:
                     return True
+                context = self.status.get("protection_context") or {}
+                if context.get("enabled") and request.get("emergency"):
+                    opposing = "cool" if mode == "heat" else "heat"
+                    other = emergency_magnitudes(context).get(opposing)
+                    amount = float(request.get("violation_f", 0))
+                    if (other is None or amount > other
+                            or amount == other and mode == context.get("tie_mode", "heat")):
+                        return True
             else:
                 return True
         return False
@@ -139,6 +149,11 @@ class CapabilityRecovery:
         return signature(config, states, now, settings, self.hass.config.units.temperature_unit)
 
     def fresh_inputs(self):
+        deadline = self.status.get("decision_valid_until_monotonic")
+        if deadline is not None:
+            if (isinstance(deadline, bool) or not isinstance(deadline, (int, float))
+                    or not math.isfinite(deadline) or time.monotonic() >= deadline):
+                return False
         marker = self.status.get("recovery_inputs")
         return bool(marker and marker == self.input_signature())
 

@@ -126,6 +126,9 @@ class RoomComfort:
             "timezone": self._timezone, "limits": [config.low_f, config.high_f],
             "auxiliary_cutoff": config.heater_cutoff_f if room_id == config.auxiliary_room else None,
         }
+        # Contact wiring does not change the room's thermostat hold or identity.
+        # Preserve fingerprints written before optional windows existed, too.
+        data["room"].pop("windows", None)
         # Preserve fingerprints stored before report-on-change probes existed.
         for probe in data["room"]["probes"]:
             if not probe.get("report_on_change", False):

@@ -6,6 +6,7 @@ import math
 
 from .temperature_guard import STOP_MARGIN_F, opposite_limit_reached, projected_extreme
 from .sensors import forecast_extreme
+from .protection_context import emergency, initial_context, limits, soft_yield, value
 
 COMFORT_REARM_F = .5
 
@@ -18,21 +19,28 @@ def _names(config, head):
     return [name for name, room in config.zones.items() if room.head == head]
 
 
-def protection_requested(config, reading, mode):
+def protection_requested(config, reading, mode, *, context=None, name=None):
     """Positive calls use corroborated extremes and worsening-only forecasts."""
     if mode not in ("heat", "cool"):
         return False
     future = forecast_extreme(reading, mode, config.forecast_minutes)
+    low, high = limits(config, context)
+    if name is not None and emergency(context, name, mode).get("active"):
+        return True
     if mode == "cool":
         extreme = float(_value(reading, "confirmed_high"))
-        return max(extreme, future) >= config.high_f - STOP_MARGIN_F
+        return max(extreme, future) >= high - STOP_MARGIN_F
     if mode == "heat":
         extreme = float(_value(reading, "confirmed_low"))
-        return min(extreme, future) <= config.low_f + STOP_MARGIN_F
+        return min(extreme, future) <= low + STOP_MARGIN_F
     return False
 
 
-def _release_target(config, mode, target):
+def _release_target(config, mode, target, context=None):
+    low, high = limits(config, context)
+    if value(context, "enabled", False):
+        margin = value(context, "release_hysteresis_f", 1)
+        return high - margin if mode == "cool" else low + margin
     if (not target.get("comfort_enabled", True)
             or (mode == "cool" and float(target["high_f"]) >= config.high_f)
             or (mode == "heat" and float(target["low_f"]) <= config.low_f)):
@@ -41,7 +49,7 @@ def _release_target(config, mode, target):
     return min(desired, config.high_f - 1.5) if mode == "cool" else max(desired, config.low_f + 1.5)
 
 
-def active_protection(config, head, mode, rooms, room_targets, protection):
+def active_protection(config, head, mode, rooms, room_targets, protection, *, context=None):
     """Revalidate a plan's origins using fresh readings, including executor maps."""
     if not protection or protection.get("mode") != mode:
         return None
@@ -53,13 +61,17 @@ def active_protection(config, head, mode, rooms, room_targets, protection):
         reading, target = rooms[name], room_targets[name]
         try:
             temperature = float(_value(reading, "temperature"))
-            release = _release_target(config, mode, target)
+            release = _release_target(config, mode, target, context)
             if not math.isfinite(temperature) or not math.isfinite(release):
                 continue
             needs = temperature > release if mode == "cool" else temperature < release
             started = (name in protection["started_rooms"]
                        if "started_rooms" in protection else True)
-            if (needs and started) or protection_requested(config, reading, mode):
+            requested = protection_requested(config, reading, mode, context=context, name=name)
+            # Explicit protection has its own release hysteresis. Finishing an
+            # ordinary comfort target must not keep emergency priority latched.
+            retain_target = needs and started and not value(context, "enabled", False)
+            if retain_target or requested:
                 origins.append(name)
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
@@ -68,6 +80,11 @@ def active_protection(config, head, mode, rooms, room_targets, protection):
     labels = ", ".join(config.zones[name].name or name for name in origins)
     result = {"mode": mode, "rooms": sorted(set(origins)),
               "reason": f"{mode.title()} for {labels} house protection; soft comfort limits may yield"}
+    if value(context, "enabled", False):
+        urgent = any(emergency(context, name, mode).get("active") for name in origins)
+        result["kind"] = "emergency" if urgent else "reserve"
+        description = "emergency protection" if urgent else "preventive protection reserve"
+        result["reason"] = f"{mode.title()} for {labels} {description}; soft comfort limits may yield"
     if "started_rooms" in protection:
         result["started_rooms"] = sorted(set(protection["started_rooms"]) & set(origins))
     return result
@@ -79,11 +96,12 @@ def _detail(config, name, mode, kind, temperature, boundary, required, reason):
             "required_f": required, "reason": reason}
 
 
-def head_constraint(config, head, mode, rooms, room_targets, *, protection=None, rearm=False):
+def head_constraint(config, head, mode, rooms, room_targets, *, protection=None, rearm=False, context=None):
     """One continuation/start check; protection never overrides missing/raw limits."""
     if mode not in ("heat", "cool"):
         return None
     names = _names(config, head)
+    low, high = limits(config, context)
     for name in names:
         label = config.zones[name].name or name
         if name not in rooms or name not in room_targets:
@@ -91,8 +109,8 @@ def head_constraint(config, head, mode, rooms, room_targets, *, protection=None,
                            f"{label}: temperature unavailable in an attached room")
         reading = rooms[name]
         try:
-            if opposite_limit_reached(reading, mode, config.low_f, config.high_f):
-                boundary = config.low_f + STOP_MARGIN_F if mode == "cool" else config.high_f - STOP_MARGIN_F
+            if opposite_limit_reached(reading, mode, low, high):
+                boundary = low + STOP_MARGIN_F if mode == "cool" else high - STOP_MARGIN_F
                 extreme = float(_value(reading, "low" if mode == "cool" else "high"))
                 detail = _detail(config, name, mode, "house_limit", extreme, boundary, None,
                                 f"{label}: {mode} blocked by opposite temperature limit "
@@ -102,7 +120,7 @@ def head_constraint(config, head, mode, rooms, room_targets, *, protection=None,
         except (KeyError, TypeError, ValueError, OverflowError):
             return _detail(config, name, mode, "missing", None, None, None,
                            f"{label}: invalid temperature in an attached room")
-    if active_protection(config, head, mode, rooms, room_targets, protection):
+    if active_protection(config, head, mode, rooms, room_targets, protection, context=context):
         return None
     # Legacy calls without deliberate thermostat bias keep their slow comfort
     # behavior. Raw house protections above remain unconditional.
@@ -111,6 +129,8 @@ def head_constraint(config, head, mode, rooms, room_targets, *, protection=None,
     for name in names:
         target = room_targets[name]
         if not target.get("comfort_enabled", True):
+            continue
+        if soft_yield(context, name, mode):
             continue
         label = config.zones[name].name or name
         try:
@@ -142,6 +162,7 @@ class HeadGuard:
         self.config = config
         self.cutoffs = set()
         self.protections = {}
+        self.context = initial_context(config)
 
     def observe(self, rooms, targets, states=None):
         for head in self.config.heads:
@@ -154,10 +175,11 @@ class HeadGuard:
                     if states.get(self.config.heads[head], {}).get("state") == mode:
                         started.update(previous["rooms"])
                     previous = dict(previous, started_rooms=sorted(started))
-                current = active_protection(self.config, head, mode, rooms, targets, previous)
+                current = active_protection(self.config, head, mode, rooms, targets, previous, context=self.context)
                 origins = set(current["rooms"] if current else ())
                 for name in names:
-                    if name in rooms and protection_requested(self.config, rooms[name], mode):
+                    if name in rooms and protection_requested(self.config, rooms[name], mode,
+                                                              context=self.context, name=name):
                         origins.add(name)
                 proposed = {"mode": mode, "rooms": sorted(origins)}
                 if states is not None:
@@ -165,26 +187,26 @@ class HeadGuard:
                     if states.get(self.config.heads[head], {}).get("state") == mode:
                         started.update(origins)
                     proposed["started_rooms"] = sorted(started)
-                protection = active_protection(self.config, head, mode, rooms, targets, proposed)
+                protection = active_protection(self.config, head, mode, rooms, targets, proposed, context=self.context)
                 if protection:
                     self.protections[key] = protection
                 else:
                     self.protections.pop(key, None)
                 # Record soft-edge contact even if no current request exists:
                 # the previous call can finish at target on this same tick.
-                soft = head_constraint(self.config, head, mode, rooms, targets)
+                soft = head_constraint(self.config, head, mode, rooms, targets, context=self.context)
                 if soft and soft["kind"] == "comfort_limit":
                     self.cutoffs.add(key)
                 if key in self.cutoffs and not head_constraint(
-                        self.config, head, mode, rooms, targets, rearm=True):
+                        self.config, head, mode, rooms, targets, rearm=True, context=self.context):
                     self.cutoffs.discard(key)
 
     def protection(self, head, mode, rooms, targets):
         return active_protection(self.config, head, mode, rooms, targets,
-                                 self.protections.get((head, mode)))
+                                 self.protections.get((head, mode)), context=self.context)
 
     def constraint(self, head, mode, rooms, targets, states):
         current = states.get(self.config.heads[head], {}).get("state")
         return head_constraint(self.config, head, mode, rooms, targets,
                                protection=self.protection(head, mode, rooms, targets),
-                               rearm=(head, mode) in self.cutoffs or current != mode)
+                               rearm=(head, mode) in self.cutoffs or current != mode, context=self.context)

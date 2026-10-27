@@ -3,9 +3,14 @@ import json
 from pathlib import Path
 import unittest
 
+import probatio
+from homeassistant.helpers import config_validation as cv
+
 from custom_components.house_climate.configuration import entry_configuration
+from custom_components.house_climate.config_flow import _schema
 from custom_components.house_climate.house_policy import house_configuration
 from custom_components.house_climate.controller.bindings import example_bindings
+from custom_components.house_climate.controller.protection import ProtectionTemperatures
 
 
 class FixedHeartbeatTests(unittest.TestCase):
@@ -33,10 +38,13 @@ class FixedHeartbeatTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1] / "custom_components/house_climate"
         strings = json.loads((root / "strings.json").read_text())
         self.assertEqual(strings, json.loads((root / "translations/en.json").read_text()))
+        actual = {field["name"] for field in probatio.to_field_list(_schema(), custom_serializer=cv.custom_serializer)}
+        self.assertEqual(actual, {"live", *ProtectionTemperatures().to_dict()})
         for section, step in (("config", "user"), ("options", "init")):
             self.assertEqual(set(strings[section]["step"]), {step})
-            self.assertEqual(set(strings[section]["step"][step]["data"]), {"live"})
-            self.assertIn("thermostat cards", strings[section]["step"][step]["description"])
+            self.assertEqual(set(strings[section]["step"][step]["data"]), actual)
+            self.assertIn("room cards", strings[section]["step"][step]["description"])
+            self.assertIn("Protection settings are separate", strings[section]["step"][step]["description"])
 
 
 if __name__ == "__main__":

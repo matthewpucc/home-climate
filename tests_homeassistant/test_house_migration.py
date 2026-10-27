@@ -16,6 +16,7 @@ from custom_components.house_climate.controls import NativeControls
 from custom_components.house_climate.controller.config import Config
 from custom_components.house_climate.controller.bindings import example_bindings
 from custom_components.house_climate.controller.ha import HAActivationDeferred
+from custom_components.house_climate.controller.protection import ProtectionTemperatures
 from custom_components.house_climate.house_policy import house_configuration
 from tests_homeassistant import test_native as fixtures
 from tests_homeassistant import test_native_controls as native
@@ -159,7 +160,8 @@ class HouseEntryMigrationTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                     manager = EditorManager(self.hass, HouseClimateOptionsFlow())
                     form = await manager.async_init(DOMAIN, context={"source": "user"})
                     result = await manager.async_configure(form["flow_id"], {"live": True})
-                self.assertEqual(result["data"], {"policy": "house", "live": True})
+                self.assertEqual(result["data"], {"policy": "house", "live": True,
+                                                "protection": ProtectionTemperatures().to_dict()})
                 entry.options = result["data"]
                 reloaded = entry_configuration(self.directory.name, {**entry.data, **entry.options})
                 self.assertIn(room_id, reloaded.zones)

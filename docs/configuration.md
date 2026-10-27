@@ -1,6 +1,6 @@
 # Wiring and everyday controls
 
-Native Home Climate uses a fixed house policy. Setup and Configure expose only **Allow live commands**. The **Controller enabled** device switch starts or pauses comfort control; a restart leaves it disabled. There is no room/schedule editor to work through.
+Native Home Climate uses a fixed comfort policy. Setup and Configure expose **Allow live commands** and separate, atomically validated [protection temperatures](protection-temperatures.md). The **Controller enabled** device switch starts or pauses comfort control; a restart leaves it disabled. There is no room/schedule editor to work through.
 
 ## Room cards
 
@@ -30,7 +30,7 @@ Electrical thresholds live in `custom_components/house_climate/power_guard.py`. 
 
 Copy the prepared private file to `/config/home_climate_bindings.json` **before** upgrading. New installations can use `bindings.example.json` as a schema example; every example ID is synthetic.
 
-The file has exactly five top-level sections: `heads`, `rooms`, `fans`, `heater`, and `power`. It accepts entity IDs only. Unknown fields, rule overrides, missing roles, and invalid domains are rejected. Missing private bindings fail closed rather than selecting guessed equipment.
+The file requires five top-level sections: `heads`, `rooms`, `fans`, `heater`, and `power`. Optional `windows` and `outdoor` sections wire contact sensors and explicit outdoor temperature sources; see [window contacts](window-contacts.md) and [protection temperatures](protection-temperatures.md). Wiring descriptors contain entity IDs and source metadata, not operating-rule overrides. Unknown fields, missing required roles, and invalid domains are rejected. Missing private bindings fail closed rather than selecting guessed equipment.
 
 Existing `house_climate_bindings.json` files are accepted when the new filename is absent. When both exist, `home_climate_bindings.json` is authoritative; invalid or unreadable new wiring does not fall back to different equipment.
 

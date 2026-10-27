@@ -10,6 +10,8 @@ from datetime import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from .protection import ProtectionTemperatures
+
 # Kept as import aliases for version-1 configuration and its migration tests.
 from .legacy import LOW, HIGH, NUMBERS, TIMES, TOGGLES, helper
 
@@ -33,6 +35,41 @@ class Probe:
     unit: str | None = None
     offset_f: float = 0
     report_on_change: bool = False
+
+
+def parse_outdoor_probes(value):
+    """Explicit current-temperature source wiring, with no rule overrides."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Outdoor sources must be a list of explicit source objects")
+    result, entities = [], set()
+    for selected in value:
+        if isinstance(selected, Probe):
+            probe = selected
+        else:
+            if (not isinstance(selected, dict) or not {"entity_id", "source"} <= set(selected)
+                    or set(selected) - {"entity_id", "source", "attribute", "unit"}):
+                raise ValueError("Outdoor sources require entity_id/source and optional attribute/unit")
+            probe = Probe(**selected)
+        if (not isinstance(probe.entity_id, str)
+                or not re.fullmatch(r"(?:sensor|weather)\.[a-z0-9_]+", probe.entity_id)):
+            raise ValueError("Outdoor sources must use sensor or weather entity IDs")
+        if not isinstance(probe.source, str) or not probe.source.strip():
+            raise ValueError("Outdoor sources need an explicit physical source identity")
+        if (probe.attribute is not None and (not isinstance(probe.attribute, str)
+                or not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", probe.attribute))):
+            raise ValueError("Outdoor source attributes must name one current numeric attribute")
+        if probe.entity_id.startswith("weather.") and probe.attribute not in (None, "temperature"):
+            raise ValueError("Weather sources must use the current temperature attribute")
+        if probe.unit not in (None, "°F", "F", "°C", "C"):
+            raise ValueError("Outdoor source units must be Fahrenheit or Celsius")
+        if probe.offset_f != 0 or probe.report_on_change is not False:
+            raise ValueError("Outdoor wiring cannot override calibration or freshness rules")
+        if probe.entity_id in entities:
+            raise ValueError("Duplicate outdoor entity; aliases must use different entities and the same source")
+        entities.add(probe.entity_id)
+        # Whitespace must not make aliases of one source look independent.
+        result.append(Probe(probe.entity_id, probe.source.strip(), probe.attribute, probe.unit))
+    return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -63,6 +100,12 @@ class Zone:
     area_id: str | None = None
     profile: Profile = field(default_factory=Profile)
     schedules: tuple[Period, ...] = ()
+    windows: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not isinstance(self.windows, (list, tuple)):
+            raise ValueError("Room windows must list binary_sensor entity IDs")
+        object.__setattr__(self, "windows", tuple(self.windows))
 
 
 @dataclass(frozen=True)
@@ -110,6 +153,13 @@ class Config:
     heater_high_setpoint_f: float = 86
     heater_setpoint_confirmed: bool = False
     heater_cutoff_f: float = 70
+    protection: ProtectionTemperatures | None = None
+    outdoor_probes: tuple[Probe, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "outdoor_probes", parse_outdoor_probes(self.outdoor_probes))
+        if self.protection is not None and not isinstance(self.protection, ProtectionTemperatures):
+            raise ValueError("Protection must be a ProtectionTemperatures object or absent")
 
     def entity(self, name, domain="input_boolean"):
         if self.legacy:
@@ -135,6 +185,10 @@ class Config:
             return result
         if raw.pop("schema_version", None) != 2:
             raise ValueError("Unsupported configuration version; expected schema_version = 2")
+        protection = raw.pop("protection", None)
+        if protection is not None:
+            protection = ProtectionTemperatures.from_dict(protection)
+        outdoor = parse_outdoor_probes(raw.pop("outdoor_probes", ()))
         zones, fans, controls = {}, {}, {}
         for key, value in raw.pop("rooms", {}).items():
             value = dict(value)
@@ -152,7 +206,8 @@ class Config:
                 fans[fan.entity_id] = fan.entity_id
                 controls[fan.entity_id] = fan
             zones[key] = Zone(probes=probes, profile=profile, schedules=tuple(periods), **value)
-        result = cls(zones=zones, fans=fans, fan_controls=controls, **raw)
+        result = cls(zones=zones, fans=fans, fan_controls=controls,
+                     protection=protection, outdoor_probes=outdoor, **raw)
         result.validate()
         return result
 
@@ -160,6 +215,13 @@ class Config:
         settings = settings or Settings.read({}, self)
         result = {key: value for key, value in asdict(self).items()
                   if key not in ("zones", "fans", "fan_controls", "legacy")}
+        if self.outdoor_probes:
+            result["outdoor_probes"] = [
+                {key: value for key, value in {"entity_id": probe.entity_id, "source": probe.source,
+                  "attribute": probe.attribute, "unit": probe.unit}.items() if value is not None}
+                for probe in self.outdoor_probes]
+        else:
+            result.pop("outdoor_probes", None)
         if self.legacy:
             result["mode_hold_seconds"] = settings["mode_hold_minutes"] * 60
             result["auxiliary_fan_enabled"] = settings.toggles["auxiliary_fan_enabled"]
@@ -177,6 +239,8 @@ class Config:
                     "profile": profile_data(room.profile), "schedules": [], "fans": []}
             if room.area_id:
                 data["area_id"] = room.area_id
+            if room.windows:
+                data["windows"] = list(room.windows)
             for period in room.schedules:
                 data["schedules"].append({"start": settings.clock(period.start).isoformat(),
                     "end": settings.clock(period.end).isoformat(), "name": period.name, **profile_data(period.profile)})
@@ -220,6 +284,11 @@ class Config:
                 raise ValueError(f"Configure temperature probes for {room.name or key}")
             if len({p.entity_id for p in room.probes}) != len(room.probes):
                 raise ValueError("Duplicate probe entity in a room")
+            if any(not isinstance(entity, str) or not re.fullmatch(r"binary_sensor\.[a-z0-9_]+", entity)
+                   for entity in room.windows):
+                raise ValueError("Room windows must use binary_sensor entity IDs")
+            if len(set(room.windows)) != len(room.windows):
+                raise ValueError("Duplicate window contact in a room")
             for probe in room.probes:
                 if type(probe.report_on_change) is not bool:
                     raise ValueError("Probe report_on_change must be a boolean")

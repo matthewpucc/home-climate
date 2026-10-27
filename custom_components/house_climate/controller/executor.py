@@ -8,6 +8,7 @@ from .config import Config
 from .diagnostics import HeadTransitions
 from .ha import HAActivationDeferred, HAError
 from .head_guard import head_constraint
+from .protection_context import limits
 from .policy import Plan, call_target_f, native_target
 from .sensors import from_f, to_f
 
@@ -534,7 +535,10 @@ class Executor:
         if not names or any(name not in plan.room_targets for name in names):
             return None
         return tuple((name, tuple(plan.room_targets[name].get(field) for field in
-                                 ("low_f", "high_f", "target_f", "comfort_enabled")))
+                                 ("low_f", "high_f", "target_f", "comfort_enabled")),
+                      tuple(sorted(mode for mode, detail in getattr(plan, "protection_context", {}).get("window_effects", {}).get(name, {}).items()
+                                   if detail.get("active"))),
+                      limits(self.config, getattr(plan, "protection_context", None)))
                      for name in names)
 
     def _can_retain_head(self, key, entity, plan, states):
@@ -589,7 +593,8 @@ class Executor:
         try:
             if head_constraint(
                     self.config, key, self.direction, plan.rooms, plan.room_targets,
-                    protection=getattr(plan, "head_protections", {}).get(key)):
+                    protection=getattr(plan, "head_protections", {}).get(key),
+                    context=getattr(plan, "protection_context", None)):
                 return False
         except (KeyError, TypeError, ValueError, OverflowError):
             return False

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import math
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -10,6 +10,8 @@ from .sensors import Reading, Sensors, forecast_slope, from_f, to_f
 from .temperature_guard import heating_cutoff_reached
 from .head_guard import HeadGuard
 from .airflow import TransferAirflow
+from .operating_state import OperatingState, WINDOW_COMFORT_FACTOR
+from .protection_context import emergency, emergency_magnitudes, initial_context, limits, window_affected
 
 
 def native_target(fahrenheit: float, attrs: dict, unit: str, *, minimum_f: float | None = None) -> float:
@@ -90,6 +92,9 @@ class Plan:
     fan_head_assists: dict[str, str] = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
     room_targets: dict = field(default_factory=dict)
+    window_states: dict = field(default_factory=dict)
+    protection_context: dict = field(default_factory=dict)
+    decision_valid_until_monotonic: float | None = None
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -100,7 +105,7 @@ class Plan:
 class Policy:
     """Pure decision layer. Never performs I/O or assumes a command succeeded."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, clock=None):
         self.config = config
         self.sensors = Sensors(config)
         self.head_guard = HeadGuard(config)
@@ -114,6 +119,9 @@ class Policy:
         self.heater_on = False
         self.transfer_on: dict[str, bool] = {}
         self.transfer_airflow = TransferAirflow(config)
+        self.operating = OperatingState(config, clock=clock)
+        self.context = initial_context(config)
+        self._profiles = {name: zone.profile for name, zone in config.zones.items()}
 
     def trim_transfer_fans(self, plan, states, rooms, now):
         """An ambient gradient cannot override possible conditioned discharge."""
@@ -143,6 +151,8 @@ class Policy:
         profile = settings.profile(self.config.zones[name], now, self.config.timezone, name)
         low, high = self.config.low_f, self.config.high_f
         if not profile.comfort_enabled:
+            if self.context.enabled:
+                low, high = limits(self.config, self.context)
             return low, high, (low + high) / 2
         target = settings.value(profile.target_f) + profile.target_offset_f
         half = settings.value(profile.half_band_f)
@@ -151,7 +161,7 @@ class Policy:
 
     def demand(self, name: str, reading: Reading, band: tuple, priority: float, *, running_modes=None,
                update=True) -> dict:
-        LOW, HIGH = self.config.low_f, self.config.high_f
+        LOW, HIGH = limits(self.config, self.context)
         low, high, target = band
         heat_drift = forecast_slope(reading, "heat") * self.config.forecast_minutes
         cool_drift = forecast_slope(reading, "cool") * self.config.forecast_minutes
@@ -160,7 +170,7 @@ class Policy:
         # remain independent evidence for system-limit protection below.
         temperature = reading.temperature
         heat_edge, cool_edge = max(low, LOW + 1), min(high, HIGH - 1)
-        stops = self.stop_targets(band)
+        stops = self.stop_targets(band, comfort_enabled=self._profiles[name].comfort_enabled)
         heat_stop, cool_stop = stops["heat"], stops["cool"]
         heat = self.calls.get((name, "heat"), False)
         cool = self.calls.get((name, "cool"), False)
@@ -189,23 +199,39 @@ class Policy:
             ("cool", cool, max(temperature, temperature + cool_drift) - cool_stop, reading.confirmed_high - HIGH, future_high - (HIGH - 1)),
         ):
             amount = max(.05, amount) if active else 0
+            urgent = emergency(self.context, name, mode)
+            actual_emergency = bool(urgent.get("active"))
+            measured_violation = float(urgent.get("violation_f", 0))
+            protective = actual_emergency or violation > 0 or guard > 0
+            effective_priority = priority
+            if window_affected(self.context, name, mode) and not protective:
+                effective_priority *= WINDOW_COMFORT_FACTOR
+            severity = (1 + measured_violation if actual_emergency else 0) if self.context.enabled else max(0, violation)
             output[mode] = {
                 "active": active, "target": heat_stop if mode == "heat" else cool_stop,
-                "score": (max(0, violation), max(0, guard), priority if active else 0, amount),
+                "score": (severity, max(0, guard), effective_priority if active else 0, amount),
+                "emergency": actual_emergency, "violation_f": measured_violation,
+                "base_priority": priority,
             }
         return output
 
-    def stop_targets(self, band):
+    def stop_targets(self, band, *, comfort_enabled=True):
         low, high, target = band
+        if self.context.enabled:
+            minimum, maximum = limits(self.config, self.context)
+            margin = self.context.release_hysteresis_f
+            return {"heat": max(target, minimum + margin) if comfort_enabled else minimum + margin,
+                    "cool": min(target, maximum - margin) if comfort_enabled else maximum - margin}
         return {"heat": target if low > self.config.low_f else self.config.low_f + 1.5,
                 "cool": target if high < self.config.high_f else self.config.high_f - 1.5}
 
     def actual_demand(self, reading, band, mode):
+        low, high = limits(self.config, self.context)
         if mode == "heat":
-            return (reading.temperature < max(band[0], self.config.low_f + 1)
-                    or reading.confirmed_low <= self.config.low_f + 1)
-        return (reading.temperature > min(band[1], self.config.high_f - 1)
-                or reading.confirmed_high >= self.config.high_f - 1)
+            return (reading.temperature < max(band[0], low + 1)
+                    or reading.confirmed_low <= low + 1)
+        return (reading.temperature > min(band[1], high - 1)
+                or reading.confirmed_high >= high - 1)
 
     def unavailable_request(self, head, mode, rooms, targets, states, climate_unit="°F"):
         """Fresh unmet demand without changing call latches or eligibility."""
@@ -229,6 +255,7 @@ class Policy:
                                (None, "unknown", "unavailable")
                                and (not heater_modes or {"off", "heat"} <= set(heater_modes)))
         requests = []
+        protection = self.head_guard.protection(head, mode, rooms, targets)
         for name, zone in self.config.zones.items():
             if zone.head != head or name not in rooms or name not in targets:
                 continue
@@ -238,24 +265,42 @@ class Policy:
             band = (target["low_f"], target["high_f"], target["target_f"])
             demand = self.demand(name, rooms[name], band, target["priority"],
                                  running_modes={states.get(entity, {}).get("state")}, update=False)[mode]
+            if protection and name in protection["rooms"]:
+                score = demand["score"]
+                demand["active"] = True
+                demand["score"] = (score[0], max(.05, score[1]), target["priority"], max(.05, score[3]))
             if demand["active"]:
                 requests.append(demand)
         if not requests:
             return None
         chosen = max(requests, key=lambda request: request["score"])
         score = chosen["score"]
-        if self.head_guard.protection(head, mode, rooms, targets):
-            score = (score[0], max(.05, score[1]), score[2], score[3])
-        return {"score": score, "target_f": chosen["target"], "missing_modes": missing}
+        return {"score": score, "target_f": chosen["target"], "missing_modes": missing,
+                "emergency": chosen.get("emergency", False), "violation_f": chosen.get("violation_f", 0)}
 
-    def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F") -> Plan:
-        LOW, HIGH = self.config.low_f, self.config.high_f
+    def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F", *, context=None) -> Plan:
+        self.context = context if context is not None else self.operating.environment(states, now)
+        LOW, HIGH = limits(self.config, self.context)
         profiles = {key: settings.profile(room, now, self.config.timezone, key) for key, room in self.config.zones.items()}
+        self._profiles = profiles
         bands = {name: self.band(name, settings, now) for name in self.config.zones}
         rooms, warnings = self.sensors.read(states, now, climate_unit,
-                                            targets={name: self.stop_targets(band) for name, band in bands.items()},
-                                            calls=self.calls, head_requests=self.head_requests)
+                                            targets={name: self.stop_targets(band, comfort_enabled=profiles[name].comfort_enabled)
+                                                     for name, band in bands.items()},
+                                            calls=self.calls, head_requests=self.head_requests, protection=self.context)
+        if context is None:
+            self.context = self.operating.rooms(self.context, states, rooms, bands, profiles, settings, now)
+            if self.context.enabled:
+                deadline = self.sensors.confirmation_deadline(now, self.operating.clock())
+                if deadline is not None:
+                    current = self.context.valid_until_monotonic
+                    self.context = replace(self.context, valid_until_monotonic=deadline if current is None else min(current, deadline))
+        self.head_guard.context = self.context
         plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings)
+        plan.window_states = self.context.window_states
+        plan.protection_context = self.context.as_dict()
+        plan.decision_valid_until_monotonic = self.context.valid_until_monotonic
+        plan.warnings.extend(self.context.warnings)
         plan.fans = {entity: 0 for entity in self.config.fans.values()}
         demands = {name: self.demand(name, reading, bands[name], profiles[name].priority,
                                     running_modes={states.get(self.config.heads[self.config.zones[name].head], {}).get("state")})
@@ -266,6 +311,9 @@ class Policy:
             name: {"low_f": band[0], "high_f": band[1], "target_f": band[2],
                    "comfort_enabled": profiles[name].comfort_enabled,
                    "priority": profiles[name].priority,
+                   "effective_comfort_priority": {
+                       mode: profiles[name].priority * (WINDOW_COMFORT_FACTOR if window_affected(self.context, name, mode) else 1)
+                       for mode in ("heat", "cool")},
                    "heat_requested": demands.get(name, {}).get("heat", {}).get("active", False),
                    "cool_requested": demands.get(name, {}).get("cool", {}).get("active", False)}
             for name, band in bands.items()
@@ -407,7 +455,25 @@ class Policy:
                 scores[mode] = tuple(max(a, b) for a, b in zip(scores[mode], score))
 
         available = [mode for mode in ("heat", "cool") if eligible[mode]]
-        winner = max(available, key=lambda mode: (scores[mode], mode == self.selected_mode)) if available else "off"
+        emergencies = emergency_magnitudes(self.context)
+        if len(emergencies) == 2:
+            plan.warnings.append(
+                f"Simultaneous protection emergencies: heat {emergencies['heat']:g}°F and cool {emergencies['cool']:g}°F beyond bounds; "
+                f"{self.context.preferred_emergency_mode} is preferred by violation magnitude or qualified outdoor tie rule; "
+                "shared equipment can serve only one direction and opposing hard guards remain")
+        preferred = self.context.preferred_emergency_mode
+        if preferred and not eligible[preferred]:
+            plan.warnings.append(
+                f"Preferred {preferred} protection is not currently feasible; unavailable modes or opposing hard guards remain in force")
+        def rank(mode):
+            score = scores[mode]
+            if self.context.enabled and score[0] >= 1:
+                # The first tier is 1 + measured violation, including an exact
+                # 80F cooling trip with zero degrees of excess. Weather wins
+                # only an exact equal-magnitude tie; comfort priority cannot.
+                return score[0], mode == self.context.tie_mode, score[1:], mode == self.selected_mode
+            return score[0], False, score[1:], mode == self.selected_mode
+        winner = max(available, key=rank) if available else "off"
         if all(eligible.values()):
             plan.warnings.append("Simultaneous heat/cool demand: shared equipment cannot satisfy both at once")
         if winner != "off" and self.last_direction and winner != self.last_direction:
@@ -423,7 +489,15 @@ class Policy:
             old_score = scores[self.last_direction]
             # For comfort-only switches require a meaningful advantage, not tiny fluctuations.
             advantage = scores[winner][:3] > old_score[:3] or scores[winner][3] > old_score[3] + .5
-            if not emergency and (held < settings["mode_hold_minutes"] * 60 or not confirmed or not advantage):
+            if self.context.enabled and scores[winner][0] >= 1:
+                # Detection and ranking are immediate. Two already-active
+                # opposing emergencies still confirm a changed direction to
+                # avoid repeated stop/start intent from alternating readings.
+                # Emergency arbitration bypasses the ordinary comfort dwell.
+                if old_score[0] >= 1 and not confirmed:
+                    winner = self.last_direction if eligible[self.last_direction] else "off"
+                    plan.reasons.append("Confirming changed emergency direction; both protection requests remain active")
+            elif not emergency and (held < settings["mode_hold_minutes"] * 60 or not confirmed or not advantage):
                 winner = self.last_direction if eligible[self.last_direction] else "off"
                 plan.reasons.append("Holding shared direction to avoid frequent mode changes")
         else:

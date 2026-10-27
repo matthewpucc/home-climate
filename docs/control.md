@@ -4,11 +4,11 @@ The outdoor system supplies heat or cooling, one direction at a time. A directio
 
 ## Temperatures and priorities
 
-The fixed house bounds are 66–75°F. Office, entertainment, and guest normally target 72°F; living targets 68°F at priority 0.1. Primary has priority 10 during its nighttime 67–69°F band. Higher comfort priority favors a direction when rooms disagree; it does not command more compressor power.
+The comfort-card editing bounds remain 66–75°F. Native protection defaults are separate: heating below an active 60°F or 65°F floor and cooling at/above 80°F. Qualified outdoor state selects the floor; unknown outdoor data conservatively uses 65°F without claiming measured freezing. Generic configurations with no protection object retain legacy 66–75°F behavior. Office, entertainment, and guest normally target 72°F; living targets 68°F at priority 0.1. Primary has priority 10 during its nighttime 67–69°F band. Higher comfort priority favors a direction when rooms disagree; it does not command more compressor power.
 
 External ambient readings determine room comfort. Median fusion tolerates one unavailable probe. Raw valid extremes preserve real room gradients for protection. If an area has no valid readings, its shared head is inhibited. Equipment temperatures are used only to compensate equipment setpoints, including the fixed 65°F minimum cooling setpoint on all four heads.
 
-The source thresholds reserve 1°F before the house bounds: stop heating by 74°F and cooling by 67°F. A two-minute projection uses only a trend worsening the current call and may stop earlier. These guards create no opposite-direction request on their own. They run during fresh 15-second maintenance and override acknowledged minimum-run retention. The auxiliary heater also forecasts its earlier comfort cutoff.
+Raw opposing stop guards reserve 1°F inside the active protection bounds: with the native 80°F ceiling, heating stops by 79°F; cooling stops by 61°F for the normal 60°F floor or 66°F for the conservative/cold 65°F floor. Legacy 66–75°F protection still stops heating by 74°F and cooling by 67°F. A two-minute projection uses only a trend worsening the current call and may stop earlier. These guards create no opposite-direction request on their own. They run during fresh 15-second maintenance and override acknowledged minimum-run retention. The auxiliary heater also forecasts its earlier comfort cutoff.
 
 The reserved margin responds to the observed room overshoot after a delayed Off. It is not a guarantee against arbitrary Wi-Fi outages, delayed probes, residual heat, or external loads.
 
@@ -16,9 +16,25 @@ The reserved margin responds to the observed room overshoot after a delayed Off.
 
 A head serving several areas has to account for every attached area. Ordinary cooling stops at any area's lower comfort edge; ordinary heating stops at its upper edge. A comfort-only start or restart requires 0.5°F of headroom from those opposing edges. A cutoff remains latched across the 90-second decisions until that headroom returns, so a tiny rebound does not immediately start another short call. The margin reduces avoidable cycling; it cannot guarantee a five-minute run against changing loads or delayed measurements.
 
-House protection takes priority over these soft comfort preferences. Confirmed ambient extremes and the existing forecast can request cooling near 74°F or heating near 67°F, reserving room before the 75°F/66°F bounds. A protective call may continue past another area's soft comfort edge until its originating area returns to its target or safe interior. Raw and forecast opposing house cutoffs always remain in force. If one attached area is too hot while another is too cold to condition safely, the head stays off and reports that conflict.
+House protection takes priority over soft comfort preferences. A trusted room measurement below the active heating floor or at/above the cooling threshold triggers an actual emergency without a new indoor persistence delay. Existing corroboration still applies to lone disagreeing probes. Preventive reserves use the one-degree margin and existing forecast before the actual trip; diagnostics distinguish them. Explicit emergency priority releases one degree inside the bound by default, separately from ordinary comfort-target completion. A protective call can yield another area's soft comfort boundary while protection is required. Raw and forecast opposing house cutoffs always remain in force. If one attached area is too hot while another is too cold to condition safely, the head stays off and reports that conflict.
 
 The same head eligibility rules apply to mode arbitration, fresh maintenance, and minimum-run retention. A protective call can bypass a comfort direction hold, but still requires device availability, acknowledged Off, settling, and hardware minimum off time. Room-card profile changes re-evaluate the current limits; they do not relax house protection.
+
+## Optional window effects and outdoor conflict rules
+
+A confirmed opening plus five minutes of a valid measured deficit at least 0.5°F
+beyond the room's comfort edge can reduce that direction's comfort weight to 25%.
+An already-cold steady room can qualify. Only the opposing soft boundary yields;
+raw/forecast hard guards, missing-probe inhibition, fan safety and auxiliary
+limits remain. Unknown/invalid data, confirmed closure, and profile-context changes
+restore or requalify normal comfort behavior. This does not force thermostat Off.
+
+When opposing actual emergencies coexist, the larger degree violation wins. Exact
+ties use qualified outdoor regime; near-reference state is qualified with a draft
+±2°F deadband and five-minute valid interval. Existing regimes persist in that band.
+Unknown or initially unqualified ties default to heating, with configurable choices.
+No unsafe shared head can be forced to run. See [protection rules](protection-temperatures.md)
+and [window details](window-contacts.md) for engineering defaults and limitations.
 
 ## Forecasts after conditioning stops
 
@@ -26,7 +42,7 @@ A cooling or heating trend includes the effect of the head that produced it. Whe
 
 This newer history survives a shared head restarting for another area and delayed active-state echoes. New measured warming or cooling can still create a protective request. A shared area that never requested the original conditioning retains its own forecast evidence. The original raw trend remains available to the two-minute temperature-stop guards.
 
-An unstarted forecast request is rechecked while a head waits for minimum off time. If its forecast clears and no actual comfort or house-limit demand remains, the queued request is removed. Once a room has a reported protective start, that room's recovery can retain its target-reaching hold. A different room's newly forecast need does not inherit that hold merely because both use the same head.
+An unstarted forecast request is rechecked while a head waits for minimum off time. If its forecast clears and no actual comfort or house-limit demand remains, the queued request is removed. Legacy protection can retain its target-reaching recovery hold after a reported start. Explicit protection uses its own release hysteresis while ordinary comfort keeps its target-reaching behavior. A different room's newly forecast need does not inherit that hold merely because both use the same head.
 
 ## Timing and fan behavior
 

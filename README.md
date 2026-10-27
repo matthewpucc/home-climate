@@ -1,6 +1,6 @@
 # Home Climate
 
-A Home Assistant integration with a fixed operating policy for four heat-pump heads, room fans, and a battery-backed auxiliary heater. Operating rules live in source; actual device bindings stay in a private Home Assistant file. Setup has one live-command opt-in. Room climate cards still provide temporary temperature and range adjustments.
+A Home Assistant integration with a fixed operating policy for four heat-pump heads, room fans, and a battery-backed auxiliary heater. Operating rules live in source; actual device bindings stay in a private Home Assistant file. Setup has an atomic form for live-command permission and independent protection settings. Room climate cards still provide temporary comfort-temperature and range adjustments.
 
 ## Install
 
@@ -27,7 +27,7 @@ The controller starts disabled after an HA restart. When live commands are permi
 | Primary, daytime | Comfort off; house limits remain active | Primary |
 | Living room | 68°F / 67–69°F, lowest priority | Living plus auxiliary heater |
 
-Schedules use America/Los_Angeles. All rooms retain the 66–75°F house bounds. Heating stops with a 1°F reserve below the upper bound; cooling stops with the same reserve above the lower bound. A short worsening-trend forecast can stop earlier.
+Schedules use America/Los_Angeles. Comfort cards retain their 66–75°F editing bounds. Native protection is configured separately: the draft defaults are a 60°F heating floor, a 65°F floor for qualified cold or untrusted outdoor conditions, and cooling emergency at 80°F. Qualified outdoor state uses a configurable reference/deadband and sustained-valid interval. Raw opposing guards still stop one degree inside the active protection bound, with a short worsening-only forecast. Generic configurations without explicit protection retain legacy 66–75°F behavior. See [protection settings and conflict rules](docs/protection-temperatures.md).
 
 Room control uses external ambient probes. Heat-pump readings remain available for equipment setpoint compensation, but cannot make a warm room appear cold. Living uses its assigned ambient probes rather than the heater's thermometer. A real cold-corner measurement remains valid without an invented calibration offset.
 
@@ -35,7 +35,7 @@ The system makes comfort decisions every 90 seconds. Fifteen-second maintenance 
 
 A shared head checks every attached area before starting. Comfort-only restarts need 0.5°F of headroom from the opposing comfort edges. Confirmed/forecast house protection can override those soft preferences until the affected area recovers, while the opposing house cutoffs and hardware timing stay enforced. Plan and recovery entities identify the room and threshold responsible for a wait.
 
-See [operating rules](docs/control.md) and [wiring and dashboard controls](docs/configuration.md).
+Optional private window contacts can lower only an affected direction's comfort priority to 25% after a sustained measured deficit, and allow its opposing soft shared-head boundary to yield. They never discard room measurements or hard protection. With no competing eligible demand, that room can still receive conditioning. See [window evidence and recovery](docs/window-contacts.md), [operating rules](docs/control.md), and [wiring and dashboard controls](docs/configuration.md).
 
 ## Living-room heater power guard
 
@@ -60,7 +60,7 @@ The controller's transition history distinguishes its commands from device repor
 
 The central house rules are in [house_policy.py](custom_components/house_climate/controller/house_policy.py); electrical thresholds and fallback logic are in [power_guard.py](custom_components/house_climate/power_guard.py). Temperature stopping margins are in [temperature_guard.py](custom_components/house_climate/controller/temperature_guard.py).
 
-Existing installations migrate in place, preserving registered room identities and valid temporary holds. Daily adjustments belong on the room cards; schedules and engineering timers are fixed in source. The private bindings file contains only entity-role mappings, never rules or thresholds.
+Existing installations migrate in place, preserving registered room identities and valid temporary holds. Daily comfort adjustments belong on the room cards; the protection form is separate. House schedules remain fixed in source. The private bindings file contains only entity-role mappings, never rules or thresholds.
 
 Run core tests with `python -m unittest discover -s tests -v`. Native integration tests require Python 3.14 and Home Assistant 2026.10.1: `python -m unittest discover -s tests_homeassistant -v`. GitHub Actions runs both suites and validates the install archives.
 
