@@ -6,6 +6,8 @@ from unittest.mock import patch
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
 
+from custom_components.house_climate.controller.ha import HAError
+
 from tests_homeassistant import test_native as fixtures
 from tests_homeassistant import test_native_controls as controls_fixtures
 
@@ -118,7 +120,7 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await runtime.async_stop())
         self.assertFalse(runtime.controls.active)
 
-    async def test_claim_waits_for_cleanup_and_atomically_reclaims_current_fan(self):
+    async def test_enable_waits_for_actual_cleanup_then_atomically_reclaims_current_fan(self):
         fan = self.cfg.fans["office"]
         old = self.hass.states.get(fan)
         self.hass.states.async_set(fan, "on", {**old.attributes, "percentage": 60})
@@ -136,15 +138,15 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_register("fan", "turn_off", delayed)
         runtime, _ = await self.runtime(entry_id="reclaim")
         await asyncio.wait_for(started.wait(), 2)
-        await runtime.controls.async_set_enabled(True)
-        claim = asyncio.create_task(asyncio.to_thread(
-            runtime.api.service, "input_boolean", "turn_on",
-            entity_id=runtime.config.entity("heater_owned")))
-        await asyncio.sleep(.02)
-        self.assertFalse(claim.done())
+        with self.assertRaisesRegex(HAError, "previously owned devices"):
+            await runtime.controls.async_set_enabled(True)
         self.assertFalse(runtime.controls.owned)
         finish.set()
-        await asyncio.wait_for(claim, 2)
+        await self.until(lambda: runtime.controls.service_inflight == 0)
+        await runtime.controls.async_set_enabled(True)
+        await asyncio.to_thread(
+            runtime.api.service, "input_boolean", "turn_on",
+            entity_id=runtime.config.entity("heater_owned"))
         self.assertFalse(runtime.controls.pending_fans)
         saved = await store.async_load()
         self.assertIn(fan, saved["devices"])

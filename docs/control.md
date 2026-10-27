@@ -20,13 +20,39 @@ House protection takes priority over these soft comfort preferences. Confirmed a
 
 The same head eligibility rules apply to mode arbitration, fresh maintenance, and minimum-run retention. A protective call can bypass a comfort direction hold, but still requires device availability, acknowledged Off, settling, and hardware minimum off time. Room-card profile changes re-evaluate the current limits; they do not relax house protection.
 
+## Forecasts after conditioning stops
+
+A cooling or heating trend includes the effect of the head that produced it. When a room reaches its stopping target and no same-direction reserve request remains, the controller separates that completed conditioning from evidence for a new request. Before Off is reported, it does not project the previous call as another ten minutes of opposite-direction demand. After Off, new valid room readings build a separate post-stop forecast history.
+
+This newer history survives a shared head restarting for another area and delayed active-state echoes. New measured warming or cooling can still create a protective request. A shared area that never requested the original conditioning retains its own forecast evidence. The original raw trend remains available to the two-minute temperature-stop guards.
+
+An unstarted forecast request is rechecked while a head waits for minimum off time. If its forecast clears and no actual comfort or house-limit demand remains, the queued request is removed. Once a room has a reported protective start, that room's recovery can retain its target-reaching hold. A different room's newly forecast need does not inherit that hold merely because both use the same head.
+
 ## Timing and fan behavior
 
 Comfort decisions run every 90 seconds; maintenance runs every 15 seconds. An acknowledged head run normally lasts at least 5 minutes, and a stopped head waits 3 minutes before restarting. A run begins after both the mode and exact target are confirmed. House protection, an opposing comfort boundary on ordinary calls, missing measurements, direction changes, and recovery may stop it sooner.
 
 Primary's purifier is 60% from 10 p.m.–5 a.m. and off otherwise. Guest circulation accompanies conditioning. Office and entertainment fans move the bonus head's air toward the office. The living Dyson may circulate without heat where the room plan calls for it.
 
+Transfer fans account for the source head's planned direction, reported mode/action, and possible residual conditioned air. Cooling at the source stops transfer into a destination at or below its target; heating stops transfer into a destination at or above its target. A warmer ambient source probe does not establish that an actively cooling head is supplying useful warming air.
+
+Each possible conditioning direction remains tracked through pending starts and mode changes. Fresh idle feedback followed by the existing settling interval permits ambient transfer again. Unknown or contradictory source feedback is treated conservatively. An external direction change without an observed idle interval can keep transfer fans off until a later confirmed idle period. Useful idle transfer, compatible conditioning assistance, and independent scheduled fans retain their own rules.
+
 Native heartbeat confirmation tolerates brief HA responsiveness delays. A delayed confirmation defers new starts and adjustments while keeping confirmed calls. The heat-pump lease is 5 minutes; the auxiliary heater has a separate 2-minute lease. Lease expiry and controller-wide stops are logged with their cause.
+
+## Integration capability recovery
+
+The native integration learns which managed modes a particular head normally advertises from three fresh, consistent reports over at least 120 seconds. Knowledge is stored locally for the owning integration, registered device identity, and explicit preset/operation context. Ordinary Heat, Cool, and Off transitions do not erase it. A changed device identity or operating context starts separate learning.
+
+A first-seen shortened mode list is not proof of a failure: a head may genuinely support only cooling. If installation begins while modes are already missing, use that head's **Reload integration** action to obtain healthy reports before expecting automatic loss detection. A capability-store failure produces a warning and falls back to runtime observations; it does not stop climate control.
+
+Previously established modes disappearing from current HA attributes starts a capability check. Automatic repair requires native live control to be enabled, at least three explicit failed refresh/rechecks spaced 60 seconds apart, and at least 120 seconds of persistent loss. Repeated reads of the same cached state are not extra failed device attempts. Startup, unavailable data, an ordinary Off state, and a valid cached last mode are not, by themselves, proof of capability loss. A restored report breaks the consecutive-failure sequence.
+
+Loss of a mode needed by an eligible current request can justify coordinated repair. Loss of an unused mode is advisory and waits for a safe idle opportunity, particularly while a healthy head is providing house protection. Current decision inputs are checked before pausing and reloading; changed measurements, settings, or schedules defer to a fresh worker plan. The repair's own Off commands do not establish an idle opportunity. Repair applies to the owning integration entry, so configured sibling heads can pause and other devices in that entry can briefly become unavailable. Unrelated integration entries are outside that repair scope.
+
+Before reload, a per-entry command barrier rejects old queued starts and waits for actual dispatched service jobs to finish. Healthy siblings must confirm Off before their integration is unloaded. The failed head's missing Off acknowledgement cannot itself prevent the reload intended to repair its feedback. Fresh safety Off requests remain permitted. If completion or healthy-head shutdown cannot be established, repair stays blocked and reports why.
+
+Reload success is not proof of device Off. Rejoining requires fresh post-reload Off feedback and normal off-time checks. Calls then use the head's currently validated modes; a still-missing mode remains blocked without withholding all otherwise valid calls solely for that loss. The incident and attempt budget clear only after the frozen missing modes return in fresh, stable reports. Reload attempts use 15/30/60-minute backoff and pause after three attempts in one unresolved incident.
 
 ## Heater load shedding
 
@@ -50,6 +76,10 @@ The cutoff latch and restoration ownership persist through restart. Restoration 
 
 The device exposes room plans, controller/recovery status, current issues, last controller fault, and a separate heater-power-guard status. Local device warnings are distinct from controller faults. Shared-room constraints name the blocking room, current temperature, required headroom, and waiting request; protection overrides are identified separately. Full structured constraints remain available when a sensor state is shortened for HA's 255-character limit.
 
+Controller status also retains up to 16 transition events per head. Command requests, service completion, device acknowledgement, and reported mode changes are separate events. Repeated unchanged reports do not displace command evidence. An unexpected Off report is recorded without assuming who issued it or that the physical compressor stopped; it does not alone initiate capability-loss repair.
+
 Pausing comfort requests equipment Off and retains ownership until shutdown is confirmed. A settings save waits for cleanup before reloading. A Home Assistant unload also waits for ambiguous in-flight commands to become safe; it must not allow an old delayed activation to energize a heater after the guard has unloaded.
+
+A timed-out or cancelled caller does not prove that its actuator service has finished. Actual jobs remain tracked through completion, including queued and delayed Off jobs. A late positive completion requires new superseding Off evidence, and stops from a previous ownership or repair generation cannot stop a later call.
 
 No automated integration reload, fallback outlet operation, or software timer can repair a failing heat-pump Wi-Fi adapter. Recovery retries isolate those failures and report the remaining block.

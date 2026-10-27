@@ -171,6 +171,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                        settle_remaining_seconds=recovery["settle_remaining_seconds"],
                        cycle_holds=recovery["cycle_holds"],
                        head_stop_reasons=recovery["head_stop_reasons"],
+                       head_transition_history=recovery["head_transition_history"],
                        pending_head_commands=recovery["pending_head_commands"],
                        **cadence.status(), **plan.as_dict())
                 faults = 0

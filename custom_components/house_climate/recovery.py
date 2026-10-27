@@ -1,7 +1,8 @@
-"""Reload a failed heat-pump integration without changing actuator state.
+"""Rate-limit owning-integration reloads and coordinated native repairs.
 
-The executor remains responsible for fresh off acknowledgements and shared-system
-direction changes. A config-entry reload never counts as either acknowledgement.
+An explicit disabled/shadow reload only refreshes integration metadata. Live
+owned capability repair pauses its owner scope and proves Off before rejoining.
+A config-entry reload never counts as an actuator acknowledgement.
 """
 from __future__ import annotations
 
@@ -42,19 +43,25 @@ class RecoveryManager:
         self._active_entry = None
         self._closed = False
         self._recovery_heads = set()
+        from .capability_recovery import CapabilityRecovery
+        self.capabilities = CapabilityRecovery(self)
 
     @property
     def diagnostics(self):
+        repair = self.capabilities.detail
+        summary = repair["reason"] if repair and repair["phase"] != "ready" else self._summary
         return {
-            "reload_status": self._summary,
+            "reload_status": summary,
             "reload_details": {key: dict(value) for key, value in self._details.items()},
+            **self.capabilities.snapshot(),
         }
 
     def _enabled(self):
         if not self.runtime.live or self.runtime.stop_event.is_set():
             return False
         if self.runtime.controls is not None:
-            return self.runtime.controls.enabled
+            return (self.runtime.controls.enabled
+                    and bool(getattr(self.runtime.controls, "owned", True)))
         enabled = self.hass.states.get(self.runtime.config.entity("enabled"))
         return enabled is not None and enabled.state == "on"
 
@@ -105,6 +112,11 @@ class RecoveryManager:
 
     @callback
     def observe(self, status):
+        self._observe_existing(status)
+        self.capabilities.observe(status)
+
+    @callback
+    def _observe_existing(self, status):
         """Observe an executor report on HA's loop; enqueue at most one reload."""
         if self._closed:
             return
@@ -165,6 +177,7 @@ class RecoveryManager:
                 item.config_entry_id for entity in self._first_seen
                 if (item := registry.async_get(entity)) is not None
             }
+            outstanding_entries.update(row.owner for row in self.capabilities.incidents.values())
             for entry_id in set(self._attempts) - outstanding_entries:
                 self._attempts.pop(entry_id, None)
 
@@ -258,6 +271,18 @@ class RecoveryManager:
             "reason": "Manual integration reload in progress; awaiting device reports",
         }
         self._summary = self._details[entry_id]["reason"]
+        scope = self.capabilities.affected(entry_id)
+        if hasattr(self.runtime, "api") and self.capabilities.owned(scope):
+            from .capability_recovery import Incident
+            _owner, report = self.capabilities.observe_entity(entity_id)
+            row = Incident(entity_id, entry_id, report["identity"] if report else "", frozenset(), now)
+            self._task = self.hass.async_create_background_task(
+                self.capabilities._async_repair(row, manual=True),
+                "Home Climate manual coordinated integration repair", eager_start=False)
+            # Admission is distinct from reload completion; progress is exposed
+            # by Recovery status rather than holding the button for hardware timers.
+            self._notify()
+            return True
         self._task = self.hass.async_create_background_task(
             self._async_reload(entry_id, manual=True), "home-climate-manual-integration-recovery"
         )
@@ -334,6 +359,7 @@ class RecoveryManager:
     async def async_close(self):
         """Bound cleanup so a stuck owning integration cannot hold shutdown."""
         self._closed = True
+        capability_closed = await self.capabilities.async_close()
         if self._task is not None and not self._task.done():
             self._task.cancel()
             done, _ = await asyncio.wait({self._task}, timeout=RELOAD_CLOSE_SECONDS)
@@ -346,4 +372,4 @@ class RecoveryManager:
         self._task = None
         self._active_entry = None
         self._summary = "Stopped"
-        return True
+        return capability_closed

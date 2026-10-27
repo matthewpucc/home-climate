@@ -6,7 +6,7 @@ COPY custom_components/house_climate/controller/ ./custom_components/house_clima
 RUN python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
 
 FROM python:3.12-slim-bookworm
-ARG BUILD_VERSION=0.7.2
+ARG BUILD_VERSION=0.7.3
 LABEL org.opencontainers.image.source="https://github.com/matthewpucc/home-climate" \
       org.opencontainers.image.title="Home Climate controller" \
       io.hass.type="addon" \

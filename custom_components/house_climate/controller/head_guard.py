@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import math
 
 from .temperature_guard import STOP_MARGIN_F, opposite_limit_reached, projected_extreme
+from .sensors import forecast_extreme
 
 COMFORT_REARM_F = .5
 
@@ -19,14 +20,14 @@ def _names(config, head):
 
 def protection_requested(config, reading, mode):
     """Positive calls use corroborated extremes and worsening-only forecasts."""
-    slope = float(_value(reading, "slope_f_per_minute", 0))
+    if mode not in ("heat", "cool"):
+        return False
+    future = forecast_extreme(reading, mode, config.forecast_minutes)
     if mode == "cool":
         extreme = float(_value(reading, "confirmed_high"))
-        future = extreme + max(0, slope) * config.forecast_minutes
         return max(extreme, future) >= config.high_f - STOP_MARGIN_F
     if mode == "heat":
         extreme = float(_value(reading, "confirmed_low"))
-        future = extreme + min(0, slope) * config.forecast_minutes
         return min(extreme, future) <= config.low_f + STOP_MARGIN_F
     return False
 
@@ -56,15 +57,20 @@ def active_protection(config, head, mode, rooms, room_targets, protection):
             if not math.isfinite(temperature) or not math.isfinite(release):
                 continue
             needs = temperature > release if mode == "cool" else temperature < release
-            if needs or protection_requested(config, reading, mode):
+            started = (name in protection["started_rooms"]
+                       if "started_rooms" in protection else True)
+            if (needs and started) or protection_requested(config, reading, mode):
                 origins.append(name)
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
     if not origins:
         return None
     labels = ", ".join(config.zones[name].name or name for name in origins)
-    return {"mode": mode, "rooms": sorted(set(origins)),
-            "reason": f"{mode.title()} for {labels} house protection; soft comfort limits may yield"}
+    result = {"mode": mode, "rooms": sorted(set(origins)),
+              "reason": f"{mode.title()} for {labels} house protection; soft comfort limits may yield"}
+    if "started_rooms" in protection:
+        result["started_rooms"] = sorted(set(protection["started_rooms"]) & set(origins))
+    return result
 
 
 def _detail(config, name, mode, kind, temperature, boundary, required, reason):
@@ -137,18 +143,28 @@ class HeadGuard:
         self.cutoffs = set()
         self.protections = {}
 
-    def observe(self, rooms, targets):
+    def observe(self, rooms, targets, states=None):
         for head in self.config.heads:
             names = _names(self.config, head)
             for mode in ("heat", "cool"):
                 key = (head, mode)
-                current = active_protection(self.config, head, mode, rooms, targets,
-                                            self.protections.get(key))
+                previous = self.protections.get(key)
+                if states is not None and previous:
+                    started = set(previous.get("started_rooms", ()))
+                    if states.get(self.config.heads[head], {}).get("state") == mode:
+                        started.update(previous["rooms"])
+                    previous = dict(previous, started_rooms=sorted(started))
+                current = active_protection(self.config, head, mode, rooms, targets, previous)
                 origins = set(current["rooms"] if current else ())
                 for name in names:
                     if name in rooms and protection_requested(self.config, rooms[name], mode):
                         origins.add(name)
                 proposed = {"mode": mode, "rooms": sorted(origins)}
+                if states is not None:
+                    started = set((current or {}).get("started_rooms", ()))
+                    if states.get(self.config.heads[head], {}).get("state") == mode:
+                        started.update(origins)
+                    proposed["started_rooms"] = sorted(started)
                 protection = active_protection(self.config, head, mode, rooms, targets, proposed)
                 if protection:
                     self.protections[key] = protection

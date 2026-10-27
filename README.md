@@ -48,6 +48,14 @@ The Elite battery supplies the heater and network equipment. Only the heater's d
 
 Emporia exposes real power rather than full-circuit RMS current. The 1350W budget conservatively supports the requested 12A input ceiling; the downstream heater amp reading is used for recovery confirmation, not as a wall-current measurement or a 12A output ceiling. Software, sensor cadence, and device feedback cannot establish a physical current guarantee.
 
+## Device recovery and diagnostics
+
+The native integration learns stable, device-specific supported modes and can repair a persistent loss of a previously available mode. It first waits through explicit refresh/rechecks: at least three failures, 60 seconds apart, over at least two minutes. A successful recheck resets consecutive failures. Reloads have a separate attempt limit and backoff; unused-mode loss can wait while healthy heads are conditioning rooms.
+
+A first-seen mode list cannot establish what is missing. If a head is already degraded when capability learning begins, use its **Reload integration** button once to obtain healthy reports. The controller does not invent Heat support for a Cool-only device. Recovery status explains retries, deferral, coordinated repair, and any unresolved block; [operating rules](docs/control.md#integration-capability-recovery) describe the boundaries.
+
+The controller's transition history distinguishes its commands from device reports. A reported mode and accepted setpoint do not prove compressor output, and an unexpected Off report does not prove that Home Climate issued Off. Reloading an integration can restore its feedback, but cannot repair a failing Wi-Fi adapter.
+
 ## Development
 
 The central house rules are in [house_policy.py](custom_components/house_climate/controller/house_policy.py); electrical thresholds and fallback logic are in [power_guard.py](custom_components/house_climate/power_guard.py). Temperature stopping margins are in [temperature_guard.py](custom_components/house_climate/controller/temperature_guard.py).
@@ -55,6 +63,8 @@ The central house rules are in [house_policy.py](custom_components/house_climate
 Existing installations migrate in place, preserving registered room identities and valid temporary holds. Daily adjustments belong on the room cards; schedules and engineering timers are fixed in source. The private bindings file contains only entity-role mappings, never rules or thresholds.
 
 Run core tests with `python -m unittest discover -s tests -v`. Native integration tests require Python 3.14 and Home Assistant 2026.10.1: `python -m unittest discover -s tests_homeassistant -v`. GitHub Actions runs both suites and validates the install archives.
+
+Core replays use synthetic probes and devices. Native tests exercise Home Assistant's real state and service machinery with simulated equipment; they do not operate physical heat pumps. These checks establish software behavior, not field cooling capacity, airflow, Wi-Fi reliability, or physical compressor cycling. Installation and a live comparison are separate validation steps.
 
 The standalone CLI and container retain their legacy file configuration for compatibility. They do not install the native house-specific electrical guard.
 
