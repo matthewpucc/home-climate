@@ -1,10 +1,10 @@
-# Protection temperatures (draft)
+# Protection temperatures
 
-This draft separates protection settings from room comfort. Native house-policy
-settings default to heating protection below 60°F, a 65°F floor in a qualified
-cold outdoor regime, and emergency cooling at 80°F in any room. Existing generic
-configurations with no protection object retain their legacy 66–75°F behavior.
-The running 0.7.3 installation is not modified by this branch.
+Home Climate 0.8.0 separates protection settings from room comfort. Native
+house-policy settings default to heating protection below 60°F, a 65°F floor in
+a qualified cold outdoor regime, and emergency cooling at 80°F in any room.
+Existing generic configurations with no protection object retain their legacy
+66–75°F behavior.
 
 The HA Configure form saves all protection scalars atomically. Comfort-card
 editing bounds and saved holds remain independent; adding outdoor wiring or
@@ -22,16 +22,16 @@ Sources require explicit F/C units and timestamps, must be less than 1800 second
 old, and cannot be restored, unavailable, future-dated, or implausible. One valid
 source is usable with a redundancy warning. No installed source is guessed.
 
-The outdoor reference defaults to 32°F. A proposed ±2°F transition deadband and
-five minutes of sustained valid evidence qualify a warm or cold regime. These
-values are engineering draft defaults for review, not exact user-specified
-requirements. A qualified regime persists within the deadband, including exactly
+The outdoor reference defaults to 32°F. A ±2°F transition deadband and five
+minutes of sustained valid evidence qualify a warm or cold regime. These are
+configurable engineering defaults in 0.8.0, not a measurement of local freezing
+risk. A qualified regime persists within the deadband, including exactly
 32°F: an already-qualified warm regime keeps its normal floor and cooling tie
 preference there; an already-qualified cold regime keeps its higher floor and
 heating preference. An initially unqualified boundary uses the disclosed higher
 floor and configurable heating tie default.
 
-Missing or stale outdoor evidence immediately uses the conservative 65°F draft
+Missing or stale outdoor evidence immediately uses the conservative 65°F default
 fallback and configurable heating tie default. It is labeled **unknown**, not
 measured freezing. Validity and timer boundaries fence obsolete queued repairs
 even if no entity value changes.
@@ -67,14 +67,15 @@ reports the conflict rather than overriding hard limits. A shared outdoor unit
 cannot satisfy simultaneous heating and cooling requests. No software guarantee
 can replace adequate capacity, airflow, measurements, or a closed window.
 
-## Draft setting limits
+## Setting limits
 
 The atomic form exposes heating floors from 40–70°F, cooling threshold 75–95°F,
 outdoor reference −40–60°F, release hysteresis 0.25–5°F, outdoor deadband 0–10°F,
 and qualification 0–3600 whole seconds. It requires ordered floors and
-nonoverlapping release bands. These are disclosed draft exposure limits.
+nonoverlapping release bands. These are the configurable limits in 0.8.0.
 Compressor acknowledgement/minimum-off timing, electrical limits, auxiliary-heater
 cutoffs, and ownership/manual-control safeguards remain in force.
 
-A release version and explicit merge/release/deployment approval are still needed
-before this draft ships. No auxiliary-heater mode fix is included.
+Automated policy and Home Assistant registry tests cover these rules; physical
+room response and equipment behavior still require installation validation.
+No auxiliary-heater mode fix is included in 0.8.0.
