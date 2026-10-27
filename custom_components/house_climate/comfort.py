@@ -24,6 +24,56 @@ from .controller.config import Settings
 _LOGGER = logging.getLogger(__name__)
 
 
+async def async_migrate_house_holds(hass, entry_id, previous_config, fixed_config, *, now=None):
+    """Preserve genuine dashboard holds while adopting the fixed house policy.
+
+    A configuration fingerprint is intentionally strict during normal startup.
+    This one-time entry migration checks the old fingerprint before replacing it,
+    retains only still-valid user temperatures, and never extends a hold beyond
+    either its original expiration or the next new schedule boundary.
+    """
+    previous = RoomComfort(hass, previous_config, entry_id, lambda: None)
+    fixed = RoomComfort(hass, fixed_config, entry_id, lambda: None)
+    data = await fixed.store.async_load()
+    if not isinstance(data, dict):
+        return
+    now = now or RoomComfort._now()
+    rooms = data.get("rooms", {})
+    if not isinstance(rooms, dict):
+        return
+    migrated = {}
+    for room_id, value in rooms.items():
+        try:
+            if (not isinstance(value, dict) or room_id not in previous_config.zones
+                    or room_id not in fixed_config.zones):
+                continue
+            old_fingerprint = previous._fingerprint(room_id)
+            new_fingerprint = fixed._fingerprint(room_id)
+            if value["fingerprint"] not in (old_fingerprint, new_fingerprint):
+                continue
+            low, high, target = fixed._validate(
+                room_id, value["low_f"], value["high_f"], value["target_f"])
+            expiry = value["expires_at"]
+            if expiry is not None:
+                expiry = datetime.fromisoformat(expiry)
+                if expiry.tzinfo is None or expiry <= now:
+                    continue
+                expiry = expiry.astimezone(timezone.utc)
+            settings, _ = fixed._base(room_id, now)
+            next_change = next_schedule_change(
+                fixed._room(room_id), settings, now, fixed._timezone)
+            if next_change is not None:
+                expiry = min(expiry, next_change) if expiry is not None else next_change
+            migrated[room_id] = _Hold(low, high, target, expiry, new_fingerprint)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+    result = RoomComfort._data(migrated)
+    if result != data:
+        # Commit first. If storage fails, entry migration must not publish new
+        # fingerprints and silently lose an otherwise valid dashboard hold.
+        await fixed.store.async_save(result)
+
+
 @dataclass(frozen=True)
 class _Hold:
     low_f: float

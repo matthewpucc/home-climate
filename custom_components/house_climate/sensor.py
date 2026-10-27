@@ -31,6 +31,9 @@ def plan_warnings(status):
                   for entity in status.get("pending_fans", []))]
     if (issue := auxiliary_heartbeat_issue(status)) and issue not in warnings:
         warnings.insert(0, issue)
+    guard = status.get("power_guard") or {}
+    if guard.get("blocked") and guard.get("reason"):
+        warnings.insert(0, "Living-room heater power guard: " + guard["reason"])
     return warnings
 
 
@@ -190,6 +193,8 @@ def pending_head_message(detail, display_unit):
 async def async_setup_entry(hass, entry, async_add_entities):
     entities = [ControllerStatus(entry), Overview(entry), RecoveryStatus(entry),
                 CurrentIssues(entry), LastFault(entry)]
+    if getattr(entry.runtime_data, "power_guard", None) is not None:
+        entities.append(HeaterPowerStatus(entry))
     for key in entry.runtime_data.config.zones:
         entities.extend((RoomTemperature(entry, key), RoomPlan(entry, key)))
     for fan in entry.runtime_data.config.fan_controls.values():
@@ -261,6 +266,37 @@ class ControllerStatus(ControllerEntity):
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
                  "head_stop_reasons", "pending_head_commands") if key in status} | heartbeat_attributes(status)
+
+
+class HeaterPowerStatus(ControllerEntity):
+    """Explain heater shedding separately from shared heat-pump recovery."""
+    _attr_name = "Heater power guard"
+    _attr_icon = "mdi:flash-alert"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, entry):
+        super().__init__(entry, "heater_power_guard")
+
+    @property
+    def native_value(self):
+        guard = self.runtime.power_guard.diagnostics
+        if guard.get("power_restore_inflight") or guard.get("power_restore_cleanup_pending"):
+            return "Waiting for heater outlet restoration to stop safely"
+        if not guard.get("live"):
+            return "Preview only; live commands are not permitted"
+        if guard.get("restoring"):
+            return "Restoring heater power; confirming thermostat Off"
+        return short(guard.get("reason") or ("Blocked" if guard.get("blocked") else "Ready"))
+
+    @property
+    def extra_state_attributes(self):
+        # Original circuit/battery sensors already retain measured values. Keep
+        # this status focused on the interlock and its ownership/recovery state.
+        guard = self.runtime.power_guard.diagnostics
+        return {key: guard[key] for key in
+                ("blocked", "reason", "latched", "switch_cut_owned", "power_cut_confirmed",
+                 "restoring", "restore_attempts", "power_restore_inflight",
+                 "power_restore_cleanup_pending", "persistence_error", "live") if key in guard}
 
 
 class Overview(ControllerEntity):

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "house-climate-controller"
-version = "0.6.9"
-description = "Configurable shared-system climate control for Home Assistant"
+version = "0.7.0"
+description = "Fixed house climate policy and heater protection for Home Assistant"
 requires-python = ">=3.11"
 dependencies = []
 license = {file = "LICENSE"}

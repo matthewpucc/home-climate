@@ -56,6 +56,7 @@ class NativeControls:
         self._unsubscribers = []
         self._task = None
         self._snapshot = {}
+        self.power_guard = None
         self._publish()
 
     async def async_load(self):
@@ -308,6 +309,8 @@ class NativeControls:
                 state.last_updated, state.last_changed)
 
     def _auxiliary_could_heat(self):
+        if self.power_guard is not None and self.power_guard.power_cut_confirmed:
+            return False
         state = self.hass.states.get(self.config.heater_entity) if self.config.heater_entity else None
         return (state is None or state.state not in ("off", "fan_only")
                 or state.attributes.get("hvac_action") == "heating")
@@ -348,10 +351,11 @@ class NativeControls:
     def _ack_auxiliary_heartbeat_off(self):
         if not (self.auxiliary_heartbeat_blocked or self._auxiliary_heat_possible):
             return False
-        acknowledged = bool(
-            self._auxiliary_heartbeat_off_receipt and not self.auxiliary_inflight
-            and self._is_off(self.config.heater_entity)
-            and self._auxiliary_marker() != self._auxiliary_heartbeat_baseline)
+        isolated = bool(self.power_guard is not None and self.power_guard.power_cut_confirmed)
+        acknowledged = bool(not self.auxiliary_inflight and (
+            isolated or (self._auxiliary_heartbeat_off_receipt
+                         and self._is_off(self.config.heater_entity)
+                         and self._auxiliary_marker() != self._auxiliary_heartbeat_baseline)))
         if acknowledged and not self.auxiliary_heartbeat_blocked:
             self._auxiliary_heat_possible = False
         if acknowledged != self._auxiliary_heartbeat_off_ack:
@@ -453,6 +457,11 @@ class NativeControls:
             raise HAError("External room probes block auxiliary heat")
 
     def _is_off(self, entity):
+        if (entity == self.config.heater_entity and self.power_guard is not None
+                and self.power_guard.power_cut_confirmed):
+            # The dedicated outlet is physically Off; the now-unpowered Dyson
+            # integration cannot be required to produce another report.
+            return True
         state = self.hass.states.get(entity)
         return bool(state and state.state == "off"
                     and state.attributes.get("hvac_action") not in ("heating", "cooling"))

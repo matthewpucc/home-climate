@@ -20,10 +20,18 @@ async def async_setup_entry(hass, entry):
         raise ConfigEntryError("Another house climate controller is already loaded")
     values = {**entry.data, **entry.options}
     live = values.get(CONF_LIVE, False)
+    bindings = None
     try:
-        config = await hass.async_add_executor_job(
-            entry_configuration, hass.config.config_dir, values
-        )
+        if values.get("policy") == "house":
+            from .controller.bindings import load_bindings
+            # Use one private wiring snapshot for both room control and the
+            # electrical interlock; never mix two versions of the file.
+            bindings = await hass.async_add_executor_job(load_bindings, hass.config.config_dir)
+            config = await hass.async_add_executor_job(
+                entry_configuration, hass.config.config_dir, values, bindings)
+        else:
+            config = await hass.async_add_executor_job(
+                entry_configuration, hass.config.config_dir, values)
         validate_actuators(hass, config)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ConfigEntryError(f"Invalid controller configuration: {exc}") from exc
@@ -38,7 +46,9 @@ async def async_setup_entry(hass, entry):
                 recent = True
             if recent:
                 raise ConfigEntryNotReady("An existing controller lease is active; stop the add-on or standalone controller first")
-    runtime = ControllerRuntime(hass, config, live)
+    runtime = ControllerRuntime(
+        hass, config, live, house_policy=values.get("policy") == "house",
+        power_bindings=bindings.power if bindings is not None else None)
     await runtime.async_setup_controls(entry.entry_id)
     entry.runtime_data = runtime
     hass.data[DOMAIN] = runtime
@@ -80,10 +90,25 @@ async def async_update_options(hass, entry):
 
 
 async def async_migrate_entry(hass, entry):
-    if entry.version > 2:
+    if entry.version > 3:
         return False
-    if entry.version == 1:
-        # Keep the original file and live helpers authoritative until the user saves
-        # the room editor. Merely upgrading must not reset an existing thermostat.
-        hass.config_entries.async_update_entry(entry, version=2)
+    if entry.version < 3:
+        from .comfort import async_migrate_house_holds
+        from .controller.bindings import load_bindings
+        from .house_policy import house_configuration
+
+        values = {**entry.data, **entry.options}
+        previous = await hass.async_add_executor_job(
+            entry_configuration, hass.config.config_dir, values)
+        bindings = await hass.async_add_executor_job(load_bindings, hass.config.config_dir)
+        fixed = house_configuration(previous.to_dict(), bindings=bindings)
+        # Save migrated holds before replacing the policy/fingerprints. A failed
+        # storage write leaves the old entry intact so migration can be retried.
+        await async_migrate_house_holds(hass, entry.entry_id, previous, fixed)
+        data, options = dict(entry.data), dict(entry.options)
+        # Options can contain the newest room identities. Save the effective
+        # snapshot before the minimal options form replaces those legacy options.
+        data["configuration"] = previous.to_dict()
+        data["policy"] = options["policy"] = "house"
+        hass.config_entries.async_update_entry(entry, data=data, options=options, version=3)
     return True

@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from .config import Config, Settings
 from .sensors import Reading, Sensors, from_f, to_f
+from .temperature_guard import heating_cutoff_reached, opposite_limit_reached
 
 
 def native_target(fahrenheit: float, attrs: dict, unit: str, *, minimum_f: float | None = None) -> float:
@@ -175,7 +176,7 @@ class Policy:
                 "Auxiliary heat requested but unavailable (HA modes: " + ", ".join(heater_modes) + ")")
         if auxiliary and heater_can_heat:
             low, high, target = self.band(self.config.auxiliary_room, settings, now)
-            if auxiliary.high >= min(high, self.config.heater_cutoff_f):
+            if heating_cutoff_reached(auxiliary, min(high, self.config.heater_cutoff_f), HIGH):
                 self.heater_on = False
             elif auxiliary.temperature < low:
                 self.heater_on = True
@@ -255,7 +256,7 @@ class Policy:
                             plan.warnings.append(f"{head}: cooling unavailable because {exc}")
                             continue
                 # Immediate raw extremes stop aggravating a potentially unsafe area.
-                blocked = any(rooms[name].low <= LOW + .25 for name in names) if mode == "cool" else any(rooms[name].high >= HIGH - .25 for name in names)
+                blocked = any(opposite_limit_reached(rooms[name], mode, LOW, HIGH) for name in names)
                 if blocked:
                     plan.warnings.append(f"{head}: {mode} blocked by opposite temperature limit; airflow/capacity conflict")
                     continue

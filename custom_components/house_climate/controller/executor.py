@@ -8,6 +8,7 @@ from .config import Config
 from .ha import HAActivationDeferred, HAError
 from .policy import Plan, call_target_f, native_target
 from .sensors import from_f, to_f
+from .temperature_guard import opposite_limit_reached
 
 
 class ControlFault(RuntimeError):
@@ -522,9 +523,11 @@ class Executor:
                 if not all(math.isfinite(value) for value in
                            (low, high, lower, upper, temperature)):
                     return False
-                if self.direction == "cool" and (temperature <= lower or low <= self.config.low_f + .25):
+                if opposite_limit_reached(reading, self.direction, self.config.low_f, self.config.high_f):
                     return False
-                if self.direction == "heat" and (temperature >= upper or high >= self.config.high_f - .25):
+                if self.direction == "cool" and temperature <= lower:
+                    return False
+                if self.direction == "heat" and temperature >= upper:
                     return False
             except (KeyError, TypeError, ValueError):
                 return False

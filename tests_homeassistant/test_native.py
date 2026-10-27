@@ -280,24 +280,23 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             await async_setup_entry(self.hass, entry)
         self.assertNotIn("house_climate", self.hass.data)
 
-    async def test_config_flow_import_and_single_instance(self):
+    async def test_fixed_config_flow_and_single_instance(self):
+        import json
+        from custom_components.house_climate.controller.bindings import BINDINGS_FILENAME, example_bindings
+        Path(self.directory.name, BINDINGS_FILENAME).write_text(json.dumps(example_bindings().to_dict()))
         flow = HouseClimateConfigFlow()
         flow.hass = self.hass
         flow.context = {"source": "user"}
         flow._async_current_entries = Mock(return_value=[])
-        menu = await flow.async_step_user()
-        self.assertEqual(menu["type"], "menu")
-        self.assertFalse(flow.live)
-        result = await flow.async_step_import_file({"config_file": "house_climate.toml"})
-        self.assertEqual(result["type"], "menu")
-        self.assertEqual(len(flow.draft["rooms"]), 5)
-        result = await flow.async_step_finish({})
+        form = await flow.async_step_user()
+        self.assertEqual(form["type"], "form")
+        self.assertEqual(form["step_id"], "user")
+        self.assertFalse(form["data_schema"]({})["live"])
+        result = await flow.async_step_user({"live": False})
         self.assertEqual(result["type"], "create_entry")
-        self.assertFalse(result["data"]["live"])
-        self.assertEqual(result["data"]["configuration"]["schema_version"], 2)
-        bad = await flow.async_step_import_file({"config_file": "../escape.toml"})
-        self.assertEqual(bad["errors"], {"base": "invalid_config"})
-        flow._async_current_entries.return_value = [object()]
+        self.assertEqual(result["data"], {"policy": "house", "live": False})
+        self.assertFalse(hasattr(flow, "async_step_import_file"))
+        flow._async_current_entries = Mock(return_value=[object()])
         self.assertEqual((await flow.async_step_user())["type"], "abort")
 
     async def test_config_loader_preserves_live_commissioning_gate(self):
