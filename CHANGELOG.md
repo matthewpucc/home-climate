@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+- Add optional private window/contact mappings with 120-second open and close confirmation. A confirmed open window plus a room deficit of at least 0.5°F beyond its comfort band for five minutes reduces only the affected direction's comfort priority to 25% and yields its opposing shared-head soft comfort boundary. Closed, unknown, or invalid evidence restores ordinary comfort behavior; hard protection remains active.
+- Separate configurable protection temperatures from dashboard comfort ranges. Native defaults are heating protection below 60°F normally, a 65°F floor in a qualified cold outdoor regime or with unknown outdoor conditions, and emergency cooling at 80°F. The HA form validates and saves these settings atomically; generic configurations without the new protection object retain their previous limits.
+- Accept optional explicitly mapped outdoor sensor or current weather temperatures with unit, age, and independent-source checks. Default outdoor qualification uses a 32°F reference, a ±2°F transition deadband, and five minutes of sustained valid evidence. Qualified regimes persist through the deadband; unknown conditions are identified separately and use the conservative higher floor.
+- Rank simultaneous measured heating and cooling emergencies by the larger temperature violation. Exact ties favor cooling in a qualified warm outdoor regime and heating in a cold, initially unqualified, or unknown regime by default. Changed winners between two active emergencies retain the existing 120-second direction confirmation while bypassing ordinary comfort dwell.
+- Release actual emergency priority one degree inside its protection bound by default, independently of comfort-target completion. Preserve inherited probe corroboration, immediate raw opposing stops, forecast reserves, shared-head feasibility, and mechanical acknowledgement/minimum-Off timing.
+- Fence queued integration repairs when window confirmation, sustained comfort effects, outdoor qualification/expiry, or existing probe-confirmation deadlines change the decision context, even without a new entity report.
+- Preserve valid dashboard holds and existing private bindings when optional contacts or outdoor sources are added. Expose the effective protection, outdoor regime, and window-effect evidence in controller diagnostics. Electrical, auxiliary-heater, ownership, and manual-control safeguards are unchanged; no auxiliary-heater mode fix is included.
+
 ## 0.7.3
 
 - Stop transfer fans when planned, reported, or residual source conditioning would move their destination away from its target. Preserve useful idle transfer, compatible conditioning assistance, and independent fan schedules.
