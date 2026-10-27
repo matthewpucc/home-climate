@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from .config import Config
+from .config import Config, outdoor_probe_dict
 from .bindings import BindingsError, HouseBindings, ROOM_ROLES
 from .protection import ProtectionTemperatures
 
@@ -128,10 +128,7 @@ def house_configuration(previous=None, bindings=None, protection=None):
         "helper_prefix": "house_climate", "heads": dict(bindings.heads), "rooms": rooms,
         "low_f": 66, "high_f": 75,
         "protection": protection.to_dict(),
-        "outdoor_probes": [{key: value for key, value in {
-            "entity_id": probe.entity_id, "source": probe.source,
-            "attribute": probe.attribute, "unit": probe.unit}.items() if value is not None}
-            for probe in bindings.outdoor],
+        "outdoor_probes": [outdoor_probe_dict(probe) for probe in bindings.outdoor],
         "poll_seconds": 15, "decision_interval_seconds": 90,
         "head_minimum_run_seconds": 300, "head_minimum_off_seconds": 180,
         "head_activation_timeout_seconds": 120,

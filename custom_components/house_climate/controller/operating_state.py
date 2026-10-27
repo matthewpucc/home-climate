@@ -33,6 +33,8 @@ class OperatingState:
         self.candidate = None
         self.candidate_since = None
         self.last_tick = None
+        self._last_outdoor_wall = None
+        self._outdoor_coverage_until = None
         self.room_keys = {}
         self.effects = {}
         self.active_emergencies = set()
@@ -45,15 +47,31 @@ class OperatingState:
         if settings is None:
             return context
         outside = read_outdoor(self.config, states, now)
-        backwards = self.last_tick is not None and tick < self.last_tick
+        wall = now.timestamp() if now.tzinfo is not None else None
+        backwards = (self.last_tick is not None and tick < self.last_tick
+                     or self._last_outdoor_wall is not None and wall is not None
+                     and wall < self._last_outdoor_wall)
         self.last_tick = tick
+        self._last_outdoor_wall = wall
+        # next_expiry fences the first possible policy change (for example,
+        # losing a colder alias). Continuous evidence may remain valid longer
+        # through another selected source, so retain the union's final horizon.
+        # A fresh report after that horizon cannot erase a gap hidden between
+        # polls. Intervals touching exactly at expiry have no uncovered instant.
+        coverage_gap = (outside.status == "known" and self._outdoor_coverage_until is not None
+                        and min(start for start, _end in outside.coverage_intervals)
+                        > self._outdoor_coverage_until)
+        if backwards or coverage_gap:
+            self.regime = self.candidate = self.candidate_since = None
         warnings = list(outside.warnings)
         deadline = None
         if outside.status != "known":
             self.regime = self.candidate = self.candidate_since = None
+            self._outdoor_coverage_until = None
             warnings.append("Outdoor temperature is untrusted; conservative heating floor is active")
             regime, tie = "unknown", settings.unknown_outdoor_tie_mode
         else:
+            self._outdoor_coverage_until = max(end for _start, end in outside.coverage_intervals)
             temperature = outside.temperature_f
             reference, width = settings.freezing_outdoor_below_f, settings.transition_deadband_f
             desired = ("cold" if temperature < reference and temperature <= reference - width else
@@ -80,6 +98,7 @@ class OperatingState:
                  else settings.freezing_heating_floor_f)
         return replace(context, low_f=floor, outdoor_status=outside.status,
                        outdoor_temperature_f=outside.temperature_f, outdoor_sources=outside.sources,
+                       outdoor_selected_role=outside.selected_role,
                        outdoor_regime=regime, outdoor_candidate=self.candidate, tie_mode=tie,
                        warnings=tuple(warnings), valid_until_monotonic=deadline)
 

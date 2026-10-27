@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in primary outdoor sources with fallback only when no primary is valid. Preserve coldest-valid fusion for existing unmarked bindings and within the selected tier; source aliases retain one identity and role. Expose the selected tier in protection diagnostics.
+- Give weather entities a fixed 90-minute report-age limit while retaining 30 minutes for sensor inputs. Optionally bind an actual observation-time sensor and expire at the earlier report or observation deadline; fresh HA writes cannot renew old physical observations.
+- Restart outdoor qualification after a genuine validity gap even when a polling stall hides the gap. Preserve unchanged valid reports and overlapping accepted coverage, and retain the existing five-minute qualification, outdoor deadband, conservative fallback, temperature limits, and equipment/electrical/ownership safeguards.
+
 ## 0.8.0
 
 - Add optional private window/contact mappings with 120-second open and close confirmation. A confirmed open window plus a room deficit of at least 0.5°F beyond its comfort band for five minutes reduces only the affected direction's comfort priority to 25% and yields its opposing shared-head soft comfort boundary. Closed, unknown, or invalid evidence restores ordinary comfort behavior; hard protection remains active.

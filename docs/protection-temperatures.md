@@ -13,17 +13,23 @@ can override a lower desired comfort target.
 
 ## Outdoor evidence and qualification
 
-Private bindings optionally contain an `outdoor` list of source descriptors with
-`entity_id`, an explicit physical/provider `source`, and optional `attribute` or
-`unit`. Use sensor states or weather entities' **current** temperature attributes.
-Weather uses `temperature_unit`; forecast arrays are ignored. Aliases of a source
-count once; the coldest valid independent reading is used conservatively.
-Sources require explicit F/C units and timestamps, must be less than 1800 seconds
-old, and cannot be restored, unavailable, future-dated, or implausible. One valid
-source is usable with a redundancy warning. No installed source is guessed.
+Private bindings optionally contain an `outdoor` list with explicit `entity_id`
+and physical/provider `source` identities. Sensor states or current numeric
+attributes and weather entities' current temperature attributes are supported;
+weather forecast arrays are ignored. Sources require explicit F/C units and
+valid timestamps, and cannot be restored, unavailable, future-dated, or
+implausible. Aliases count once. No installed source is guessed.
+
+Release 0.8.0 uses the coldest valid configured reading and a 30-minute outdoor
+age limit. The [unreleased outdoor-source changes](outdoor-sources.md) add opt-in
+local-primary/weather-fallback selection, a 90-minute weather reporting limit
+while retaining 30 minutes for sensor inputs, and explicit observation-time
+validation when bound. Unmarked lists preserve coldest-valid selection. These
+additions are not already available in the published 0.8.0 installation.
 
 The outdoor reference defaults to 32°F. A ±2°F transition deadband and five
-minutes of sustained valid evidence qualify a warm or cold regime. These are
+minutes of sustained valid evidence qualify cold at or below 30°F or warm at or
+above 34°F. These are
 configurable engineering defaults in 0.8.0, not a measurement of local freezing
 risk. A qualified regime persists within the deadband, including exactly
 32°F: an already-qualified warm regime keeps its normal floor and cooling tie
@@ -35,6 +41,11 @@ Missing or stale outdoor evidence immediately uses the conservative 65°F defaul
 fallback and configurable heating tie default. It is labeled **unknown**, not
 measured freezing. Validity and timer boundaries fence obsolete queued repairs
 even if no entity value changes.
+
+The unreleased continuity fix restarts qualification after a genuine validity
+gap, including a gap hidden by a polling stall. Unchanged valid cached input and
+overlapping selected-source coverage preserve qualification. The interval is
+sustained valid policy evidence, not a requirement for multiple new observations.
 
 ## Emergencies, reserves, and conflicts
 

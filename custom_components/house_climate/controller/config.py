@@ -37,19 +37,42 @@ class Probe:
     report_on_change: bool = False
 
 
+@dataclass(frozen=True)
+class OutdoorProbe:
+    """Outdoor wiring and evidence identity, without per-device policy knobs."""
+
+    entity_id: str
+    source: str
+    attribute: str | None = None
+    unit: str | None = None
+    role: str = "fallback"
+    observation_time_entity: str | None = None
+
+
+def outdoor_probe_dict(probe):
+    result = {key: value for key, value in asdict(probe).items()
+              if value is not None and not (key == "role" and value == "fallback")}
+    return result
+
+
 def parse_outdoor_probes(value):
     """Explicit current-temperature source wiring, with no rule overrides."""
     if not isinstance(value, (list, tuple)):
         raise ValueError("Outdoor sources must be a list of explicit source objects")
-    result, entities = [], set()
+    result, entities, roles = [], set(), {}
     for selected in value:
-        if isinstance(selected, Probe):
+        if isinstance(selected, OutdoorProbe):
             probe = selected
+        elif isinstance(selected, Probe):
+            if selected.offset_f != 0 or selected.report_on_change is not False:
+                raise ValueError("Outdoor wiring cannot override calibration or freshness rules")
+            probe = OutdoorProbe(selected.entity_id, selected.source, selected.attribute, selected.unit)
         else:
             if (not isinstance(selected, dict) or not {"entity_id", "source"} <= set(selected)
-                    or set(selected) - {"entity_id", "source", "attribute", "unit"}):
-                raise ValueError("Outdoor sources require entity_id/source and optional attribute/unit")
-            probe = Probe(**selected)
+                    or set(selected) - {"entity_id", "source", "attribute", "unit", "role",
+                                        "observation_time_entity"}):
+                raise ValueError("Outdoor sources require entity_id/source and optional attribute/unit/role/observation_time_entity")
+            probe = OutdoorProbe(**selected)
         if (not isinstance(probe.entity_id, str)
                 or not re.fullmatch(r"(?:sensor|weather)\.[a-z0-9_]+", probe.entity_id)):
             raise ValueError("Outdoor sources must use sensor or weather entity IDs")
@@ -62,13 +85,22 @@ def parse_outdoor_probes(value):
             raise ValueError("Weather sources must use the current temperature attribute")
         if probe.unit not in (None, "°F", "F", "°C", "C"):
             raise ValueError("Outdoor source units must be Fahrenheit or Celsius")
-        if probe.offset_f != 0 or probe.report_on_change is not False:
-            raise ValueError("Outdoor wiring cannot override calibration or freshness rules")
+        if not isinstance(probe.role, str) or probe.role not in ("primary", "fallback"):
+            raise ValueError("Outdoor source role must be primary or fallback")
+        if (probe.observation_time_entity is not None
+                and (not isinstance(probe.observation_time_entity, str)
+                     or not re.fullmatch(r"sensor\.[a-z0-9_]+", probe.observation_time_entity))):
+            raise ValueError("Outdoor observation time must use an explicit sensor entity ID")
         if probe.entity_id in entities:
             raise ValueError("Duplicate outdoor entity; aliases must use different entities and the same source")
         entities.add(probe.entity_id)
         # Whitespace must not make aliases of one source look independent.
-        result.append(Probe(probe.entity_id, probe.source.strip(), probe.attribute, probe.unit))
+        source = probe.source.strip()
+        if source in roles and roles[source] != probe.role:
+            raise ValueError("Aliases of one outdoor source must use the same role")
+        roles[source] = probe.role
+        result.append(OutdoorProbe(probe.entity_id, source, probe.attribute, probe.unit,
+                                   probe.role, probe.observation_time_entity))
     return tuple(result)
 
 
@@ -154,7 +186,7 @@ class Config:
     heater_setpoint_confirmed: bool = False
     heater_cutoff_f: float = 70
     protection: ProtectionTemperatures | None = None
-    outdoor_probes: tuple[Probe, ...] = ()
+    outdoor_probes: tuple[OutdoorProbe, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "outdoor_probes", parse_outdoor_probes(self.outdoor_probes))
@@ -216,10 +248,7 @@ class Config:
         result = {key: value for key, value in asdict(self).items()
                   if key not in ("zones", "fans", "fan_controls", "legacy")}
         if self.outdoor_probes:
-            result["outdoor_probes"] = [
-                {key: value for key, value in {"entity_id": probe.entity_id, "source": probe.source,
-                  "attribute": probe.attribute, "unit": probe.unit}.items() if value is not None}
-                for probe in self.outdoor_probes]
+            result["outdoor_probes"] = [outdoor_probe_dict(probe) for probe in self.outdoor_probes]
         else:
             result.pop("outdoor_probes", None)
         if self.legacy:

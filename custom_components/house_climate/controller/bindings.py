@@ -8,7 +8,7 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
-from .config import Probe, parse_outdoor_probes
+from .config import OutdoorProbe, outdoor_probe_dict, parse_outdoor_probes
 
 BINDINGS_FILENAME = "home_climate_bindings.json"
 LEGACY_BINDINGS_FILENAME = "house_climate_bindings.json"
@@ -71,7 +71,7 @@ class HouseBindings:
     heater: str
     power: PowerBindings
     windows: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    outdoor: tuple[Probe, ...] = ()
+    outdoor: tuple[OutdoorProbe, ...] = ()
 
     def __post_init__(self):
         if not all(isinstance(value, Mapping) for value in (self.heads, self.rooms, self.fans, self.windows)):
@@ -149,10 +149,7 @@ class HouseBindings:
         if self.windows:
             result["windows"] = {role: list(entities) for role, entities in self.windows.items()}
         if self.outdoor:
-            result["outdoor"] = [
-                {key: value for key, value in {"entity_id": probe.entity_id, "source": probe.source,
-                  "attribute": probe.attribute, "unit": probe.unit}.items() if value is not None}
-                for probe in self.outdoor]
+            result["outdoor"] = [outdoor_probe_dict(probe) for probe in self.outdoor]
         return result
 
 

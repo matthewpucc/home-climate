@@ -8,7 +8,7 @@ import unittest
 from house_climate.bindings import BindingsError, HouseBindings, example_bindings
 from house_climate.config import Config, Probe
 from house_climate.house_policy import house_configuration
-from house_climate.outdoor import OUTDOOR_MAX_AGE_SECONDS, read_outdoor
+from house_climate.outdoor import OUTDOOR_MAX_AGE_SECONDS, WEATHER_MAX_AGE_SECONDS, read_outdoor
 from house_climate.protection import ProtectionTemperatures
 from tests.test_rooms import configuration
 
@@ -19,6 +19,10 @@ def sample(value, unit="°F", *, age=0, attributes=None, state=None):
     return {"state": str(value) if state is None else state,
             "attributes": {"unit_of_measurement": unit, **(attributes or {})},
             "last_reported": (NOW - timedelta(seconds=age)).isoformat()}
+
+
+def weather(value, *, age=0):
+    return sample("clear", age=age, attributes={"temperature": value, "temperature_unit": "°F"})
 
 
 class OutdoorSourceTests(unittest.TestCase):
@@ -117,6 +121,170 @@ class OutdoorSourceTests(unittest.TestCase):
         self.assertIsNone(unknown.temperature_f)
         with self.assertRaises(FrozenInstanceError):
             result.temperature_f = 0
+
+    def test_legacy_mixed_sources_still_choose_coldest_without_an_explicit_primary(self):
+        cfg = self.cfg(Probe("sensor.local_air", "local"), Probe("weather.regional", "region"))
+        reading = read_outdoor(cfg, {"sensor.local_air": sample(40), "weather.regional": weather(25)}, NOW)
+        self.assertEqual((reading.temperature_f, reading.sources, reading.selected_role), (25, 2, "fallback"))
+
+    def test_primary_local_sensor_ignores_a_colder_weather_fallback_and_its_expiry(self):
+        cfg = self.cfg({"entity_id": "sensor.local_air", "source": "local", "role": "primary"},
+                       {"entity_id": "weather.regional", "source": "region"})
+        reading = read_outdoor(cfg, {"sensor.local_air": sample(40),
+                                    "weather.regional": weather(20, age=5399)}, NOW)
+        self.assertEqual((reading.temperature_f, reading.sources, reading.selected_role), (40, 1, "primary"))
+        self.assertEqual(reading.next_expiry, NOW.timestamp() + OUTDOOR_MAX_AGE_SECONDS)
+        self.assertEqual(reading.source_timestamps, (("local", NOW.timestamp()),))
+        self.assertEqual(reading.coverage_intervals,
+                         ((NOW.timestamp(), NOW.timestamp() + OUTDOOR_MAX_AGE_SECONDS),))
+
+    def test_primary_loss_and_recovery_select_weather_then_local_again(self):
+        cfg = self.cfg({"entity_id": "sensor.local_air", "source": "local", "role": "primary"},
+                       {"entity_id": "weather.regional", "source": "region", "role": "fallback"})
+        states = {"sensor.local_air": sample(40), "weather.regional": weather(25)}
+        self.assertEqual(read_outdoor(cfg, states, NOW).temperature_f, 40)
+        states["sensor.local_air"]["state"] = "unavailable"
+        fallback = read_outdoor(cfg, states, NOW)
+        self.assertEqual((fallback.temperature_f, fallback.sources, fallback.selected_role), (25, 1, "fallback"))
+        self.assertEqual(fallback.next_expiry, NOW.timestamp() + WEATHER_MAX_AGE_SECONDS)
+        states["sensor.local_air"] = sample(42)
+        self.assertEqual(read_outdoor(cfg, states, NOW).temperature_f, 42)
+
+    def test_coldest_valid_primary_and_alias_deduplication_remain_conservative(self):
+        cfg = self.cfg({"entity_id": "sensor.primary_a", "source": "local", "role": "primary"},
+                       {"entity_id": "sensor.primary_alias", "source": " local ", "role": "primary"},
+                       {"entity_id": "sensor.primary_b", "source": "garden", "role": "primary"},
+                       {"entity_id": "weather.regional", "source": "region"})
+        states = {"sensor.primary_a": sample(40, age=1800), "sensor.primary_alias": sample(35),
+                  "sensor.primary_b": sample(30), "weather.regional": weather(10)}
+        reading = read_outdoor(cfg, states, NOW)
+        self.assertEqual((reading.temperature_f, reading.sources, reading.selected_role), (30, 2, "primary"))
+        self.assertEqual(set(dict(reading.source_timestamps)), {"local", "garden"})
+        self.assertTrue(any("stale" in warning for warning in reading.warnings))
+
+    def test_weather_report_lifetime_is_90_minutes_and_sensor_lifetime_stays_30(self):
+        for age, known in ((5399.999, True), (5400, False)):
+            with self.subTest(kind="weather", age=age):
+                cfg = self.cfg(Probe("weather.regional", "region"))
+                reading = read_outdoor(cfg, {"weather.regional": weather(35, age=age)}, NOW)
+                self.assertEqual(reading.status == "known", known)
+                if known:
+                    self.assertAlmostEqual(reading.next_expiry, NOW.timestamp() + .001, places=5)
+        for age, known in ((1799.999, True), (1800, False)):
+            with self.subTest(kind="sensor", age=age):
+                cfg = self.cfg(Probe("sensor.local_air", "local"))
+                reading = read_outdoor(cfg, {"sensor.local_air": sample(35, age=age)}, NOW)
+                self.assertEqual(reading.status == "known", known)
+
+    def test_unchanged_report_renewal_uses_last_reported_not_last_updated(self):
+        cfg = self.cfg(Probe("weather.regional", "region"))
+        state = weather(35)
+        state["last_updated"] = (NOW - timedelta(hours=4)).isoformat()
+        reading = read_outdoor(cfg, {"weather.regional": state}, NOW)
+        self.assertEqual(reading.status, "known")
+        self.assertEqual(reading.next_expiry, NOW.timestamp() + WEATHER_MAX_AGE_SECONDS)
+        self.assertEqual(read_outdoor(cfg, {"weather.regional": state},
+                                     NOW + timedelta(seconds=WEATHER_MAX_AGE_SECONDS)).status, "unknown")
+
+    def test_report_timestamp_falls_back_only_when_last_reported_is_missing(self):
+        cfg = self.cfg(Probe("weather.regional", "region"))
+        state = weather(35)
+        state["last_updated"] = state.pop("last_reported")
+        self.assertEqual(read_outdoor(cfg, {"weather.regional": state}, NOW).status, "known")
+        state["last_reported"] = "malformed"
+        self.assertEqual(read_outdoor(cfg, {"weather.regional": state}, NOW).status, "unknown")
+
+    def test_mixed_domain_aliases_keep_individual_lifetimes_and_coverage(self):
+        cfg = self.cfg(Probe("weather.station", "same_station"), Probe("sensor.station_alias", "same_station"))
+        states = {"weather.station": weather(25, age=4000), "sensor.station_alias": sample(35, age=1200)}
+        reading = read_outdoor(cfg, states, NOW)
+        self.assertEqual((reading.temperature_f, reading.sources), (25, 1))
+        self.assertEqual(reading.next_expiry, NOW.timestamp() + 600)
+        self.assertEqual(reading.coverage_intervals, (
+            (NOW.timestamp() - 4000, NOW.timestamp() + 1400),
+            (NOW.timestamp() - 1200, NOW.timestamp() + 600),
+        ))
+        later = read_outdoor(cfg, states, NOW + timedelta(seconds=600))
+        self.assertEqual((later.temperature_f, later.sources, later.next_expiry), (25, 1, NOW.timestamp() + 1400))
+
+    def test_newer_alias_timestamp_does_not_extend_the_colder_old_alias(self):
+        cfg = self.cfg(Probe("weather.cold_alias", "station"), Probe("sensor.fresh_alias", "station"))
+        states = {"weather.cold_alias": weather(25, age=5399), "sensor.fresh_alias": sample(35)}
+        reading = read_outdoor(cfg, states, NOW)
+        self.assertEqual(reading.next_expiry, NOW.timestamp() + 1)
+        self.assertEqual(dict(reading.source_timestamps), {"station": NOW.timestamp()})
+        later = read_outdoor(cfg, states, NOW + timedelta(seconds=1))
+        self.assertEqual((later.temperature_f, later.next_expiry), (35, NOW.timestamp() + 1800))
+
+    def observation_cfg(self, *, entity="weather.station"):
+        return self.cfg({"entity_id": entity, "source": "station",
+                         "observation_time_entity": "sensor.station_observation_time"})
+
+    def test_actual_observation_age_limits_fresh_weather_publication(self):
+        cfg = self.observation_cfg()
+        observation = (NOW - timedelta(seconds=5399)).isoformat()
+        states = {"weather.station": weather(35), "sensor.station_observation_time": sample(observation)}
+        reading = read_outdoor(cfg, states, NOW)
+        self.assertEqual(reading.status, "known")
+        self.assertEqual(reading.next_expiry, NOW.timestamp() + 1)
+        self.assertEqual(reading.coverage_intervals, ((NOW.timestamp(), NOW.timestamp() + 1),))
+        self.assertEqual(read_outdoor(cfg, states, NOW + timedelta(seconds=1)).status, "unknown")
+        states["weather.station"] = weather(35)
+        states["sensor.station_observation_time"]["state"] = (NOW - timedelta(seconds=5400)).isoformat()
+        self.assertEqual(read_outdoor(cfg, states, NOW).status, "unknown")
+
+    def test_observation_time_does_not_extend_a_stale_temperature_report(self):
+        cfg = self.observation_cfg()
+        states = {"weather.station": weather(35, age=5400),
+                  "sensor.station_observation_time": sample(NOW.isoformat())}
+        self.assertEqual(read_outdoor(cfg, states, NOW).status, "unknown")
+
+    def test_explicit_observation_and_report_keep_their_own_coverage_boundaries(self):
+        cfg = self.observation_cfg()
+        states = {"weather.station": weather(35, age=1000),
+                  "sensor.station_observation_time": sample((NOW - timedelta(seconds=100)).isoformat())}
+        reading = read_outdoor(cfg, states, NOW)
+        self.assertEqual(reading.source_timestamps, (("station", NOW.timestamp() - 1000),))
+        self.assertEqual(reading.coverage_intervals,
+                         ((NOW.timestamp() - 100, NOW.timestamp() + 4400),))
+        self.assertEqual(reading.next_expiry, NOW.timestamp() + 4400)
+
+    def test_unbound_model_issue_time_is_not_guessed_to_be_an_observation_time(self):
+        cfg = self.cfg(Probe("weather.regional", "model"))
+        state = weather(35)
+        state["attributes"].update({"updated_at": (NOW - timedelta(hours=4)).isoformat(),
+                                    "forecast": [{"temperature": -50}]})
+        reading = read_outdoor(cfg, {"weather.regional": state}, NOW)
+        self.assertEqual((reading.temperature_f, reading.status), (35, "known"))
+        self.assertEqual(reading.next_expiry, NOW.timestamp() + WEATHER_MAX_AGE_SECONDS)
+
+    def test_bound_sensor_observation_age_uses_sensor_limit(self):
+        cfg = self.observation_cfg(entity="sensor.station_temperature")
+        states = {"sensor.station_temperature": sample(35),
+                  "sensor.station_observation_time": sample((NOW - timedelta(seconds=1800)).isoformat())}
+        self.assertEqual(read_outdoor(cfg, states, NOW).status, "unknown")
+
+    def test_invalid_observation_time_is_not_replaced_by_a_fresh_ha_report(self):
+        cfg = self.observation_cfg()
+        invalid = [None, sample("unknown"), sample("unavailable"), sample("not a timestamp"),
+                   sample("2026-01-15T12:00:00"), sample((NOW + timedelta(microseconds=1)).isoformat()),
+                   sample(NOW.isoformat(), attributes={"restored": True}), sample(True, state=True)]
+        for state in invalid:
+            with self.subTest(observation_state=state):
+                states = {"weather.station": weather(35), "sensor.station_observation_time": state}
+                reading = read_outdoor(cfg, states, NOW)
+                self.assertEqual(reading.status, "unknown")
+                self.assertTrue(any("observation time" in warning for warning in reading.warnings))
+
+    def test_stale_bound_observation_can_fall_back_to_another_valid_source(self):
+        cfg = self.cfg({"entity_id": "weather.station", "source": "station",
+                        "observation_time_entity": "sensor.station_observation_time", "role": "primary"},
+                       {"entity_id": "weather.model", "source": "model"})
+        states = {"weather.station": weather(35),
+                  "sensor.station_observation_time": sample((NOW - timedelta(seconds=5400)).isoformat()),
+                  "weather.model": weather(40)}
+        reading = read_outdoor(cfg, states, NOW)
+        self.assertEqual((reading.temperature_f, reading.selected_role), (40, "fallback"))
 
 
 class OutdoorWiringTests(unittest.TestCase):
