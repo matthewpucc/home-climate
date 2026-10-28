@@ -56,6 +56,7 @@ class ProtectionContext:
     outdoor_status: str = "not_used"
     outdoor_temperature_f: float | None = None
     outdoor_sources: int = 0
+    outdoor_selected_role: str | None = None
     outdoor_regime: str = "legacy"
     outdoor_candidate: str | None = None
     tie_mode: str = "heat"

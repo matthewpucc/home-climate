@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1
+
+- Add opt-in primary outdoor sources with fallback when no primary is valid; preserve existing unmarked source selection.
+- Use a 90-minute weather report-age limit and retain 30 minutes for sensor inputs, with optional explicit observation-age checks.
+- Requalify outdoor conditions after genuine validity gaps while preserving unchanged valid reports, overlapping coverage, existing temperature limits, and equipment safeguards.
+
 ## 0.7.2
 
 - Prioritize house-temperature protection over another attached room's soft comfort preference, while preserving immediate raw/forecast opposing house cutoffs, missing-probe inhibition, and hardware acknowledgement/off timers.

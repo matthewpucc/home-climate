@@ -59,6 +59,7 @@ def controller_entity_ids(config):
         *(probe.entity_id for room in config.zones.values() for probe in room.probes),
         *(entity for room in config.zones.values() for entity in room.windows),
         *(probe.entity_id for probe in config.outdoor_probes),
+        *(probe.observation_time_entity for probe in config.outdoor_probes if probe.observation_time_entity),
         config.entity("enabled"), config.entity("heater_owned"),
         config.entity("heartbeat", "input_datetime"),
         config.entity("status", "input_text"),
@@ -469,7 +470,9 @@ class ControllerRuntime:
         self.config = config
         self.live = live
         self._window_entities = frozenset(entity for room in config.zones.values() for entity in room.windows)
-        self._outdoor_entities = frozenset(probe.entity_id for probe in config.outdoor_probes)
+        self._outdoor_entities = frozenset(
+            entity for probe in config.outdoor_probes
+            for entity in (probe.entity_id, probe.observation_time_entity) if entity)
         self.stop_event = threading.Event()
         self.wake_event = threading.Event()
         self.controls = None
@@ -606,7 +609,8 @@ class ControllerRuntime:
         if event.data["entity_id"] in self._outdoor_entities:
             def evidence(state):
                 return ((state.state, *(state.attributes.get(key) for key in
-                        ("temperature", "temperature_unit", "unit_of_measurement", "restored")))
+                        ("temperature", "temperature_unit", "unit_of_measurement", "restored",
+                         *(probe.attribute for probe in self.config.outdoor_probes if probe.attribute))))
                         if state is not None else None)
             if evidence(old) != evidence(new):
                 self.wake_event.set()

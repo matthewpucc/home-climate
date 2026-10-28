@@ -7,6 +7,7 @@ import unittest
 from house_climate.config import Config, Probe, Settings
 from house_climate.protection import ProtectionTemperatures
 from house_climate.recovery_inputs import signature
+from house_climate.outdoor import OUTDOOR_MAX_AGE_SECONDS, WEATHER_MAX_AGE_SECONDS
 from tests.test_rooms import NOW, configuration, states
 
 
@@ -30,8 +31,19 @@ class EnvironmentInputTests(unittest.TestCase):
             replace(probe, report_on_change=True) for probe in room.probes))
             for name, room in self.cfg.zones.items()})
         before = self.stamp()
-        self.assertEqual(self.stamp(NOW + timedelta(seconds=1799)), before)
-        self.assertNotEqual(self.stamp(NOW + timedelta(seconds=1800)), before)
+        self.assertEqual(self.stamp(NOW + timedelta(seconds=WEATHER_MAX_AGE_SECONDS - 1)), before)
+        self.assertNotEqual(self.stamp(NOW + timedelta(seconds=WEATHER_MAX_AGE_SECONDS)), before)
+
+    def test_physical_sensor_material_inputs_still_expire_at_thirty_minutes(self):
+        entity = "sensor.fixture_external_temperature"
+        self.cfg = replace(self.cfg, outdoor_probes=(Probe(entity, "local"),), zones={
+            name: replace(room, probes=tuple(replace(probe, report_on_change=True) for probe in room.probes))
+            for name, room in self.cfg.zones.items()})
+        self.data[entity] = {"state": "32", "last_reported": NOW.isoformat(),
+                             "attributes": {"unit_of_measurement": "°F"}}
+        before = self.stamp()
+        self.assertEqual(self.stamp(NOW + timedelta(seconds=OUTDOOR_MAX_AGE_SECONDS - 1)), before)
+        self.assertNotEqual(self.stamp(NOW + timedelta(seconds=OUTDOOR_MAX_AGE_SECONDS)), before)
 
     def test_forecasts_and_identical_current_report_refresh_do_not_change_material_inputs(self):
         before = self.stamp()
