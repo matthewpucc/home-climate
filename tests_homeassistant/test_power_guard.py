@@ -66,6 +66,63 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
         self.guard.async_start()
         await self.hass.async_block_till_done()
 
+    async def test_real_interval_checks_expiry_without_state_events(self):
+        wall = [datetime.now(timezone.utc).timestamp()]
+        self.guard._wall_clock = lambda: wall[0]
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        callback_errors = []
+        loop.set_exception_handler(lambda _loop, context: callback_errors.append(context))
+        try:
+            with patch.object(power, "CHECK_SECONDS", .01), patch.object(
+                self.guard, "_observe", wraps=self.guard._observe
+            ) as observe:
+                await self.start()
+                self.assertFalse(self.guard.blocked)
+                initial_checks = observe.call_count
+                # No state event follows this clock advance: only HA's actual
+                # interval helper, which supplies a datetime, can notice expiry.
+                wall[0] += power.TELEMETRY_MAX_AGE_SECONDS + 1
+                deadline = loop.time() + 2
+                while observe.call_count < initial_checks + 3 and loop.time() < deadline:
+                    await asyncio.sleep(.01)
+                self.assertEqual(len(callback_errors), 0,
+                                 [str(error.get("exception")) for error in callback_errors[:3]])
+                self.assertGreaterEqual(observe.call_count, initial_checks + 3)
+                self.assertTrue(self.guard.blocked)
+                self.assertIn("reading not current", self.guard.diagnostics["reason"])
+                self.assertFalse(self.guard.diagnostics["latched"])
+                self.assertEqual(self.calls, [])
+                await self.guard.async_close()
+                closed_checks = observe.call_count
+                await asyncio.sleep(.04)
+                self.assertEqual(observe.call_count, closed_checks)
+                self.assertEqual(len(callback_errors), 0,
+                                 [str(error.get("exception")) for error in callback_errors[:3]])
+        finally:
+            await self.guard.async_close()
+            loop.set_exception_handler(previous_handler)
+
+    async def test_state_events_preserve_manual_on_off_ownership(self):
+        self.hass.states.async_set(B.heater_switch, "off")
+        store = Mock(async_load=AsyncMock(return_value={
+            "latched": True, "switch_cut_owned": True, "restore_attempts": 0,
+            "trip_wall": datetime.now(timezone.utc).timestamp(),
+        }), async_save=AsyncMock())
+        with patch("homeassistant.helpers.storage.Store", return_value=store):
+            await self.start()
+        self.assertTrue(self.guard.switch_cut_owned)
+        self.hass.states.async_set(B.heater_switch, "on")
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard._manual_power_seen)
+        self.assertTrue(self.guard.switch_cut_owned)
+        self.hass.states.async_set(B.heater_switch, "off")
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.guard.switch_cut_owned)
+        self.assertFalse(self.guard._manual_power_seen)
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertEqual(self.guard.diagnostics["restore_attempts"], 0)
+
     async def test_manual_heat_is_shed_without_enabling_comfort_controller(self):
         await self.start()
         self.ignore_climate = True

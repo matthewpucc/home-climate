@@ -296,10 +296,15 @@ class HeaterPowerGuard:
                 self._manual_power_seen = True
             self._schedule_check()
 
+        @callback
+        def interval_elapsed(_now):
+            # HA interval listeners receive a UTC datetime, not a state Event.
+            self._schedule_check()
+
         self._active = True
         self._unsubscribers = [
             async_track_state_change_event(self.hass, self.entity_ids, changed),
-            async_track_time_interval(self.hass, changed, timedelta(seconds=CHECK_SECONDS)),
+            async_track_time_interval(self.hass, interval_elapsed, timedelta(seconds=CHECK_SECONDS)),
         ]
         self._schedule_check()
 
