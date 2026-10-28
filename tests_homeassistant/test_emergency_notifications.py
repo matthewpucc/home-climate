@@ -17,6 +17,8 @@ class EmergencyNotificationTests(unittest.IsolatedAsyncioTestCase):
     handle = emergency.EmergencyACGuardTests.handle
     direct_bindings = emergency.EmergencyACGuardTests.direct_bindings
     start = emergency.EmergencyACGuardTests.start
+    # Notice assertions use the common immediate battery-reserve trip; they
+    # are independent of input/circuit report qualification timing.
     trip = emergency.EmergencyACGuardTests.trip
     switch_calls = emergency.EmergencyACGuardTests.switch_calls
     wait_for = emergency.EmergencyACGuardTests.wait_for

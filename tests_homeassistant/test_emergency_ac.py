@@ -133,8 +133,11 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         return guard
 
     async def trip(self, *, wait=True):
+        # These fixtures exercise shutdown, ownership and recovery rather than
+        # sustained wall-load timing. Use the independent immediate reserve
+        # condition without disturbing any aggregate-output baseline.
         self.hass.states.async_set(BASE.heater, "heat", {"hvac_action": "heating"})
-        self.hass.states.async_set(BASE.input_power, "1500", {"unit_of_measurement": "W"})
+        self.hass.states.async_set(BASE.battery, "40", {"unit_of_measurement": "%"})
         if wait:
             await self.hass.async_block_till_done()
 

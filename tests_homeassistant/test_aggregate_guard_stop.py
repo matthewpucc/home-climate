@@ -150,8 +150,12 @@ class NativeAggregateGuardStopTests(unittest.IsolatedAsyncioTestCase):
 
     async def trip(self, *, action="heating"):
         self.hass.states.async_set(BASE.heater, "heat", {"hvac_action": action})
-        # Use the existing electrical input budget, not a new temperature rule.
-        self.hass.states.async_set(BASE.input_power, "1500", {"unit_of_measurement": "W"})
+        # These tests isolate aggregate/native-Off corroboration, not the
+        # independent 30-second wall-load qualifier. A genuine reserve-boundary
+        # event still requires immediate shutdown without changing its output
+        # baseline, report spacing or native acknowledgement requirements.
+        self.hass.states.async_set(BASE.battery, "40", {"unit_of_measurement": "%"},
+                                   force_update=True)
         await self.hass.async_block_till_done()
 
     async def wait_for(self, predicate, timeout=1):
