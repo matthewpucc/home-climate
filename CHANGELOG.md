@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.2
+
+- Restore the native heater power guard's periodic checks by separating HA's UTC-datetime interval callback from its state-event callback. The previous shared callback could raise every five seconds before checking telemetry expiry or recovery deadlines.
+- Preserve state-driven manual outlet ownership, cutoff acknowledgements, persisted latches, electrical thresholds, and cooldown/restoration rules. Real HA interval regressions verify time-only telemetry expiry without callback errors, listener cancellation, and manual On-to-Off ownership handling.
+
 ## 0.8.1
 
 - Add opt-in primary outdoor sources with fallback only when no primary is valid. Preserve coldest-valid fusion for existing unmarked bindings and within the selected tier; source aliases retain one identity and role. Expose the selected tier in protection diagnostics.
