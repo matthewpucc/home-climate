@@ -32,7 +32,7 @@ home-climate --config config.example.toml demo
 Native integration (Python 3.14):
 
 ```sh
-python -m pip install -e '.[test]' 'homeassistant==2026.10.1'
+python -m pip install -e '.[test]' 'homeassistant==2026.10.4'
 python -m unittest discover -s tests_homeassistant -v
 python scripts/package_hacs.py
 ```

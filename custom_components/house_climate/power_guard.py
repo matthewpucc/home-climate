@@ -179,6 +179,7 @@ class HeaterPowerGuard:
         self._safe_since = None
         self._off_confirmed = False
         self._off_request_wall = None
+        self._manual_off_wall = None
         self._restore_attempts = 0
         self._restoring = False
         self._closed = False
@@ -277,9 +278,14 @@ class HeaterPowerGuard:
             return True
         if self._shutdown_contradicted:
             return False
-        if self._off_request_wall is None:
+        if self._off_boundary() is None:
             return self._heater_off()
         return self._off_confirmed and self._heater_off(fresh=True)
+
+    def _off_boundary(self):
+        """A verified manual recovery is evidence, not a fabricated command."""
+        return max((stamp for stamp in (self._off_request_wall, self._manual_off_wall)
+                    if stamp is not None), default=None)
 
     def _switch_cut_observed(self):
         # Physical isolation and restoration ownership are independent. A user's
@@ -530,7 +536,8 @@ class HeaterPowerGuard:
             return True
         try:
             stamp = _timestamp(reported)
-            return (self._off_request_wall is not None and stamp > self._off_request_wall
+            boundary = self._off_boundary()
+            return (boundary is not None and stamp > boundary
                     and not attrs.get("restored") and not attrs.get("assumed_state")
                     and -5 <= self._wall_clock() - stamp <= TELEMETRY_MAX_AGE_SECONDS)
         except (ValueError, TypeError, OverflowError):
@@ -571,7 +578,7 @@ class HeaterPowerGuard:
 
     def _heater_current_stopped(self, *, after=None):
         entity = self.bindings.heater_current
-        boundary = self._off_request_wall if after is None else after
+        boundary = self._off_boundary() if after is None else after
         if entity is None or boundary is None:
             return None
         try:
@@ -644,7 +651,8 @@ class HeaterPowerGuard:
             self._recovery_task = self.hass.async_create_task(self._acknowledge_emergency())
         return await asyncio.shield(self._recovery_task)
 
-    async def _acknowledge_emergency(self):
+    def _manual_recovery_evidence(self):
+        """Validate current recovery inputs, including after a storage await."""
         if not (self._emergency_ac_latched or self._manual_recovery_required):
             raise RuntimeError("No emergency or wiring recovery is pending")
         if (not self.live or self._closed or self._positive_tasks
@@ -678,6 +686,18 @@ class HeaterPowerGuard:
             raise RuntimeError("Fresh, safe electrical readings and battery above 40% are required")
         if self.bindings.heater_current is not None and self._heater_current_stopped(after=barrier) is not True:
             raise RuntimeError("Fresh low heater current after restoration is required")
+        return barrier, reading
+
+    def _manual_recovery_generation(self):
+        return (self._manual_recovery_wall, self._emergency_ac_request_wall,
+                self._emergency_ac_attempts, self._emergency_ac_latched,
+                self._manual_recovery_required, self._identity_mismatch,
+                self._latched, self._trip_wall, self._cut_owned,
+                self._off_request_wall, self._shutdown_contradicted)
+
+    async def _acknowledge_emergency(self):
+        barrier, reading = self._manual_recovery_evidence()
+        generation = self._manual_recovery_generation()
         # Publish/retain inhibition until the prospective cleared state is
         # durable. A cancelled button caller cannot cancel this actual save.
         prospective = {**self._saved_state(), "emergency_ac_latched": False,
@@ -685,14 +705,29 @@ class HeaterPowerGuard:
                        "binding_identity": self._binding_identity(),
                        "emergency_ac_request_wall": None, "emergency_ac_attempts": 0,
                        "emergency_ac_reason": None}
+        revalidation_error = None
         try:
             if self._store is not None:
                 async with self._store_lock:
                     await self._store.async_save(prospective)
+                    try:
+                        current_barrier, reading = self._manual_recovery_evidence()
+                        if (current_barrier != barrier
+                                or self._manual_recovery_generation() != generation):
+                            raise RuntimeError("Recovery changed during acknowledgement; verify it again")
+                    except RuntimeError as exc:
+                        # HA events and actual service work can advance during
+                        # the write. Retain inhibition in memory and storage;
+                        # an older acknowledgement must not erase a new fault.
+                        revalidation_error = exc
+                        await self._store.async_save(self._saved_state())
         except Exception as exc:
             self._persistence_error = "Cannot persist manual heater recovery acknowledgement"
             self._publish()
             raise RuntimeError(self._persistence_error) from exc
+        if revalidation_error is not None:
+            self._publish()
+            raise revalidation_error
         self._emergency_ac_latched = self._manual_recovery_required = self._identity_mismatch = False
         self._saved_binding_identity = self._binding_identity()
         self._cut_owned = False
@@ -704,6 +739,7 @@ class HeaterPowerGuard:
         self._emergency_ac_reason = None
         self._manual_recovery_wall = None
         self._off_confirmed = True
+        self._manual_off_wall = barrier
         self._safe_since = None
         self._reading = reading
         self._schedule_check()
@@ -854,6 +890,7 @@ class HeaterPowerGuard:
         self._tripped_at = self._trip_wall = self._safe_since = None
         self._restore_attempts = 0
         self._off_request_wall = None
+        self._manual_off_wall = None
         self._shutdown_contradicted = False
         self._save()
         _LOGGER.info("Living-room heater power guard recovered; normal room demand may request heat")
@@ -962,6 +999,7 @@ class HeaterPowerGuard:
     async def _off_ack(self, seconds):
         contradictory = False
         self._shutdown_contradicted = False
+        self._manual_off_wall = None
         policy = getattr(self.bindings, "aggregate_stop_confirmation", None)
         if policy is not None:
             self._observe_aggregate_baseline()

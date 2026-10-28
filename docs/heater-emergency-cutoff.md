@@ -207,11 +207,34 @@ heater is Off.
 The **Acknowledge heater power recovery** button requires fresh AC-On feedback
 for a shared emergency, a fresh native heater-Off report after recovery, fresh
 safe electrical readings, battery above 40%, no pending service/cleanup work,
-and successful persistence. A configured heater meter must also report fresh
-low current. The button clears the manual-recovery requirement only; it never
-energizes equipment. Ordinary cooldown and safe-load qualification still apply.
+live-command permission and successful persistence. A configured heater meter
+must also report fresh low current. The button acknowledges manual, wiring and
+shared-emergency recovery without energizing equipment or restoring old outlet
+ownership. Ordinary cooldown and safe-load qualification still apply.
 Acknowledgement can also let a deferred unload finish after actual jobs drain;
 it does not permit new activation during shutdown.
+
+Enabling live commands starts the independent protection guard even if
+**Controller enabled** remains Off. Do not turn live permission on merely to
+clear a warning before verifying the wiring and recovery prerequisites. Saving
+that permission reloads the integration, so a fresh native Off report after the
+reload is required for recovery. Thermostat Heat/idle is not mode Off.
+
+### Restart recovery correction (0.8.5 or later)
+
+After a restarted acknowledgement, verified manual Off supplies its own
+runtime-only freshness boundary. It does not fabricate an actual Off command,
+restore outlet ownership or enable comfort control. The ordinary latch still
+requires 60 seconds of continuously safe load and the remaining five-minute
+trip cooldown before normal demand becomes eligible. New reports must stay
+valid; restarting again does not retain that manual evidence as fresh proof.
+
+Acknowledgement rechecks evidence and pending work after its durable write.
+If recovery changed, data expired or cleanup began while storage was waiting,
+the guard retains inhibition in memory and storage and rejects the old
+acknowledgement. No shared-AC On command is issued by this process.
+
+### Dedicated outlet recovery
 
 Dedicated-outlet automatic recovery remains separate: it requires a valid heater
 meter, battery above 40%, stable safe load and cooldown, and can restore only

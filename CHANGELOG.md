@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.5
+
+- Preserve verified manual-Off evidence separately from actual command timestamps after a restarted heater wiring/emergency acknowledgement. Allow the existing safe-load and trip cooldown to finish without a new device command, restoring only eligibility for normal demand; never restore shared AC or old outlet ownership.
+- Recheck current recovery evidence and pending work after acknowledgement persistence. If readings expire, recovery changes or cleanup starts during the write, retain durable inhibition and require a new acknowledgement.
+
 ## 0.8.4
 
 - Add opt-in relative aggregate-output corroboration using a qualified recent pre-stop window and sustained post-Off reports, allowing other shared loads to remain above the absolute low-output ceiling. Preserve the existing default, native-Off acknowledgement and escalation timing, unknown-evidence behavior, and manual shared-AC recovery.
