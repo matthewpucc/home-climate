@@ -31,7 +31,7 @@ Schedules use America/Los_Angeles. Comfort cards retain their 66–75°F editing
 
 Room control uses external ambient probes. Heat-pump readings remain available for equipment setpoint compensation, but cannot make a warm room appear cold. Living uses its assigned ambient probes rather than the heater's thermometer. A real cold-corner measurement remains valid without an invented calibration offset.
 
-An [unreleased outdoor-source draft](docs/outdoor-sources.md) adds explicit local-primary/weather-fallback selection, source-specific age limits, observation-time checks, and qualification recovery after reporting gaps. Existing unmarked source lists retain coldest-valid selection; these additions are not in the published 0.8.0 release.
+Version 0.8.1 adds [explicit local-primary/weather-fallback selection](docs/outdoor-sources.md), source-specific age limits, observation-time checks, and qualification recovery after reporting gaps. Existing unmarked source lists retain coldest-valid selection; mark a primary explicitly in the private bindings file to opt in.
 
 The system makes comfort decisions every 90 seconds. Fifteen-second maintenance checks handle temperature cutoffs and acknowledgements. Five-minute acknowledged head runs and three-minute off periods reduce unnecessary cycling; protection and equipment recovery can override a run.
 

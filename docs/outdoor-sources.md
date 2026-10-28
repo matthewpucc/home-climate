@@ -1,9 +1,8 @@
-# Outdoor sources (unreleased)
+# Outdoor sources
 
-This guide describes the draft source-selection and freshness changes after
-0.8.0. They are not available in the published 0.8.0 release. The new behavior
-requires a future validated release; this draft does not change a running
-installation or select any device automatically.
+This guide describes source selection and freshness in version 0.8.1 and later.
+Installing the update does not select any device automatically; primary and
+fallback roles are supplied in the existing private bindings file.
 
 ## Local primary and weather fallback
 
@@ -43,8 +42,8 @@ and `temperature_unit`; forecast arrays are ignored.
 Before marking a local probe primary, verify its actual entity, units, reporting
 cadence, timestamps, and placement. A probe's presence does not establish that it
 measures representative outdoor air. There is no automatic sensor discovery or
-new configuration-screen field for these bindings. After installing a future
-release, file changes require the integration's normal reload procedure; they
+new configuration-screen field for these bindings. After installing the update,
+file changes require the integration's normal reload procedure; they
 are not hot-reloaded. Verify the plan with control disabled first.
 
 ## Bounded freshness

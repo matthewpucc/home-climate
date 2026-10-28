@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1
 
 - Add opt-in primary outdoor sources with fallback only when no primary is valid. Preserve coldest-valid fusion for existing unmarked bindings and within the selected tier; source aliases retain one identity and role. Expose the selected tier in protection diagnostics.
 - Give weather entities a fixed 90-minute report-age limit while retaining 30 minutes for sensor inputs. Optionally bind an actual observation-time sensor and expire at the earlier report or observation deadline; fresh HA writes cannot renew old physical observations.
