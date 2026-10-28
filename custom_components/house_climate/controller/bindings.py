@@ -1,4 +1,4 @@
-"""Private device wiring for the fixed house policy; no operating-rule options."""
+"""Private device wiring and explicit power-confirmation calibration."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -8,6 +8,7 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
+from .aggregate_stop import AggregateStopConfig
 from .config import OutdoorProbe, outdoor_probe_dict, parse_outdoor_probes
 
 BINDINGS_FILENAME = "home_climate_bindings.json"
@@ -41,26 +42,68 @@ def _entity(value, domain, label):
 @dataclass(frozen=True)
 class PowerBindings:
     heater: str
-    heater_switch: str
+    heater_switch: str | None
     battery: str
     circuit_power: str
     input_power: str
     output_power: str
-    heater_current: str
+    heater_current: str | None
     wall_phase_a_voltage: str
     wall_phase_b_voltage: str
+    emergency_ac_switch: str | None = None
+    emergency_ac_fallback_enabled: bool = False
+    aggregate_stop_confirmation: AggregateStopConfig | None = None
+    emergency_notify_service: str | None = None
 
     def __post_init__(self):
+        if type(self.emergency_ac_fallback_enabled) is not bool:
+            raise BindingsError("power.emergency_ac_fallback_enabled must be a boolean")
+        if self.emergency_ac_fallback_enabled and self.emergency_ac_switch is None:
+            raise BindingsError("Enabled emergency AC fallback requires power.emergency_ac_switch")
+        if (self.aggregate_stop_confirmation is not None
+                and not isinstance(self.aggregate_stop_confirmation, AggregateStopConfig)):
+            raise BindingsError("power.aggregate_stop_confirmation must be validated calibration")
+        if self.emergency_notify_service is not None and (
+                not isinstance(self.emergency_notify_service, str)
+                or not re.fullmatch(r"notify\.[a-z0-9_]+", self.emergency_notify_service)):
+            raise BindingsError("power.emergency_notify_service must be a notify service name")
         values = asdict(self)
+        values.pop("aggregate_stop_confirmation")
+        values.pop("emergency_ac_fallback_enabled")
+        values.pop("emergency_notify_service")
         for role, value in values.items():
-            domain = "climate" if role == "heater" else "switch" if role == "heater_switch" else "sensor"
+            if value is None and role in {"heater_switch", "heater_current", "emergency_ac_switch"}:
+                continue
+            domain = ("climate" if role == "heater" else "switch"
+                      if role in {"heater_switch", "emergency_ac_switch"} else "sensor")
             _entity(value, domain, f"power.{role}")
-        if len(set(values.values())) != len(values):
+        entities = [value for value in values.values() if value is not None]
+        if len(set(entities)) != len(entities):
             raise BindingsError("Power roles must use distinct device entities")
+        if self.heater_switch is None and self.emergency_ac_switch is None:
+            raise BindingsError("A direct heater path requires power.emergency_ac_switch")
 
     @property
     def entity_ids(self):
-        return frozenset(asdict(self).values())
+        return frozenset(value for role, value in asdict(self).items()
+                         if role not in {"aggregate_stop_confirmation", "emergency_ac_fallback_enabled",
+                                         "emergency_notify_service"}
+                         and value is not None)
+
+    def to_dict(self):
+        """Keep absent optional stages absent in existing private wiring files."""
+        result = asdict(self)
+        result.pop("heater")
+        result.pop("aggregate_stop_confirmation")
+        if self.emergency_ac_switch is None:
+            result.pop("emergency_ac_switch")
+        if not self.emergency_ac_fallback_enabled:
+            result.pop("emergency_ac_fallback_enabled")
+        if self.emergency_notify_service is None:
+            result.pop("emergency_notify_service")
+        if self.aggregate_stop_confirmation is not None:
+            result["aggregate_stop_confirmation"] = self.aggregate_stop_confirmation.to_dict()
+        return result
 
 
 @dataclass(frozen=True)
@@ -124,7 +167,9 @@ class HouseBindings:
         _keys(raw["heads"], HEAD_ROLES, "heads")
         _keys(raw["rooms"], ROOM_ROLES, "rooms")
         _keys(raw["fans"], FAN_ROLES, "fans")
-        _keys(raw["power"], POWER_ROLES, "power")
+        _keys(raw["power"], POWER_ROLES, "power",
+              optional={"emergency_ac_switch", "emergency_ac_fallback_enabled",
+                        "aggregate_stop_confirmation", "emergency_notify_service"})
         for role, selected in raw["rooms"].items():
             if not isinstance(selected, list):
                 raise BindingsError(f"rooms.{role} must list ambient sensor entity IDs")
@@ -134,15 +179,21 @@ class HouseBindings:
         for role, selected in windows.items():
             if not isinstance(selected, list):
                 raise BindingsError(f"windows.{role} must list binary_sensor entity IDs")
-        power = PowerBindings(heater=raw["heater"], **raw["power"])
+        power_data = dict(raw["power"])
+        if power_data.get("aggregate_stop_confirmation") is not None:
+            try:
+                power_data["aggregate_stop_confirmation"] = AggregateStopConfig.from_dict(
+                    power_data["aggregate_stop_confirmation"])
+            except (TypeError, ValueError) as exc:
+                raise BindingsError(str(exc)) from None
+        power = PowerBindings(heater=raw["heater"], **power_data)
         outdoor = raw.get("outdoor", [])
         if not isinstance(outdoor, list) or any(not isinstance(item, dict) for item in outdoor):
             raise BindingsError("outdoor must list explicit current-temperature source objects")
         return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power, windows, outdoor)
 
     def to_dict(self):
-        power = asdict(self.power)
-        power.pop("heater")
+        power = self.power.to_dict()
         result = {"heads": dict(self.heads),
                 "rooms": {role: list(probes) for role, probes in self.rooms.items()},
                 "fans": dict(self.fans), "heater": self.heater, "power": power}

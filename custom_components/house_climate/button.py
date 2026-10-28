@@ -11,12 +11,18 @@ from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 
 async def async_setup_entry(hass, entry, async_add_entities):
     entities = [ReloadHeadIntegration(entry, key) for key in entry.runtime_data.config.heads]
+    guard = getattr(entry.runtime_data, "power_guard", None)
+    if guard is not None and (getattr(guard.bindings, "emergency_ac_switch", None)
+                              or guard.diagnostics.get("manual_recovery_required")):
+        entities.append(AcknowledgeHeaterRecovery(entry))
     registry = er.async_get(hass)
     current = {entity.unique_id for entity in entities}
     prefix = f"{entry.entry_id}_reload_"
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (entity.domain == "button" and entity.platform == DOMAIN
-                and entity.unique_id.startswith(prefix) and entity.unique_id not in current):
+                and (entity.unique_id.startswith(prefix)
+                     or entity.unique_id == f"{entry.entry_id}_heater_power_recovery")
+                and entity.unique_id not in current):
             registry.async_remove(entity.entity_id)
     async_add_entities(entities)
 
@@ -65,4 +71,35 @@ class ReloadHeadIntegration(ButtonEntity):
         try:
             await self.runtime.recovery.async_reload_entity(self.head_entity_id)
         except (RuntimeError, ValueError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
+
+class AcknowledgeHeaterRecovery(ReloadHeadIntegration):
+    """Acknowledge completed manual recovery without energizing any equipment."""
+    _attr_icon = "mdi:shield-check"
+
+    def __init__(self, entry):
+        self.runtime = entry.runtime_data
+        self._attr_name = "Acknowledge heater power recovery"
+        self._attr_unique_id = f"{entry.entry_id}_heater_power_recovery"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id)}, "name": DEVICE_NAME,
+            "manufacturer": NAME, "model": "Shared heat-pump controller",
+        }
+
+    @property
+    def available(self):
+        # Manual acknowledgement cannot energize equipment. Keep it usable
+        # during deferred unload so verified recovery can release ownership.
+        guard = self.runtime.power_guard
+        return guard is not None and not guard._closed
+
+    @property
+    def extra_state_attributes(self):
+        return {"action": "Acknowledge verified manual recovery only; never turns power On"}
+
+    async def async_press(self):
+        try:
+            await self.runtime.power_guard.async_acknowledge_emergency()
+        except RuntimeError as exc:
             raise HomeAssistantError(str(exc)) from exc

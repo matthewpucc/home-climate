@@ -322,6 +322,9 @@ class NativeControls:
                 state.last_updated, state.last_changed)
 
     def _auxiliary_could_heat(self):
+        if (self.power_guard is not None
+                and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
+            return not self.power_guard.shutdown_confirmed
         if self.power_guard is not None and self.power_guard.power_cut_confirmed:
             return False
         state = self.hass.states.get(self.config.heater_entity) if self.config.heater_entity else None
@@ -556,8 +559,11 @@ class NativeControls:
 
     def _is_off(self, entity):
         if (entity == self.config.heater_entity and self.power_guard is not None
+                and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
+            return self.power_guard.shutdown_confirmed
+        if (entity == self.config.heater_entity and self.power_guard is not None
                 and self.power_guard.power_cut_confirmed):
-            # The dedicated outlet is physically Off; the now-unpowered Dyson
+            # The configured cutoff reports Off; the now-unpowered Dyson
             # integration cannot be required to produce another report.
             return True
         if entity in self._uncertain_device_jobs:
@@ -652,12 +658,17 @@ class NativeControls:
         receipt = self.auxiliary_off_started() if entity == self.config.heater_entity else None
         head_receipt = self.head_off_started(entity)
         try:
-            await self.hass.services.async_call(
-                entity.split(".", 1)[0],
-                "set_hvac_mode" if entity.startswith("climate.") else "turn_off",
-                {"entity_id": entity, **({"hvac_mode": "off"} if entity.startswith("climate.") else {})},
-                blocking=True,
-            )
+            if (entity == self.config.heater_entity and self.power_guard is not None
+                    and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
+                if not await self.power_guard.async_request_heater_off():
+                    raise HAError("Heater shutdown remains unconfirmed")
+            else:
+                await self.hass.services.async_call(
+                    entity.split(".", 1)[0],
+                    "set_hvac_mode" if entity.startswith("climate.") else "turn_off",
+                    {"entity_id": entity, **({"hvac_mode": "off"} if entity.startswith("climate.") else {})},
+                    blocking=True,
+                )
             if entity == self.config.heater_entity:
                 self.auxiliary_off_finished(receipt)
             if head_receipt is not None:

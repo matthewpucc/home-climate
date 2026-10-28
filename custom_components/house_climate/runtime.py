@@ -438,7 +438,12 @@ class NativeAPI:
                             and body.get("hvac_mode") == "off" else None)
         try:
             operation.started = True
-            await self.hass.services.async_call(domain, service, body, blocking=True)
+            if (auxiliary_off and self.power_guard is not None
+                    and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
+                if not await self.power_guard.async_request_heater_off():
+                    raise HAError("Heater shutdown remains unconfirmed")
+            else:
+                await self.hass.services.async_call(domain, service, body, blocking=True)
         except (HAError, TimeoutError):
             raise
         except Exception as exc:
@@ -526,6 +531,8 @@ class ControllerRuntime:
                     self.hass, bindings=self.power_bindings, live=self.live, entry_id=entry_id,
                     notify=self._async_power_guard_changed)
                 self.api.power_guard = self.power_guard
+                self.power_guard.pending_external_jobs = lambda: self.api.service_jobs(
+                    {self.config.heater_entity})
                 if self.controls is not None:
                     self.controls.power_guard = self.power_guard
                 await self.power_guard.async_load()

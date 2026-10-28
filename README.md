@@ -41,7 +41,7 @@ Optional private window contacts can lower only an affected direction's comfort 
 
 ## Living-room heater power guard
 
-The Elite battery supplies the heater and network equipment. Only the heater's dedicated outlet is a cutoff actuator; the Elite output and network are never switched.
+The Elite battery supplies the heater and network equipment. By default only the heater's dedicated outlet is a cutoff actuator. The [opt-in emergency cutoff](docs/heater-emergency-cutoff.md) adds a separately bound shared AC last resort, optional individual outlet/meter stages, calibrated aggregate-output corroboration, and an optional existing HA notify group for emergency alerts. Shared AC recovery is always manual; these additions require 0.8.3 or later.
 
 - Compare the complete Emporia circuit and Elite input separately against a **1350W** shedding budget, reduced at low wall voltage.
 - Shed for a **2000W** battery output spike or battery at/below **40%**. The 12A ceiling applies to circuit/input only, so battery-assisted output may legitimately be higher.
@@ -62,7 +62,7 @@ The controller's transition history distinguishes its commands from device repor
 
 The central house rules are in [house_policy.py](custom_components/house_climate/controller/house_policy.py); electrical thresholds and fallback logic are in [power_guard.py](custom_components/house_climate/power_guard.py). Temperature stopping margins are in [temperature_guard.py](custom_components/house_climate/controller/temperature_guard.py).
 
-Existing installations migrate in place, preserving registered room identities and valid temporary holds. Daily comfort adjustments belong on the room cards; the protection form is separate. House schedules remain fixed in source. The private bindings file contains only entity-role mappings, never rules or thresholds.
+Existing installations migrate in place, preserving registered room identities and valid temporary holds. Daily comfort adjustments belong on the room cards; the protection form is separate. House schedules remain fixed in source. Private bindings contain entity-role mappings; the optional emergency cutoff additionally permits explicit aggregate-output calibration.
 
 Run core tests with `python -m unittest discover -s tests -v`. Native integration tests require Python 3.14 and Home Assistant 2026.10.1: `python -m unittest discover -s tests_homeassistant -v`. GitHub Actions runs both suites and validates the install archives.
 

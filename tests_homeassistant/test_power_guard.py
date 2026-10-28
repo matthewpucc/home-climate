@@ -108,6 +108,7 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
         store = Mock(async_load=AsyncMock(return_value={
             "latched": True, "switch_cut_owned": True, "restore_attempts": 0,
             "trip_wall": datetime.now(timezone.utc).timestamp(),
+            "binding_identity": self.guard._binding_identity(),
         }), async_save=AsyncMock())
         with patch("homeassistant.helpers.storage.Store", return_value=store):
             await self.start()
@@ -172,6 +173,7 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
         old = datetime.now(timezone.utc).timestamp() - 600
         store = Mock(async_load=AsyncMock(return_value={"latched": True,
                      "switch_cut_owned": True, "restore_attempts": 0,
+                     "binding_identity": self.guard._binding_identity(),
                      "trip_wall": old, "cut_changed": old, "cut_request_wall": old - 1}),
                      async_save=AsyncMock())
         with patch("homeassistant.helpers.storage.Store", return_value=store):
