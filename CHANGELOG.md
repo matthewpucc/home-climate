@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add a separately bound, explicitly enabled shared AC last resort after native heater Off and an optional dedicated outlet cutoff. Direct connections and absent heater-only meters are explicit; disconnected-device feedback and aggregate watts never become heater-current evidence.
+- Persist shared emergency inhibition with manual recovery only, retain uncertain service jobs, and never automatically restore shared AC. Quarantine legacy or changed-wiring cutoff ownership until fresh, safe manual acknowledgement.
+- Add optional calibrated aggregate AC-output corroboration using a fresh pre-stop baseline, native Off and distinct stable post-Off reports. Preserve state-only confirmation when aggregate evidence is inconclusive; unrelated load changes do not prove continued heating or isolated electrical shutdown.
+
 ## 0.8.2
 
 - Restore the native heater power guard's periodic checks by separating HA's UTC-datetime interval callback from its state-event callback. The previous shared callback could raise every five seconds before checking telemetry expiry or recovery deadlines.

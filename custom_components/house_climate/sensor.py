@@ -438,7 +438,12 @@ class HeaterPowerStatus(ControllerEntity):
         return {key: guard[key] for key in
                 ("blocked", "reason", "latched", "switch_cut_owned", "power_cut_confirmed",
                  "restoring", "restore_attempts", "power_restore_inflight",
-                 "power_restore_cleanup_pending", "persistence_error", "live") if key in guard}
+                 "power_restore_cleanup_pending", "persistence_error", "live",
+                 "heater_cutoff_configured", "heater_current_configured", "electrical_stop_confirmed",
+                 "shutdown_stage", "shutdown_confirmation", "aggregate_stop",
+                 "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
+                 "emergency_ac_attempts", "emergency_ac_inflight", "manual_recovery_required",
+                 "binding_identity_mismatch") if key in guard}
 
 
 class Overview(ControllerEntity):
