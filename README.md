@@ -43,12 +43,14 @@ Optional private window contacts can lower only an affected direction's comfort 
 
 The Elite battery supplies the heater and network equipment. By default only the heater's dedicated outlet is a cutoff actuator. The [opt-in emergency cutoff](docs/heater-emergency-cutoff.md) adds a separately bound shared AC last resort, optional individual outlet/meter stages, calibrated aggregate-output corroboration, and an optional existing HA notify group for emergency alerts. Shared AC recovery is always manual; these additions require 0.8.3 or later.
 
-- Compare the complete Emporia circuit and Elite input separately against a **1350W** shedding budget, reduced at low wall voltage.
-- Shed for a **2000W** battery output spike or battery at/below **40%**. The 12A ceiling applies to circuit/input only, so battery-assisted output may legitimately be higher.
-- Request Dyson Off first. If Off is not confirmed within five seconds, cut the dedicated heater switch.
-- Recover only above 40% battery, after safe load remains stable and the five-minute cooldown completes. Restore only an outlet the guard cut, confirm thermostat Off, then allow normal room demand.
+- Compare the complete Emporia circuit and Elite grid input separately against a real-power budget of **12 × the lower fresh wall-phase voltage**, in watts. Shed only after the same source remains at or above its budget for at least **30 seconds and three distinct fresh reports**. Pending qualification defers new starts without stopping an existing call solely for that pending condition.
+- Shed immediately for a **2000 W** AC-output spike or battery at/below **40%**. Temperature protections remain independent. Battery-assisted output may legitimately exceed grid input.
+- Request Dyson Off first. If Off is not confirmed within five seconds, use the configured optional cutoff stages; shared AC requires explicit opt-in and manual recovery.
+- Rearm only above 40% battery, with circuit and input below 85% of the current budget, 60 seconds of safe load and the five-minute cooldown. Restore only an eligible dedicated outlet the guard cut; never restore shared AC automatically.
 
-Emporia exposes real power rather than full-circuit RMS current. The 1350W budget conservatively supports the requested 12A input ceiling; the downstream heater amp reading is used for recovery confirmation, not as a wall-current measurement or a 12A output ceiling. Software, sensor cadence, and device feedback cannot establish a physical current guarantee.
+This replaces the fixed 1350 W budget. Fresh measured voltage is required; missing or invalid voltage cannot fall back to a nominal value. Re-reading cached reports does not advance qualification. Emporia reports real watts, not full-circuit RMS current, so this budget does **not** establish a physical 12 A guarantee. The downstream heater amp reading remains recovery evidence, not a wall-current measurement or output ceiling.
+
+Grid charging can remain high after confirmed heater Off. That remains a wall-load diagnostic and heating inhibition, not proof that the heater failed to stop or a new reason to cut shared AC output. A heater already reporting fresh, trusted Off can use state-only evidence without another no-op stop when no tracked job or meter evidence conflicts. No JSON threshold or mapping changes are required, and upgrading does not clear existing recovery latches. See the [wall-budget evidence rules](docs/control.md#heater-load-shedding).
 
 ## Device recovery and diagnostics
 

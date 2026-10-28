@@ -74,17 +74,26 @@ Reload success is not proof of device Off. Rejoining requires fresh post-reload 
 
 The independent electrical guard runs on cached-state events and 5-second checks while native live commands are allowed. It remains active when comfort is disabled. Shadow mode performs no writes.
 
-Fixed triggers:
-- Complete Emporia circuit or Elite grid input at or above 1350 W. A low measured wall voltage reduces the budget.
-- Elite output at or above 2000 W.
-- Elite battery at or below 40%.
-- Missing, stale, implausible, or incorrectly unit-labelled required measurements inhibit heating.
+The wall real-power budget is `12 × min(phase A voltage, phase B voltage)` watts, using fresh, valid wall-phase measurements. For example, two valid phases whose lower voltage is 123 V give a 1476 W budget. There is no fixed 1350 W cap, extra 0.95 multiplier or nominal 120 V ceiling. Missing, stale or invalid voltage inhibits heating; it cannot supply a nominal-voltage fallback.
 
-The circuit and Elite input are compared separately, never summed. Emporia measures real watts, not full-circuit RMS amps; the 1350 W input budget is a conservative proxy for the 12 A ceiling. Heater-plug amps are downstream of the battery and serve recovery confirmation only. The 12 A ceiling applies to circuit/input, not battery output; valid battery-assisted operation above 12 A at the heater plug is allowed. The 2000 W output limit is an operational shedding threshold, separate from the input limit.
+The complete circuit and Elite grid input qualify separately, never summed. A source must remain at or above its budget for at least 30 seconds across at least three distinct fresh reports before the wall-load condition sheds a running heater. Reports from different sources cannot be combined to reach that count. Cached duplicates and voltage-only changes do not add power reports; an unchanged value with a genuinely newer report can count. Invalid feedback or a reporting gap invalidates pending qualification. Three reports may take longer than 30 seconds at the source's actual cadence.
 
-The guard first requests Dyson thermostat Off. If a fresh Off report is not observed within 5 seconds, it requests Off from the dedicated heater plug. A hung thermostat service cannot hold that fallback behind the same await or lock. Other heat pumps and all network/battery outlets remain separate.
+Pending wall-load qualification defers new heater starts but does not itself stop an existing call. The other fixed protections remain independent:
 
-Power restoration requires battery strictly above 40%, stable safe load for 60 seconds, and a 5-minute cooldown. Only a plug cut by this guard may be restored. Restoration also requires fresh physical plug feedback and thermostat Off before new heating is allowed. Normal room demand decides whether heat resumes; battery recovery never forces heating.
+- Elite AC output at or above 2000 W sheds immediately.
+- Elite battery at or below 40% sheds immediately.
+- Missing, stale, implausible or incorrectly unit-labelled required measurements inhibit heating under the existing telemetry rules.
+- Temperature protections and shutdown acknowledgements retain their existing behavior.
+
+This is an explicit real-watt budget, not measured RMS branch current or a physical 12 A guarantee. Power factor, unknown supply phase, measurement error and report timing limit that inference. Heater-plug amps are downstream of the battery and remain recovery evidence only. Battery-assisted output may exceed grid input; neither the wall budget nor a 12 A output ceiling is applied to that output. The separate 2000 W output limit is an operational shedding threshold, not an inverter rating.
+
+The guard first requests Dyson thermostat Off. If fresh Off is not observed within 5 seconds, it uses the optional dedicated heater plug and then an explicitly enabled [shared AC emergency fallback](heater-emergency-cutoff.md). A hung thermostat service cannot hold fallback behind the same await or lock. High grid charging or another circuit load can remain after the heater confirms Off. That retains the wall-load diagnostic and inhibits new heating; it is not heater-stop failure and does not create another shared-AC cutoff reason. AC output Off is not charging Off.
+
+A wall-only event can also begin while the heater already reports fresh, trusted Off. With no outstanding command boundary, actual service/cleanup work or conflicting meter evidence, the guard can retain that passive state-only evidence without sending another Off. Passive evidence is separate from a sent-command acknowledgement, expires with its source and is discarded on restart or a real Off attempt. It neither establishes physical isolation nor clears ownership or recovery latches. A configured heater meter must remain consistent with Off; an absent meter remains unknown.
+
+Rearming requires circuit and input strictly below 85% of the current voltage-derived budget, battery strictly above 40%, 60 seconds of continuously safe load and the remaining 5-minute trip cooldown. Existing output/current recovery requirements remain in force. Only an eligible dedicated plug cut by this guard may be restored, with fresh physical plug feedback and thermostat Off. Shared AC recovery stays manual. Normal room demand decides whether heat resumes; battery recovery never forces heating.
+
+These are fixed policy rules, with no new tuning fields. Existing power and voltage bindings are sufficient; no JSON threshold or mapping changes are needed. Installing the change does not erase persisted cutoff or manual-recovery latches.
 
 The cutoff latch and restoration ownership persist through restart. Restoration retries are bounded. Actual dedicated-switch Off feedback can prove the heater is isolated even while its unpowered integration is unavailable, allowing shutdown cleanup to finish. A requested but unacknowledged power cut is not proof.
 

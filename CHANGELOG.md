@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.6
+
+- Replace the fixed 1350 W circuit/input proxy with a real-power budget of 12 times the lower fresh wall-phase voltage. Qualify circuit and grid input independently for at least 30 seconds and three distinct fresh reports before shedding; pending qualification defers new starts while retaining existing calls. Missing/invalid evidence cannot qualify, and cached or other-source reports do not advance the count. This is not measured RMS current or a physical 12 A guarantee.
+- Keep high charging/circuit load after confirmed heater Off as a diagnostic and heating inhibition, not a new heater-stop failure or shared-AC cutoff reason. Preserve immediate output/battery protections, temperature guards, 85% rearm margin, safe-load/cooldown requirements and persisted recovery latches. No new JSON fields or mapping changes are required.
+- Accept fresh, trusted passive Off feedback for an already-stopped heater during a wall-only event when no tracked command, cleanup or meter evidence conflicts. Keep that volatile state-only evidence separate from actual command acknowledgements and physical isolation. Register shutdown/service jobs before execution so reentrant HA state callbacks cannot launch duplicate stops.
+
 ## 0.8.5
 
 - Preserve verified manual-Off evidence separately from actual command timestamps after a restarted heater wiring/emergency acknowledgement. Allow the existing safe-load and trip cooldown to finish without a new device command, restoring only eligibility for normal demand; never restore shared AC or old outlet ownership.

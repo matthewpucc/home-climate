@@ -29,7 +29,10 @@ class Clock:
 
     def advance(self, seconds):
         self.now += seconds
-        self.wall += seconds
+        # HA timestamps have microsecond precision. Normalize the synthetic
+        # wall clock to the same representation instead of creating a report
+        # a fraction of a microsecond later than its observation clock.
+        self.wall = datetime.fromtimestamp(self.wall + seconds, timezone.utc).timestamp()
 
 
 def measurements(clock, **changes):
@@ -72,36 +75,56 @@ class PowerPolicyTests(unittest.TestCase):
         self.states[B.output_power]["state"] = "1891"
         result = self.reading()
         self.assertIsNone(result.issue)
+        self.assertFalse(result.wall_load_only)
         self.assertFalse(result.safe_to_rearm)  # Output must settle before recovery.
-        self.states[B.input_power]["state"] = "1350"
-        self.assertIn("input", self.reading().issue)
+        self.states[B.input_power]["state"] = "1476"
+        result = self.reading()
+        self.assertIn("input", result.issue)
+        self.assertTrue(result.wall_load_only)
 
-    def test_each_budget_sheds_at_boundary(self):
+    def test_each_budget_is_reported_at_boundary(self):
         for entity, value, text in (
-            (B.circuit_power, 1350, "budget"),
-            (B.input_power, 1350, "budget"),
+            (B.circuit_power, 1476, "budget"),
+            (B.input_power, 1476, "budget"),
             (B.output_power, 2000, "output spike"),
             (B.battery, 40, "reserve"),
         ):
             with self.subTest(entity=entity):
                 self.states = measurements(self.clock)
                 self.states[entity]["state"] = str(value)
-                self.assertIn(text, self.reading().issue)
-                self.assertFalse(self.reading().safe_to_rearm)
+                result = self.reading()
+                self.assertIn(text, result.issue)
+                self.assertEqual(result.wall_load_only,
+                                 entity in (B.circuit_power, B.input_power))
+                self.assertFalse(result.safe_to_rearm)
 
-    def test_low_voltage_reduces_budget_and_high_voltage_does_not_raise_it(self):
+    def test_fresh_lower_phase_sets_budget_without_nominal_watt_cap(self):
+        self.assertEqual(self.reading().input_budget_w, 1476)
+        for entity in (B.circuit_power, B.input_power):
+            self.states[entity]["state"] = "1434"
+        self.assertIsNone(self.reading().issue)
         self.states[B.wall_phase_a_voltage]["state"] = "110"
-        self.states[B.circuit_power]["state"] = "1260"
-        self.assertAlmostEqual(self.reading().input_budget_w, 1254)
+        self.assertAlmostEqual(self.reading().input_budget_w, 1320)
         self.assertIsNotNone(self.reading().issue)
         self.states[B.wall_phase_a_voltage]["state"] = "130"
-        self.assertEqual(self.reading().input_budget_w, 1350)
+        self.assertEqual(self.reading().input_budget_w, 1476)
+        self.states[B.wall_phase_b_voltage]["state"] = "128"
+        self.assertEqual(self.reading().input_budget_w, 1536)
+        self.assertIsNone(self.reading().issue)
+
+    def test_rearm_uses_85_percent_of_the_effective_budget(self):
+        boundary = 1476 * .85
+        self.states[B.input_power]["state"] = str(boundary)
+        self.assertIsNone(self.reading().issue)
+        self.assertFalse(self.reading().safe_to_rearm)
+        self.states[B.input_power]["state"] = str(boundary - .001)
+        self.assertTrue(self.reading().safe_to_rearm)
 
     def test_units_and_nonfinite_or_stale_telemetry_fail_closed(self):
         self.states[B.circuit_power]["state"] = "1.4"
         self.states[B.circuit_power]["attributes"]["unit_of_measurement"] = "kW"
         self.assertEqual(self.reading().circuit_w, 1400)
-        self.assertIsNotNone(self.reading().issue)
+        self.assertIsNone(self.reading().issue)
         for bad in ("NaN", "inf", "-5", "unavailable"):
             self.states = measurements(self.clock)
             self.states[B.input_power]["state"] = bad
@@ -118,22 +141,80 @@ class PowerPolicyTests(unittest.TestCase):
         self.assertIsNone(self.reading().issue)
         self.assertFalse(self.reading().safe_to_rearm)  # Heat must stop before a tripped guard rearms.
         for entity, value, reason in ((B.output_power, "2000", "output spike"),
-                                      (B.input_power, "1350", "budget"),
+                                      (B.input_power, "1476", "budget"),
                                       (B.battery, "40", "reserve")):
             previous = self.states[entity]["state"]
             self.states[entity]["state"] = value
             self.assertIn(reason, self.reading().issue)
             self.states[entity]["state"] = previous
 
-    def test_missing_battery_does_not_hide_definite_input_or_output_trip(self):
-        for entity, value, reason in ((B.input_power, "1350", "budget"),
-                                      (B.output_power, "2000", "output spike")):
+    def test_missing_interlock_telemetry_is_not_a_wall_only_reading(self):
+        for missing in (B.battery, B.wall_phase_a_voltage, B.wall_phase_b_voltage):
+            with self.subTest(missing=missing):
+                self.states = measurements(self.clock)
+                self.states[B.input_power]["state"] = "1600"
+                self.states[missing]["state"] = "unavailable"
+                result = self.reading()
+                self.assertTrue(result.telemetry_missing)
+                self.assertFalse(result.wall_load_only)
+                self.assertFalse(result.safe_to_rearm)
+
+    def test_stale_or_invalid_voltage_cannot_supply_a_nominal_budget(self):
+        self.states[B.input_power]["state"] = "1600"
+        self.states[B.wall_phase_a_voltage]["last_reported"] = datetime.fromtimestamp(
+            self.clock.wall - power.TELEMETRY_MAX_AGE_SECONDS - 1,
+            timezone.utc).isoformat()
+        result = self.reading()
+        self.assertTrue(result.telemetry_missing)
+        self.assertFalse(result.wall_load_only)
+        self.assertIsNone(result.input_budget_w)
+        self.assertFalse(result.safe_to_rearm)
+        for value in ("NaN", "141", "89", "-1"):
+            with self.subTest(value=value):
+                self.states = measurements(self.clock)
+                self.states[B.input_power]["state"] = "1600"
+                self.states[B.wall_phase_a_voltage]["state"] = value
+                result = self.reading()
+                self.assertTrue(result.telemetry_missing)
+                self.assertFalse(result.wall_load_only)
+                self.assertIsNone(result.input_budget_w)
+                self.assertFalse(result.safe_to_rearm)
+
+    def test_independent_output_or_battery_trip_wins_over_wall_qualification(self):
+        for entity, value, reason in ((B.output_power, "2000", "output spike"),
+                                      (B.battery, "40", "reserve")):
             with self.subTest(entity=entity):
                 self.states = measurements(self.clock)
-                self.states[B.battery]["state"] = "unavailable"
+                self.states[B.input_power]["state"] = "1600"
+                self.states[B.circuit_power]["state"] = "1600"
                 self.states[entity]["state"] = value
-                self.assertIn(reason, self.reading().issue)
-                self.assertFalse(self.reading().telemetry_missing)
+                result = self.reading()
+                self.assertIn(reason, result.issue)
+                self.assertFalse(result.wall_load_only)
+                self.assertFalse(result.safe_to_rearm)
+
+    def test_restored_or_assumed_voltage_cannot_supply_a_budget(self):
+        for entity in (B.wall_phase_a_voltage, B.wall_phase_b_voltage):
+            for flag in ("restored", "assumed_state"):
+                with self.subTest(entity=entity, flag=flag):
+                    self.states = measurements(self.clock)
+                    self.states[B.input_power]["state"] = "1600"
+                    self.states[entity]["attributes"][flag] = True
+                    result = self.reading()
+                    self.assertTrue(result.telemetry_missing)
+                    self.assertIn("restored or assumed", result.issue)
+                    self.assertIsNone(result.input_budget_w)
+                    self.assertFalse(result.wall_load_only)
+                    self.assertFalse(result.safe_to_rearm)
+
+    def test_missing_battery_does_not_hide_definite_output_trip(self):
+        self.states[B.battery]["state"] = "unavailable"
+        self.states[B.input_power]["state"] = "1600"
+        self.states[B.output_power]["state"] = "2000"
+        result = self.reading()
+        self.assertIn("output spike", result.issue)
+        self.assertFalse(result.telemetry_missing)
+        self.assertFalse(result.wall_load_only)
 
 
 class FakeHass:
@@ -153,10 +234,16 @@ class FakeHass:
         self.release_switch_on = asyncio.Event()
         self.services = SimpleNamespace(async_call=self.service)
 
-    def async_create_task(self, coroutine):
+    def async_create_task(self, coroutine, *, eager_start=False):
+        # Python 3.12 already schedules asyncio tasks non-eagerly. Accept HA's
+        # keyword without passing an unsupported option to asyncio.create_task.
         return asyncio.create_task(coroutine)
 
     def set(self, entity, state, attrs=None):
+        # Each synthetic device report is a distinct arrival, even when test
+        # code performs several writes without yielding the event loop. Keep
+        # ordering realistic so a changed value never reuses an old timestamp.
+        self.clock.advance(.001)
         old = self.data.get(entity, {})
         self.data[entity] = {"state": str(state),
                             "attributes": dict(old.get("attributes", {}) if attrs is None else attrs),
@@ -224,7 +311,10 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
     def trip(self):
         self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
         self.hass.set(B.circuit_power, "1500")
-        self.guard._observe()
+        for elapsed in (0, 15, 15):
+            self.clock.advance(elapsed)
+            self.hass.refresh()
+            self.guard._observe()
 
     def healthy(self):
         self.hass.set(B.circuit_power, "140")
@@ -241,6 +331,55 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.data[B.heater]["state"], "off")
         self.assertFalse(self.guard.switch_cut_owned)
         self.assertEqual([c[0] for c in self.hass.calls], ["climate"])
+
+    async def test_wall_load_waits_for_qualification_before_stopping_running_heat(self):
+        self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
+        self.hass.set(B.circuit_power, "1500")
+        self.guard._observe()
+        await self.settle()
+        # Public blocked feeds the worker's heater-Off overlay. Positive
+        # dispatch is deferred separately while existing heat keeps its window.
+        self.assertFalse(self.guard.blocked)
+        self.assertFalse(self.guard.diagnostics["latched"])
+        self.assertEqual(self.hass.calls, [])
+        self.assertEqual(self.hass.data[B.heater]["state"], "heat")
+        self.clock.advance(15)
+        self.hass.refresh()
+        self.guard._observe()
+        await self.settle()
+        self.assertFalse(self.guard.diagnostics["latched"])
+        self.assertEqual(self.hass.calls, [])
+        self.clock.advance(15)
+        self.hass.refresh()
+        self.guard._observe()
+        await self.settle()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertEqual([call[0] for call in self.hass.calls], ["climate"])
+
+    async def test_confirmed_off_and_persistent_wall_load_do_not_repeat_shutdown(self):
+        self.trip()
+        await self.settle()
+        self.assertTrue(self.guard.shutdown_confirmed)
+        initial_calls = list(self.hass.calls)
+        for _ in range(3):
+            self.clock.advance(45)
+            self.hass.refresh()
+            self.guard._observe()
+            await self.settle()
+            self.assertTrue(self.guard.shutdown_confirmed)
+            self.assertTrue(self.guard.blocked)
+            self.assertFalse(self.guard.switch_cut_owned)
+            self.assertEqual(self.hass.calls, initial_calls)
+
+    async def test_output_spike_does_not_wait_for_wall_qualification(self):
+        self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
+        self.hass.set(B.input_power, "1600")
+        self.hass.set(B.output_power, "2000")
+        self.guard._observe()
+        await self.settle()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertEqual([call[0] for call in self.hass.calls], ["climate"])
+        self.assertFalse(self.guard.switch_cut_owned)
 
     async def test_buffered_normal_heating_above_twelve_output_amps_is_not_shed(self):
         self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
