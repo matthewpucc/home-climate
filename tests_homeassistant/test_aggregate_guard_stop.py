@@ -24,6 +24,7 @@ class NativeAggregateGuardStopTests(unittest.IsolatedAsyncioTestCase):
         self.calls = []
         self.guard = None
         self.ignore_climate = False
+        self.current_after_native_off = None
         self.output_reports = [180, 185]
         self.report_delay = .015
         self.force_reports = True
@@ -72,6 +73,10 @@ class NativeAggregateGuardStopTests(unittest.IsolatedAsyncioTestCase):
             if not self.ignore_climate:
                 self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"},
                                            force_update=True)
+                if self.current_after_native_off is not None:
+                    self.hass.states.async_set(BASE.heater_current,
+                                               str(self.current_after_native_off),
+                                               {"unit_of_measurement": "A"}, force_update=True)
             # Meter reports arrive separately after the service has completed.
             # Service completion therefore cannot stand in for measured evidence.
             if self.output_reports:
@@ -96,12 +101,14 @@ class NativeAggregateGuardStopTests(unittest.IsolatedAsyncioTestCase):
                 if self.pause_after_two:
                     await self.release_third.wait()
 
-    async def start(self, *, minimum_samples=2, interval_seconds=None):
-        policy = AggregateStopConfig(
+    async def start(self, *, minimum_samples=2, interval_seconds=None, policy=None,
+                    metered=False):
+        policy = policy or AggregateStopConfig(
             minimum_drop_w=500, residual_ceiling_w=300, noise_margin_w=20,
             settle_seconds=.01, timeout_seconds=.1, max_age_seconds=30,
             minimum_samples=minimum_samples)
-        bindings = replace(BASE, heater_switch=None, heater_current=None,
+        bindings = replace(BASE, heater_switch=None,
+                           heater_current=BASE.heater_current if metered else None,
                            emergency_ac_switch=SHARED_AC,
                            emergency_ac_fallback_enabled=True,
                            aggregate_stop_confirmation=policy)
@@ -116,6 +123,30 @@ class NativeAggregateGuardStopTests(unittest.IsolatedAsyncioTestCase):
                 self.guard.async_start()
         await self.hass.async_block_till_done()
         return self.guard
+
+    def relative_policy(self):
+        return AggregateStopConfig(
+            minimum_drop_w=1000, residual_ceiling_w=300, noise_margin_w=20,
+            settle_seconds=.01, timeout_seconds=.12, max_age_seconds=30,
+            minimum_samples=3, relative_drop_enabled=True)
+
+    async def precommand_reports(self, watts, *, action="heating"):
+        self.hass.states.async_set(BASE.heater, "heat", {"hvac_action": action})
+        for value in watts:
+            self.hass.states.async_set(BASE.output_power, str(value),
+                                       {"unit_of_measurement": "W"}, force_update=True)
+            await self.hass.async_block_till_done()
+            await asyncio.sleep(.006)
+
+    async def request_native_off(self, guard):
+        self.assertTrue(await guard.async_request_heater_off())
+        await self.hass.async_block_till_done()
+
+    async def wait_for_state_only_timeout(self, guard):
+        await self.wait_for(lambda: guard.diagnostics["aggregate_stop"]["status"] == "unknown")
+        self.assertEqual(guard.diagnostics["shutdown_confirmation"], "state_only")
+        self.assertTrue(guard.shutdown_confirmed)
+        self.assert_native_only(guard)
 
     async def trip(self, *, action="heating"):
         self.hass.states.async_set(BASE.heater, "heat", {"hvac_action": action})
@@ -241,6 +272,172 @@ class NativeAggregateGuardStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcome["classification"], "already_low")
         self.assertEqual((outcome["baseline_w"], outcome["sample_count"]), (150, 2))
         self.assert_native_only(guard)
+
+    async def test_qualified_relative_drop_accepts_higher_remaining_background(self):
+        self.output_reports = [700, 705, 700]
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([1800, 1795, 1805])
+        await self.request_native_off(guard)
+        await self.wait_for(lambda: guard.diagnostics["shutdown_confirmation"] == "aggregate_corroborated")
+        outcome = guard.diagnostics["aggregate_stop"]
+        self.assertEqual(outcome["classification"], "relative_drop")
+        self.assertEqual(outcome["baseline_w"], 1805)
+        self.assertEqual(outcome["qualified_baseline_w"], 1795)
+        self.assertEqual(outcome["sample_count"], 3)
+        self.assertGreater(outcome["latest_w"], 320)
+        self.assertGreaterEqual(outcome["qualified_baseline_w"] - outcome["latest_w"], 1020)
+        self.assert_native_only(guard)
+
+    async def test_single_precommand_report_cannot_qualify_relative_drop(self):
+        self.output_reports = [700, 705, 700]
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([1800])
+        await self.request_native_off(guard)
+        await self.wait_for_state_only_timeout(guard)
+        self.assertIsNone(guard.diagnostics["aggregate_stop"]["classification"])
+
+    async def test_changing_precommand_load_cannot_qualify_relative_drop(self):
+        self.output_reports = [700, 705, 700]
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([1800, 1400, 1800])
+        await self.request_native_off(guard)
+        await self.wait_for_state_only_timeout(guard)
+        self.assertIsNone(guard.diagnostics["aggregate_stop"]["classification"])
+
+    async def test_duplicate_precommand_reads_do_not_manufacture_baseline_reports(self):
+        self.output_reports = [700, 705, 700]
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([1800])
+        reported = self.hass.states.get(BASE.output_power).last_reported
+        for _ in range(4):
+            guard._observe()
+            await asyncio.sleep(.006)
+        self.assertEqual(self.hass.states.get(BASE.output_power).last_reported, reported)
+        await self.request_native_off(guard)
+        await self.wait_for_state_only_timeout(guard)
+
+    async def test_stale_qualified_precommand_load_cannot_confirm_relative_drop(self):
+        self.output_reports = [700, 705, 700]
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([1800, 1800, 1800])
+        cached = self.hass.states.get(BASE.output_power)
+        cached.last_reported = datetime.now(timezone.utc) - timedelta(seconds=31)
+        await self.request_native_off(guard)
+        await self.wait_for_state_only_timeout(guard)
+        self.assertIsNone(guard.diagnostics["aggregate_stop"]["classification"])
+
+    async def test_repeated_cached_post_command_output_cannot_supply_distinct_reports(self):
+        self.output_reports = []
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([1800, 1800, 1800])
+        await self.request_native_off(guard)
+        self.hass.states.async_set(BASE.output_power, "700", {"unit_of_measurement": "W"},
+                                   force_update=True)
+        await self.hass.async_block_till_done()
+        reported = self.hass.states.get(BASE.output_power).last_reported
+        for _ in range(4):
+            guard._observe()
+            await asyncio.sleep(.006)
+        self.assertEqual(self.hass.states.get(BASE.output_power).last_reported, reported)
+        await self.wait_for_state_only_timeout(guard)
+
+    async def test_current_contradiction_overrides_qualified_aggregate_drop(self):
+        self.output_reports = [700, 705, 700]
+        self.current_after_native_off = 3
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005, metered=True)
+        await self.precommand_reports([1800, 1800, 1800])
+        self.assertTrue(await guard.async_request_heater_off())
+        await self.hass.async_block_till_done()
+        self.assertTrue(guard.diagnostics["emergency_ac_latched"])
+        self.assertEqual(guard.diagnostics["shutdown_confirmation"], "emergency_ac_off")
+        self.assertNotEqual(guard.diagnostics["aggregate_stop"]["status"], "corroborated")
+        self.assertIsNone(guard.diagnostics["aggregate_stop"]["classification"])
+        self.assertEqual([call for call in self.calls if call[0] == "switch"],
+                         [("switch", "turn_off", {"entity_id": SHARED_AC})])
+
+    async def test_coalesced_invalid_output_cannot_reuse_qualified_precommand_history(self):
+        self.output_reports = [700, 705, 700]
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([1800, 1800, 1800])
+        # Both events queue before the guard reads the final valid cache. The
+        # missing intermediate value must invalidate the old qualified history.
+        self.hass.states.async_set(BASE.output_power, "unavailable", {"unit_of_measurement": "W"})
+        self.hass.states.async_set(BASE.output_power, "1800", {"unit_of_measurement": "W"},
+                                   force_update=True)
+        await self.hass.async_block_till_done()
+        await self.request_native_off(guard)
+        await self.wait_for_state_only_timeout(guard)
+
+    async def test_coalesced_assumed_native_state_requires_a_new_precommand_window(self):
+        self.output_reports = [700, 705, 700]
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([1800, 1800, 1800])
+        self.hass.states.async_set(BASE.heater, "heat",
+                                   {"hvac_action": "heating", "assumed_state": True})
+        self.hass.states.async_set(BASE.heater, "heat", {"hvac_action": "heating"})
+        await self.hass.async_block_till_done()
+        await self.request_native_off(guard)
+        await self.wait_for_state_only_timeout(guard)
+        self.assertFalse(guard.diagnostics["latched"])
+        # Recovery is possible after collecting a complete new genuine heating
+        # window; invalidation must not permanently disable this evidence path.
+        await self.precommand_reports([1800, 1800, 1800])
+        await self.request_native_off(guard)
+        await self.wait_for(lambda: guard.diagnostics["shutdown_confirmation"] == "aggregate_corroborated")
+        self.assertEqual(guard.diagnostics["aggregate_stop"]["classification"], "relative_drop")
+        self.assert_native_only(guard)
+
+    async def test_low_idle_relative_path_retains_already_low_classification(self):
+        self.output_reports = [148, 150, 150]
+        self.hass.states.async_set(BASE.output_power, "150", {"unit_of_measurement": "W"},
+                                   force_update=True)
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([150, 150, 150], action="idle")
+        await self.request_native_off(guard)
+        await self.wait_for(lambda: guard.diagnostics["shutdown_confirmation"] == "aggregate_corroborated")
+        self.assertEqual(guard.diagnostics["aggregate_stop"]["classification"], "already_low")
+        self.assert_native_only(guard)
+
+    async def test_high_idle_background_does_not_invent_heater_drop(self):
+        self.output_reports = [700, 705, 700]
+        guard = await self.start(policy=self.relative_policy(), interval_seconds=.005)
+        await self.precommand_reports([700, 705, 700], action="idle")
+        await self.request_native_off(guard)
+        await self.wait_for_state_only_timeout(guard)
+        self.assertIsNone(guard.diagnostics["aggregate_stop"]["classification"])
+
+    async def test_polling_gap_revokes_corroboration_and_stale_native_stop_proof(self):
+        guard = await self.start(interval_seconds=.005)
+        self.hass.states.async_set(BASE.heater, "heat", {"hvac_action": "heating"})
+        await self.request_native_off(guard)
+        await self.wait_for(lambda: guard.diagnostics["shutdown_confirmation"] == "aggregate_corroborated")
+        self.assertTrue(guard.shutdown_confirmed)
+        prior_calls = list(self.calls)
+        original_wall_clock = guard._wall_clock
+        after_gap = original_wall_clock() + power.TELEMETRY_MAX_AGE_SECONDS + 1
+        advanced = datetime.fromtimestamp(after_gap, timezone.utc)
+        after_gap = advanced.timestamp()
+        # HA resumes with fresh electrical/source reports, but the thermostat's
+        # last Off remains the old pre-stall report. Fresh output cannot renew it.
+        for entity in guard.entity_ids:
+            if entity == BASE.heater:
+                continue
+            state = self.hass.states.get(entity)
+            if state is not None:
+                state.last_reported = advanced
+        guard._wall_clock = lambda: after_gap
+        try:
+            for _ in range(4):
+                guard._observe()
+                await asyncio.sleep(0)
+            await self.hass.async_block_till_done()
+            self.assertNotEqual(guard.diagnostics["shutdown_confirmation"], "aggregate_corroborated")
+            self.assertNotEqual(guard.diagnostics["aggregate_stop"]["status"], "corroborated")
+            self.assertFalse(guard.shutdown_confirmed)
+            self.assertFalse(guard.diagnostics["emergency_ac_latched"])
+            self.assertEqual(self.calls, prior_calls)
+        finally:
+            guard._wall_clock = original_wall_clock
 
 
 if __name__ == "__main__":

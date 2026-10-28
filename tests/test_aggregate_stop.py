@@ -3,7 +3,9 @@ from dataclasses import replace
 import math
 import unittest
 
-from house_climate.aggregate_stop import AggregateStopConfig, AggregateStopEvidence
+from house_climate.aggregate_stop import (
+    MAX_BASELINE_SAMPLES, AggregateStopBaseline, AggregateStopConfig, AggregateStopEvidence,
+)
 
 
 class AggregateStopConfigTests(unittest.TestCase):
@@ -218,6 +220,230 @@ class AggregateStopEvidenceTests(unittest.TestCase):
         self.assertFalse(any(isinstance(value, (list, dict, set))
                              for value in vars(self.evidence).values()))
         self.assertNotIn("isolated", result.as_dict())
+
+
+class AggregateRelativeConfigTests(unittest.TestCase):
+    def test_opt_in_is_a_strict_serialized_boolean(self):
+        legacy = AggregateStopConfig(1000, 160, 20)
+        self.assertFalse(legacy.relative_drop_enabled)
+        enabled = replace(legacy, relative_drop_enabled=True, minimum_samples=3)
+        self.assertEqual(AggregateStopConfig.from_dict(enabled.to_dict()), enabled)
+        self.assertTrue(enabled.to_dict()["relative_drop_enabled"])
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                replace(enabled, relative_drop_enabled=value)
+
+    def test_relative_size_and_fresh_window_limits_do_not_change_legacy(self):
+        legacy = AggregateStopConfig(1000, 160, 20)
+        replace(legacy, minimum_samples=MAX_BASELINE_SAMPLES + 1)
+        replace(legacy, settle_seconds=31)
+        relative = replace(legacy, relative_drop_enabled=True, minimum_samples=3)
+        for changes in ({"minimum_samples": 2},
+                        {"minimum_samples": MAX_BASELINE_SAMPLES + 1}, {"settle_seconds": 31}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(relative, **changes)
+        replace(legacy, relative_drop_enabled=True, minimum_samples=MAX_BASELINE_SAMPLES,
+                settle_seconds=30)
+
+
+class AggregateStopBaselineTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = AggregateStopConfig(1000, 160, 20, minimum_samples=3,
+                                       relative_drop_enabled=True)
+        self.baseline = self.cfg.create_baseline()
+
+    def qualify(self):
+        for now, watts in ((100, 2000), (105, 1995), (110, 2005)):
+            self.baseline.observe(now, watts, now)
+        return self.baseline.snapshot(110)
+
+    def test_factory_qualifies_the_conservative_low(self):
+        self.assertIsInstance(self.baseline, AggregateStopBaseline)
+        self.assertEqual(self.qualify(), 1995)
+        self.assertEqual(self.baseline.snapshot(111), 1995)
+        with self.assertRaises(TypeError):
+            AggregateStopBaseline({})
+
+    def test_distinct_unchanged_reports_count_but_cached_reads_do_not(self):
+        self.baseline.observe(100, 2000, 100)
+        self.baseline.observe(105, 2000, 100)
+        self.assertIsNone(self.baseline.snapshot(110))
+        self.baseline.observe(111, 2000, 105)
+        self.assertEqual(self.baseline.observe(112, 2000, 110), 2000)
+
+    def test_report_count_does_not_replace_source_settling_time(self):
+        for now in (100, 101, 102):
+            self.baseline.observe(now, 2000, now)
+        self.assertIsNone(self.baseline.snapshot(112))
+        self.assertEqual(self.baseline.observe(113, 2000, 113), 2000)
+
+    def test_known_spike_discards_the_old_stable_window(self):
+        self.qualify()
+        self.assertIsNone(self.baseline.observe(111, 3000, 111))
+        self.assertIsNone(self.baseline.observe(112, 2000, 112))
+        self.assertIsNone(self.baseline.observe(117, 2005, 117))
+        self.assertEqual(self.baseline.observe(122, 2000, 122), 2000)
+
+    def test_invalid_observation_bars_cached_reports_from_before_it(self):
+        self.qualify()
+        self.baseline.observe(111, None, None)
+        self.assertIsNone(self.baseline.observe(112, 2005, 110))
+        self.assertIsNone(self.baseline.observe(113, 2005, 111))
+        self.assertEqual(len(self.baseline._samples), 0)
+        self.baseline.observe(114, 2000, 112)
+        self.baseline.observe(119, 2000, 117)
+        self.assertEqual(self.baseline.observe(124, 2000, 122), 2000)
+
+    def test_invalid_source_data_resets_qualification(self):
+        invalid = ((None, 111), (-1, 111), (math.inf, 111), (True, 111),
+                   ("2000", 111), (2000, 112), (2000, 80),
+                   (2000, 109), (2001, 110), (2000, math.nan))
+        for watts, stamp in invalid:
+            with self.subTest(watts=watts, stamp=stamp):
+                self.baseline = self.cfg.create_baseline()
+                self.qualify()
+                self.assertIsNone(self.baseline.observe(111, watts, stamp))
+                self.assertIsNone(self.baseline.snapshot(112))
+                self.assertIsNone(self.baseline.observe(113, 2005, 110))
+
+    def test_hidden_gap_starts_a_fresh_window(self):
+        self.qualify()
+        self.assertIsNone(self.baseline.observe(141, 2000, 141))
+        self.assertEqual(len(self.baseline._samples), 1)
+        self.baseline.observe(146, 2000, 146)
+        self.assertEqual(self.baseline.observe(151, 2000, 151), 2000)
+
+    def test_stale_snapshot_blocks_a_late_read_of_old_reports(self):
+        self.qualify()
+        self.assertIsNone(self.baseline.snapshot(141))
+        self.assertIsNone(self.baseline.observe(142, 2000, 140))
+        self.baseline.observe(143, 2000, 142)
+        self.baseline.observe(148, 2000, 147)
+        self.assertEqual(self.baseline.observe(153, 2000, 152), 2000)
+
+    def test_all_retained_reports_must_be_fresh_with_inclusive_boundary(self):
+        self.baseline = replace(self.cfg, max_age_seconds=10).create_baseline()
+        self.assertEqual(self.qualify(), 1995)
+        self.assertIsNone(self.baseline.snapshot(110.001))
+
+    def test_clock_regression_or_invalid_snapshot_clock_revokes_history(self):
+        for now in (109, None, math.inf, math.nan, True):
+            with self.subTest(now=now):
+                self.baseline = self.cfg.create_baseline()
+                self.qualify()
+                self.assertIsNone(self.baseline.snapshot(now))
+                self.assertIsNone(self.baseline.snapshot(111))
+                self.baseline.observe(112, 2000, 111)
+                self.baseline.observe(117, 2000, 116)
+                self.assertEqual(self.baseline.observe(122, 2000, 121), 2000)
+
+    def test_dense_history_is_bounded_and_overflow_fails_conservative(self):
+        for index in range(MAX_BASELINE_SAMPLES):
+            now = 100 + index / 1000
+            self.assertIsNone(self.baseline.observe(now, 2000, now))
+        self.assertEqual(len(self.baseline._samples), MAX_BASELINE_SAMPLES)
+        self.assertIsNone(self.baseline.observe(111, 2000, 111))
+        self.assertEqual(len(self.baseline._samples), 1)
+        self.baseline.observe(116, 2000, 116)
+        self.assertEqual(self.baseline.observe(121, 2000, 121), 2000)
+
+
+class AggregateRelativeStopTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = AggregateStopConfig(1000, 160, 20, minimum_samples=3,
+                                       relative_drop_enabled=True)
+        self.evidence = self.cfg.create_evidence()
+
+    def posts(self, watts=(800, 805, 800)):
+        for now, value in zip((103, 108, 113), watts):
+            result = self.evidence.observe(now, value, now, native_off_after=101)
+        return result
+
+    def test_high_background_uses_opt_in_qualified_relative_drop(self):
+        self.evidence.begin(100, 2250, 99, qualified_baseline_w=2240)
+        result = self.posts()
+        self.assertEqual((result.status, result.classification), ("corroborated", "relative_drop"))
+        self.assertEqual((result.baseline_w, result.qualified_baseline_w), (2250, 2240))
+        self.assertEqual((result.sample_count, result.evidence_seconds), (3, 10))
+        self.assertNotIn("action", result.as_dict())
+        self.evidence = replace(self.cfg, relative_drop_enabled=False).create_evidence()
+        self.evidence.begin(100, 2250, 99, qualified_baseline_w=2240)
+        self.assertEqual(self.posts().status, "pending")
+
+    def test_missing_relative_baseline_cannot_reuse_one_high_begin_sample(self):
+        result = self.evidence.begin(100, 2250, 99)
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("baseline", result.reason)
+        self.assertEqual(self.posts((100, 105, 100)), result)
+
+    def test_already_low_path_needs_no_heating_baseline(self):
+        self.evidence.begin(100, 100, 99)
+        result = self.posts((95, 100, 95))
+        self.assertEqual((result.status, result.classification), ("corroborated", "already_low"))
+        self.assertIsNone(result.qualified_baseline_w)
+
+    def test_high_unchanged_or_partial_drop_is_not_an_already_low_bypass(self):
+        for values in ((2250, 2250, 2250), (1500, 1500, 1500)):
+            with self.subTest(values=values):
+                self.evidence.begin(100, 2250, 99, qualified_baseline_w=2240)
+                result = self.posts(values)
+                self.assertEqual(result.status, "pending")
+                self.assertIsNone(result.classification)
+
+    def test_qualified_low_cannot_inflate_fresh_begin_output(self):
+        for qualified in (2251, -1, math.inf, math.nan, True, "2200", 10 ** 1000):
+            with self.subTest(qualified=qualified):
+                result = self.evidence.begin(100, 2250, 99, qualified_baseline_w=qualified)
+                self.assertEqual(result.status, "unknown")
+                self.assertEqual(self.posts(), result)
+
+    def test_margin_uses_qualified_low_and_maximum_stable_post(self):
+        self.evidence.begin(100, 2250, 99, qualified_baseline_w=2200)
+        self.assertEqual(self.posts((1200, 1200, 1200)).status, "pending")
+        for now, watts in ((114, 1170), (119, 1175), (124, 1170)):
+            result = self.evidence.observe(now, watts, now, native_off_after=120 if now > 120 else 101)
+        self.assertEqual(result.classification, "relative_drop")
+        self.evidence.begin(100, 2000, 99, qualified_baseline_w=2000)
+        self.evidence.observe(103, 980, 103, native_off_after=101)
+        result = self.evidence.observe(108, 985, 108, native_off_after=101)
+        self.assertEqual((result.status, result.sample_count), ("pending", 0))
+        for now, watts in ((113, 970), (118, 975), (123, 980)):
+            result = self.evidence.observe(now, watts, now, native_off_after=101)
+        self.assertEqual(result.classification, "relative_drop")
+
+    def test_baseline_is_frozen_for_the_stop_attempt(self):
+        baseline = self.cfg.create_baseline()
+        for now, watts in ((85, 2240), (90, 2250), (95, 2245)):
+            baseline.observe(now, watts, now)
+        self.evidence.begin(100, 2250, 99, qualified_baseline_w=baseline.snapshot(100))
+        for now in (101, 106, 111):
+            baseline.observe(now, 4000, now)
+        self.assertEqual(baseline.snapshot(111), 4000)
+        result = self.posts()
+        self.assertEqual((result.classification, result.qualified_baseline_w), ("relative_drop", 2240))
+
+    def test_other_load_drop_without_native_off_cannot_corroborate(self):
+        self.evidence.begin(100, 2250, 99, qualified_baseline_w=2240)
+        for now in (103, 108, 113):
+            result = self.evidence.observe(now, 800, now, native_off_after=None)
+        self.assertEqual(result.status, "unknown")
+        self.assertIsNone(result.classification)
+
+    def test_relative_noise_duplicates_and_native_off_loss(self):
+        self.evidence.begin(100, 2250, 99, qualified_baseline_w=2240)
+        self.evidence.observe(103, 800, 103, native_off_after=101)
+        self.assertEqual(self.evidence.observe(113, 800, 103, native_off_after=101).sample_count, 1)
+        self.evidence.observe(114, 830, 114, native_off_after=101)
+        self.assertEqual(self.evidence.observe(119, 810, 119, native_off_after=101).status, "pending")
+        result = self.evidence.observe(124, 815, 124, native_off_after=101)
+        self.assertEqual(result.classification, "relative_drop")
+        self.assertEqual(self.evidence.observe(125, 810, 125, native_off_after=None).status, "unknown")
+
+    def test_relative_settling_cannot_bridge_hidden_source_gaps(self):
+        self.evidence.begin(100, 2250, 99, qualified_baseline_w=2240)
+        self.evidence.observe(103, 800, 103, native_off_after=101)
+        result = self.evidence.observe(144, 800, 144, native_off_after=143)
+        self.assertEqual((result.status, result.sample_count), ("pending", 1))
 
 
 if __name__ == "__main__":

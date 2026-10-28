@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.4
+
+- Add opt-in relative aggregate-output corroboration using a qualified recent pre-stop window and sustained post-Off reports, allowing other shared loads to remain above the absolute low-output ceiling. Preserve the existing default, native-Off acknowledgement and escalation timing, unknown-evidence behavior, and manual shared-AC recovery.
+- Revoke the top-level aggregate-corroboration label when its current evidence expires or native Off is no longer fresh, without changing physical-cut confirmation or actuator behavior.
+
 ## 0.8.3
 
 - Add a separately bound, explicitly enabled shared AC last resort after native heater Off and an optional dedicated outlet cutoff. Direct connections and absent heater-only meters are explicit; disconnected-device feedback and aggregate watts never become heater-current evidence.
