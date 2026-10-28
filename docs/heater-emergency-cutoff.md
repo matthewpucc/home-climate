@@ -129,6 +129,71 @@ The Heater power guard diagnostic exposes `shutdown_stage`,
 `state_only` and `aggregate_corroborated` describe different evidence; neither
 claims that a dedicated relay physically isolated the heater.
 
+### Relative drop option (0.8.4 or later)
+
+The `relative_drop_enabled` option was introduced in 0.8.4 and is not accepted by
+0.8.3. Leave it absent on that older version. It defaults to `false`, preserving the absolute
+low-output behavior above. Setting it to `true`
+also permits a qualified relative drop even when other shared loads remain above
+the absolute ceiling:
+
+```json
+{
+  "aggregate_stop_confirmation": {
+    "minimum_drop_w": 1000,
+    "residual_ceiling_w": 160,
+    "noise_margin_w": 20,
+    "settle_seconds": 30,
+    "timeout_seconds": 180,
+    "max_age_seconds": 90,
+    "minimum_samples": 3,
+    "relative_drop_enabled": true
+  }
+}
+```
+
+This is a schema example, not validated calibration for an installation. All
+three watt fields remain required. In relative mode the residual ceiling is
+used only for the separate `already_low` path; the relative-drop path does not
+require the final output to be below it. With these example values a qualifying
+drop is at least **1,020 W**, including the noise margin. Other loads could
+therefore remain at 800 W if the qualified pre-stop output was at least 1,820 W.
+
+The relative path requires a recent stable pre-command window as well as stable
+post-Off evidence. Each window needs at least `minimum_samples` distinct reports
+spanning `settle_seconds`, with its power range no greater than
+`noise_margin_w`. Pre-stop collection requires fresh native Heat mode with a
+`heating` action, excluding restored or assumed feedback; an interruption clears
+the collected window. The baseline uses the lowest qualified pre-stop reading,
+not a historical maximum or a transient peak; the highest post-stop reading
+must still satisfy the required drop. Reports must meet `max_age_seconds` and
+the existing ordering, gap and freshness checks. The pre-stop buffer is bounded
+to 128 reports; if the retained reports cannot establish the required window,
+the relative path remains unknown. Relative-mode configurations reject more
+than 128 required samples or a settling span longer than the maximum report
+age. Relative mode also requires `minimum_samples` of at least three; the legacy
+default of two remains unchanged when `relative_drop_enabled` is `false`.
+Taking the baseline snapshot never delays sending Off.
+
+A fresh native mode-Off report after the request is mandatory for both paths.
+A thermostatically idle heater may have no large drop: only qualified absolute
+low output can then corroborate an `already_low` result. If the baseline is
+unknown or the unchanged output is above the low-output ceiling, fresh native
+Off remains `state_only`; neither condition proves continued heating.
+Unrelated AI, TV or other load changes can imitate or obscure a drop even when
+both windows are stable. Relative corroboration is still operational evidence,
+not heater-only current measurement or proof of electrical isolation.
+
+Aggregate acquisition remains asynchronous. The example's 180-second window
+does not extend the separate **five-second native-Off acknowledgement** deadline
+or postpone emergency escalation when that acknowledgement is absent. Fresh
+heater-only current contradicting Off remains a shutdown failure; stale,
+missing or inconclusive aggregate data alone does not request a shared AC cut.
+Corroboration is revoked when the required current evidence is lost. The
+top-level confirmation label follows that loss instead of retaining a stale
+aggregate-corroborated headline; this display correction does not clear a
+physical-cut confirmation or a recovery latch.
+
 ## Latches and manual recovery
 
 A shared AC emergency is persisted, blocks new heater starts and is not a

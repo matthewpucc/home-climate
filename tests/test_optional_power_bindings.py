@@ -177,6 +177,34 @@ class OptionalPowerBindingsTests(unittest.TestCase):
             with self.subTest(calibration=calibration), self.assertRaises(BindingsError):
                 HouseBindings.from_dict(raw)
 
+    def test_relative_calibration_round_trip_does_not_arm_or_rebind_devices(self):
+        raw = self.direct()
+        before = HouseBindings.from_dict(raw)
+        raw["power"]["aggregate_stop_confirmation"] = {
+            "minimum_drop_w": 1000, "residual_ceiling_w": 160, "noise_margin_w": 20,
+            "minimum_samples": 3, "settle_seconds": 30, "max_age_seconds": 90,
+            "timeout_seconds": 180, "relative_drop_enabled": True}
+        parsed = HouseBindings.from_dict(raw)
+        self.assertTrue(parsed.power.aggregate_stop_confirmation.relative_drop_enabled)
+        self.assertEqual(parsed.to_dict(), raw)
+        self.assertEqual(parsed.power.entity_ids, before.power.entity_ids)
+        self.assertFalse(parsed.power.emergency_ac_fallback_enabled)
+        self.assertIsNone(parsed.power.heater_switch)
+        self.assertIsNone(parsed.power.heater_current)
+
+    def test_relative_calibration_requires_explicit_boolean_and_feasible_baseline(self):
+        policy = {"minimum_drop_w": 1000, "residual_ceiling_w": 160, "noise_margin_w": 20,
+                  "minimum_samples": 3, "settle_seconds": 30, "max_age_seconds": 90,
+                  "timeout_seconds": 180, "relative_drop_enabled": True}
+        for key, value in (("relative_drop_enabled", 1), ("relative_drop_enabled", "true"),
+                           ("relative_drop_enabled", None), ("minimum_samples", 2),
+                           ("minimum_samples", 129),
+                           ("settle_seconds", 91)):
+            raw = self.direct()
+            raw["power"]["aggregate_stop_confirmation"] = dict(policy, **{key: value})
+            with self.subTest(key=key, value=value), self.assertRaises(BindingsError):
+                HouseBindings.from_dict(raw)
+
     def test_direct_constructors_require_validated_calibration_and_are_immutable(self):
         with self.assertRaises(BindingsError):
             replace(self.original.power, aggregate_stop_confirmation={})

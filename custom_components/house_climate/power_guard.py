@@ -223,6 +223,9 @@ class HeaterPowerGuard:
         self._shutdown_stage = "idle"
         self._aggregate_evidence = None
         self._aggregate_outcome = None
+        policy = getattr(self.bindings, "aggregate_stop_confirmation", None)
+        self._aggregate_baseline = (policy.create_baseline()
+            if policy is not None and policy.relative_drop_enabled else None)
         self._notice_signature = None
         self._notice_active = False
         self._group_notice_queued = False
@@ -462,6 +465,21 @@ class HeaterPowerGuard:
 
         @callback
         def changed(_event=None):
+            if _event and self._aggregate_baseline is not None:
+                entity = _event.data.get("entity_id")
+                state = _event.data.get("new_state")
+                now = self._wall_clock()
+                if entity == self.bindings.heater and not self._aggregate_heating(state, now):
+                    # Invalidate immediately even if a later valid state has
+                    # already replaced this event's state before _observe().
+                    self._aggregate_baseline.observe(now, None, None)
+                elif entity == self.bindings.output_power:
+                    # Preserve all known output changes/interruptions rather
+                    # than only the final value of coalesced state events.
+                    value, reported = (self._aggregate_sample(state)
+                        if state is not None and self._aggregate_heating(self._state(self.bindings.heater), now)
+                        else (None, None))
+                    self._aggregate_baseline.observe(now, value, reported)
             if (_event and _event.data.get("entity_id") == self.bindings.heater_switch
                     and (state := _event.data.get("new_state")) is not None
                     and state.state == "on" and self._cut_owned
@@ -566,33 +584,59 @@ class HeaterPowerGuard:
         except (ValueError, TypeError, OverflowError):
             return None
 
-    def _aggregate_sample(self):
+    def _aggregate_sample(self, observed=None):
         entity = self.bindings.output_power
-        observed = self._state(entity)
+        observed = self._state(entity) if observed is None else observed
         try:
             value = _measurement({entity: observed}, entity, {"W": 1, "kW": 1000}, self._wall_clock())
             _, attrs, reported = _state_parts(observed)
-            if attrs.get("restored"):
-                raise ValueError("restored output")
+            if attrs.get("restored") or attrs.get("assumed_state"):
+                raise ValueError("restored or assumed output")
             return value, _timestamp(reported)
         except (ValueError, TypeError, OverflowError):
             return None, None
+
+    def _aggregate_heating(self, observed, now):
+        state, attrs, reported = _state_parts(observed)
+        try:
+            stamp = _timestamp(reported)
+            policy = self.bindings.aggregate_stop_confirmation
+            return (state == "heat" and attrs.get("hvac_action") == "heating"
+                    and not attrs.get("restored") and not attrs.get("assumed_state")
+                    and 0 <= now - stamp <= policy.max_age_seconds)
+        except (ValueError, TypeError, OverflowError):
+            return False
+
+    def _observe_aggregate_baseline(self):
+        """Keep bounded pre-command reports; never wait before sending Off."""
+        if self._aggregate_baseline is None:
+            return
+        now = self._wall_clock()
+        value, reported = (self._aggregate_sample()
+            if self._aggregate_heating(self._state(self.bindings.heater), now) else (None, None))
+        self._aggregate_baseline.observe(now, value, reported)
 
     def _observe_aggregate_stop(self):
         if self._aggregate_evidence is None:
             return
         value, reported = self._aggregate_sample()
         native_off = None
-        if self._heater_off(fresh=True):
+        if (self._heater_off(fresh=True) and not self._shutdown_contradicted
+                and self._heater_current_stopped() is not False):
             try:
                 native_off = _timestamp(_state_parts(self._state(self.bindings.heater))[2])
             except (ValueError, TypeError, OverflowError):
                 pass
         self._aggregate_outcome = self._aggregate_evidence.observe(
             self._wall_clock(), value, reported, native_off_after=native_off)
-        if self._off_confirmed and self._heater_off(fresh=True):
+        if (self._off_confirmed and self._heater_off(fresh=True)
+                and not self._shutdown_contradicted):
             self._shutdown_confirmation = ("aggregate_corroborated"
                 if self._aggregate_outcome.status == "corroborated" else "state_only")
+        elif self._shutdown_confirmation in {"state_only", "aggregate_corroborated"}:
+            # The headline must not retain proof that the current nested
+            # evidence and shutdown_confirmed property have already lost.
+            self._shutdown_confirmation = "unconfirmed"
 
     async def async_acknowledge_emergency(self):
         """Acknowledge manual recovery; never energize an outlet or shared AC."""
@@ -701,6 +745,7 @@ class HeaterPowerGuard:
         if self._closed:
             return
         self._reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
+        self._observe_aggregate_baseline()
         if self._persistence_error and self._clock() >= self._save_retry_at:
             self._save_retry_at = self._clock() + 60
             self._save()
@@ -919,9 +964,14 @@ class HeaterPowerGuard:
         self._shutdown_contradicted = False
         policy = getattr(self.bindings, "aggregate_stop_confirmation", None)
         if policy is not None:
+            self._observe_aggregate_baseline()
             self._aggregate_evidence = policy.create_evidence()
             value, reported = self._aggregate_sample()
-            self._aggregate_outcome = self._aggregate_evidence.begin(self._wall_clock(), value, reported)
+            now = self._wall_clock()
+            baseline = (self._aggregate_baseline.snapshot(now)
+                        if self._aggregate_baseline is not None else None)
+            self._aggregate_outcome = self._aggregate_evidence.begin(
+                now, value, reported, qualified_baseline_w=baseline)
         else:
             self._aggregate_evidence = self._aggregate_outcome = None
         self._shutdown_stage = "dyson_off"
