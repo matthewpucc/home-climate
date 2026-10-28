@@ -1,7 +1,7 @@
-# Heater emergency cutoff (unreleased)
+# Heater emergency cutoff
 
-This guide describes an opt-in draft after 0.8.2. Its new bindings are not valid
-in the published 0.8.2 release. Installing code does not select or arm a shared
+Version 0.8.3 adds this opt-in native guard feature. Its new bindings are not valid
+in 0.8.2 or earlier. Installing code does not select or arm a shared
 cutoff automatically. Keep device commands disabled while commissioning wiring.
 
 ## Shutdown stages
@@ -62,6 +62,26 @@ When an approved dedicated outlet or meter is installed, bind its real
 or mA. Aggregate AC watts do not replace heater current, and an absent meter is
 unknown rather than a fresh zero. Configured meters keep their existing
 freshness checks. The dedicated and shared AC switches must be distinct.
+
+## Optional household alerts
+
+Local persistent notifications remain the default. To additionally send
+emergency-latch notices through an existing HA notify group, merge this property
+into the `power` object:
+
+```json
+{
+  "emergency_notify_service": "notify.household_alerts"
+}
+```
+
+That name is synthetic. Intentionally select the group's recipients and delivery
+channels in Home Assistant, then use its actual `notify.<service_name>` action.
+This is a service name, not a device entity or a recipient list. Leaving the
+field absent or `null` sends no group notification. Configuring a group does not
+arm shared AC fallback, send a test message or alter cutoff ownership. Verify
+delivery separately before relying on it; a notification cannot confirm a
+physical shutdown or replace local recovery access.
 
 ## Optional aggregate corroboration
 

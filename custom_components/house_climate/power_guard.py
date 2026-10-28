@@ -223,6 +223,10 @@ class HeaterPowerGuard:
         self._shutdown_stage = "idle"
         self._aggregate_evidence = None
         self._aggregate_outcome = None
+        self._notice_signature = None
+        self._notice_active = False
+        self._group_notice_queued = False
+        self._notice_error = None
         self.pending_external_jobs = lambda: ()
 
     def _state(self, entity):
@@ -299,6 +303,7 @@ class HeaterPowerGuard:
                 "emergency_ac_status": self._emergency_ac_status,
                 "emergency_ac_attempts": self._emergency_ac_attempts,
                 "emergency_ac_inflight": bool(self._emergency_service_tasks),
+                "emergency_notification_error": self._notice_error,
                 "manual_recovery_required": self._manual_recovery_required,
                 "binding_identity_mismatch": self._identity_mismatch,
                 "persistence_error": self._persistence_error,
@@ -308,6 +313,7 @@ class HeaterPowerGuard:
                 "branch_current_measured": False, "live": self.live}
 
     def _publish(self):
+        self._publish_emergency_notice()
         current = self.diagnostics
         stable = {key: current[key] for key in (
             "blocked", "reason", "latched", "switch_cut_owned", "power_cut_confirmed",
@@ -316,10 +322,74 @@ class HeaterPowerGuard:
             "shutdown_stage", "shutdown_confirmation", "aggregate_stop",
             "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "manual_recovery_required",
-            "binding_identity_mismatch")}
+            "binding_identity_mismatch", "emergency_notification_error")}
         if stable != self._last_diagnostics:
             self._last_diagnostics = stable
             self.notify()
+
+    def _publish_emergency_notice(self):
+        """Update one local notice; queue the chosen group once per latch."""
+        if not self._emergency_ac_latched and not self._notice_active:
+            return
+        try:
+            from homeassistant.components import persistent_notification
+            notification_id = f"home_climate_heater_emergency_{self.entry_id}"
+            if not self._emergency_ac_latched:
+                persistent_notification.async_dismiss(self.hass, notification_id)
+                self._notice_signature = None
+                self._notice_active = self._group_notice_queued = False
+                return
+            reason = str(self._emergency_ac_reason or self._reason or "Heater shutdown is unconfirmed")[:2048]
+            signature = (self._emergency_ac_status, reason)
+            if signature == self._notice_signature:
+                return
+            status = {"requested": "AC output Off requested; awaiting confirmation",
+                      "confirmed_off": "AC output Off confirmed by fresh feedback"}.get(
+                          self._emergency_ac_status, "AC output Off requested; feedback is unknown or unconfirmed")
+            message = (f"{reason}\n\n{status}. Manual recovery is required; Home Climate will not "
+                       "turn shared AC back on. This output also supplies other loads, which may "
+                       "include network equipment. Lost communication is not proof of a successful cut. "
+                       "Check the equipment locally, restore power manually only after resolving the cause, "
+                       "then use Acknowledge heater power recovery.")
+            persistent_notification.async_create(
+                self.hass, message, title="Home Climate heater emergency cutoff",
+                notification_id=notification_id)
+            self._notice_signature = signature
+            self._notice_active = True
+            service = getattr(self.bindings, "emergency_notify_service", None)
+            if service and not self._group_notice_queued:
+                self._group_notice_queued = True
+                self.hass.async_create_task(self._send_emergency_notice(service, message))
+        except Exception:
+            error = "Could not update the local heater emergency notification"
+            if self._notice_error != error:
+                _LOGGER.exception(error)
+            self._notice_error = error
+
+    async def _send_emergency_notice(self, service, message):
+        """Notification delivery is bounded and never blocks a power command."""
+        domain, action = service.split(".", 1)
+        if not self.hass.services.has_service(domain, action):
+            self._notice_error = f"Configured emergency notification action is unavailable: {service}"
+            _LOGGER.warning(self._notice_error)
+            self._publish()
+            return
+        job = self.hass.async_create_task(self.hass.services.async_call(
+            domain, action, {"message": message, "title": "Home Climate heater emergency cutoff"},
+            blocking=True))
+        job.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        done, _ = await asyncio.wait((job,), timeout=SERVICE_TIMEOUT_SECONDS)
+        try:
+            if job not in done:
+                job.cancel()
+                raise TimeoutError("Notification delivery timed out; delivery remains unknown")
+            job.result()
+        except (Exception, asyncio.CancelledError) as exc:
+            self._notice_error = f"Emergency notification delivery failed or is unknown: {exc}"
+            _LOGGER.warning(self._notice_error)
+        else:
+            self._notice_error = None
+        self._publish()
 
     def _states(self):
         return {entity: self.hass.states.get(entity) for entity in self.entity_ids}

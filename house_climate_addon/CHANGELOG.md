@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.3
+
+- Align distribution metadata with the native integration release. The optional shared AC cutoff, aggregate corroboration and emergency notifications are native-integration features; the add-on does not install that independent guard.
+
 ## 0.8.2
 
 - Native Home Assistant integration: restore periodic heater power-guard checks without changing electrical limits, cutoff ownership, or recovery rules. The standalone/add-on path does not use this native callback.

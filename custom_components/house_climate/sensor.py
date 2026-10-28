@@ -442,7 +442,7 @@ class HeaterPowerStatus(ControllerEntity):
                  "heater_cutoff_configured", "heater_current_configured", "electrical_stop_confirmed",
                  "shutdown_stage", "shutdown_confirmation", "aggregate_stop",
                  "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
-                 "emergency_ac_attempts", "emergency_ac_inflight", "manual_recovery_required",
+            "emergency_ac_attempts", "emergency_ac_inflight", "emergency_notification_error", "manual_recovery_required",
                  "binding_identity_mismatch") if key in guard}
 
 

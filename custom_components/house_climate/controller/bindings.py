@@ -53,6 +53,7 @@ class PowerBindings:
     emergency_ac_switch: str | None = None
     emergency_ac_fallback_enabled: bool = False
     aggregate_stop_confirmation: AggregateStopConfig | None = None
+    emergency_notify_service: str | None = None
 
     def __post_init__(self):
         if type(self.emergency_ac_fallback_enabled) is not bool:
@@ -62,9 +63,14 @@ class PowerBindings:
         if (self.aggregate_stop_confirmation is not None
                 and not isinstance(self.aggregate_stop_confirmation, AggregateStopConfig)):
             raise BindingsError("power.aggregate_stop_confirmation must be validated calibration")
+        if self.emergency_notify_service is not None and (
+                not isinstance(self.emergency_notify_service, str)
+                or not re.fullmatch(r"notify\.[a-z0-9_]+", self.emergency_notify_service)):
+            raise BindingsError("power.emergency_notify_service must be a notify service name")
         values = asdict(self)
         values.pop("aggregate_stop_confirmation")
         values.pop("emergency_ac_fallback_enabled")
+        values.pop("emergency_notify_service")
         for role, value in values.items():
             if value is None and role in {"heater_switch", "heater_current", "emergency_ac_switch"}:
                 continue
@@ -80,7 +86,8 @@ class PowerBindings:
     @property
     def entity_ids(self):
         return frozenset(value for role, value in asdict(self).items()
-                         if role not in {"aggregate_stop_confirmation", "emergency_ac_fallback_enabled"}
+                         if role not in {"aggregate_stop_confirmation", "emergency_ac_fallback_enabled",
+                                         "emergency_notify_service"}
                          and value is not None)
 
     def to_dict(self):
@@ -92,6 +99,8 @@ class PowerBindings:
             result.pop("emergency_ac_switch")
         if not self.emergency_ac_fallback_enabled:
             result.pop("emergency_ac_fallback_enabled")
+        if self.emergency_notify_service is None:
+            result.pop("emergency_notify_service")
         if self.aggregate_stop_confirmation is not None:
             result["aggregate_stop_confirmation"] = self.aggregate_stop_confirmation.to_dict()
         return result
@@ -160,7 +169,7 @@ class HouseBindings:
         _keys(raw["fans"], FAN_ROLES, "fans")
         _keys(raw["power"], POWER_ROLES, "power",
               optional={"emergency_ac_switch", "emergency_ac_fallback_enabled",
-                        "aggregate_stop_confirmation"})
+                        "aggregate_stop_confirmation", "emergency_notify_service"})
         for role, selected in raw["rooms"].items():
             if not isinstance(selected, list):
                 raise BindingsError(f"rooms.{role} must list ambient sensor entity IDs")

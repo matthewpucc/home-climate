@@ -23,6 +23,7 @@ class OptionalPowerBindingsTests(unittest.TestCase):
         self.assertIsNone(parsed.power.emergency_ac_switch)
         self.assertFalse(parsed.power.emergency_ac_fallback_enabled)
         self.assertIsNone(parsed.power.aggregate_stop_confirmation)
+        self.assertIsNone(parsed.power.emergency_notify_service)
         self.assertEqual(parsed.to_dict(), self.raw)
         self.assertEqual(parsed.power.entity_ids, self.original.power.entity_ids)
 
@@ -65,6 +66,38 @@ class OptionalPowerBindingsTests(unittest.TestCase):
         parsed = HouseBindings.from_dict(raw)
         self.assertFalse(parsed.power.emergency_ac_fallback_enabled)
         self.assertNotIn("emergency_ac_fallback_enabled", parsed.to_dict()["power"])
+
+    def test_notify_group_is_a_service_not_a_tracked_device_or_arming_flag(self):
+        raw = self.direct()
+        raw["windows"] = {"office": ["binary_sensor.office_opening"]}
+        raw["outdoor"] = [{"entity_id": "sensor.exterior_temperature",
+                           "source": "exterior_probe", "role": "primary"}]
+        before = HouseBindings.from_dict(raw)
+        raw["power"]["emergency_notify_service"] = "notify.household_alerts"
+        parsed = HouseBindings.from_dict(raw)
+        self.assertEqual(parsed.power.emergency_notify_service, "notify.household_alerts")
+        self.assertEqual(parsed.power.entity_ids, before.power.entity_ids)
+        self.assertNotIn("notify.household_alerts", parsed.power.entity_ids)
+        self.assertFalse(parsed.power.emergency_ac_fallback_enabled)
+        self.assertEqual(parsed.to_dict(), raw)
+
+    def test_explicit_null_notify_service_keeps_old_round_trip(self):
+        raw = deepcopy(self.raw)
+        raw["power"]["emergency_notify_service"] = None
+        parsed = HouseBindings.from_dict(raw)
+        self.assertIsNone(parsed.power.emergency_notify_service)
+        self.assertEqual(parsed.to_dict(), self.raw)
+
+    def test_notify_service_rejects_entities_and_malformed_names(self):
+        for value in ("switch.household_alerts", "sensor.household_alerts", "notify",
+                      "notify.", "notify.group.recipient", "notify.HouseholdAlerts",
+                      "notify.household-alerts", " notify.household_alerts", "", True, 1, [], {}):
+            raw = deepcopy(self.raw)
+            raw["power"]["emergency_notify_service"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(BindingsError, "notify service"):
+                HouseBindings.from_dict(raw)
+            with self.subTest(constructor=value), self.assertRaisesRegex(BindingsError, "notify service"):
+                replace(self.original.power, emergency_notify_service=value)
 
     def test_meter_and_individual_cutoff_are_independently_optional(self):
         direct_metered = HouseBindings.from_dict(self.direct(meter="sensor.heater_only_current"))
