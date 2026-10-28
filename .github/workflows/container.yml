@@ -52,7 +52,7 @@ jobs:
           python-version: "3.14"
       - name: Test native integration against Home Assistant
         run: |
-          python -m pip install '.[test]' 'homeassistant==2026.10.1'
+          python -m pip install '.[test]' 'homeassistant==2026.10.4'
           python -m unittest discover -s tests_homeassistant -v
       - name: Test release publishing without GitHub writes
         run: node --test tests_release/*.test.cjs

@@ -169,6 +169,253 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
                                    force_update=True)
         await self.hass.async_block_till_done()
 
+    async def load_manual_recovery_claim(self, *, bindings=None, changed_identity=False):
+        source = await self.start(bindings)
+        saved = source._saved_state()
+        saved.update(latched=True, manual_recovery_required=True,
+                     trip_wall=source._wall_clock())
+        if changed_identity:
+            saved["binding_identity"] = {**saved["binding_identity"],
+                                         "heater": "climate.previous_fixture_heater"}
+        self.assertTrue(await source.async_close())
+        guard = await self.start(bindings, saved=saved)
+        self.assertIsNone(guard._off_request_wall)
+        self.refresh_safe_measurements()
+        self.hass.states.async_set(SHARED_AC, "on", force_update=True)
+        self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"},
+                                   force_update=True)
+        await self.hass.async_block_till_done()
+        self.assertTrue(guard.diagnostics["manual_recovery_required"])
+        self.assertTrue(guard.diagnostics["latched"])
+        self.assertEqual(self.calls, [])
+        return guard
+
+    async def test_restarted_manual_claim_acknowledgement_eventually_rearms_ordinary_guard(self):
+        guard = await self.load_manual_recovery_claim(changed_identity=True)
+        clock = [guard._clock()]
+        guard._clock = lambda: clock[0]
+        original_trip = guard._tripped_at
+        self.assertTrue(await guard.async_acknowledge_emergency())
+        await self.hass.async_block_till_done()
+        self.assertFalse(guard.diagnostics["manual_recovery_required"])
+        self.assertFalse(guard.diagnostics["emergency_ac_latched"])
+        self.assertFalse(guard.diagnostics["binding_identity_mismatch"])
+        self.assertIsNone(guard._off_request_wall, "Manual evidence is not a sent Off command")
+        self.assertTrue(guard.diagnostics["latched"])
+        persisted = guard._store.async_save.await_args.args[0]
+        self.assertFalse(persisted["manual_recovery_required"])
+        self.assertFalse(persisted["emergency_ac_latched"])
+        self.assertTrue(persisted["latched"])
+        self.assertEqual(self.calls, [])
+        baseline = clock[0]
+        for elapsed in (power.SAFE_LOAD_SECONDS - 1, power.SAFE_LOAD_SECONDS,
+                        power.COOLDOWN_SECONDS - 1):
+            clock[0] = baseline + elapsed
+            self.refresh_safe_measurements()
+            self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"},
+                                       force_update=True)
+            await self.hass.async_block_till_done()
+            self.assertTrue(guard.diagnostics["latched"])
+            self.assertEqual(guard._tripped_at, original_trip)
+        clock[0] = baseline + power.COOLDOWN_SECONDS
+        self.refresh_safe_measurements()
+        self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"}, force_update=True)
+        await self.hass.async_block_till_done()
+        self.assertFalse(guard.diagnostics["latched"])
+        self.assertFalse(guard.blocked)
+        guard.check_activation(BASE.heater, {"hvac_mode": "heat"})
+        self.assertEqual(self.calls, [])
+
+    async def test_repeated_restart_ack_cannot_renew_evidence_or_restart_cooldown(self):
+        guard = await self.load_manual_recovery_claim()
+        clock = [guard._clock()]
+        guard._clock = lambda: clock[0]
+        original_trip = guard._tripped_at
+        self.assertTrue(await guard.async_acknowledge_emergency())
+        await self.hass.async_block_till_done()
+        original_boundary = guard._off_request_wall
+        original_manual_evidence = getattr(guard, "_manual_off_wall", None)
+        original_safe_since = guard._safe_since
+        saves = guard._store.async_save.await_count
+        for _ in range(3):
+            clock[0] += 10
+            with self.assertRaisesRegex(RuntimeError, "No emergency or wiring recovery"):
+                await guard.async_acknowledge_emergency()
+            self.assertEqual(guard._off_request_wall, original_boundary)
+            self.assertEqual(getattr(guard, "_manual_off_wall", None), original_manual_evidence)
+            self.assertEqual(guard._safe_since, original_safe_since)
+            self.assertEqual(guard._tripped_at, original_trip)
+            self.assertTrue(guard.diagnostics["latched"])
+        self.assertEqual(guard._store.async_save.await_count, saves)
+        self.assertEqual(self.calls, [])
+
+    async def test_restarted_claim_rejects_invalid_off_current_and_electrical_evidence(self):
+        guard = await self.load_manual_recovery_claim(
+            bindings=self.direct_bindings(current=BASE.heater_current))
+        old = datetime.now(timezone.utc) - timedelta(seconds=power.TELEMETRY_MAX_AGE_SECONDS + 1)
+        future = datetime.now(timezone.utc) + timedelta(seconds=6)
+        at_load = datetime.fromtimestamp(guard._manual_recovery_wall, timezone.utc)
+        # HA reports have microsecond precision. Align the synthetic boundary
+        # before testing exact equality; float-to-datetime rounding must not
+        # accidentally turn this rejected report into a later valid report.
+        guard._manual_recovery_wall = at_load.timestamp()
+        cases = (
+            ("heater not Off", BASE.heater, "state", "heat"),
+            ("stale Off", BASE.heater, "last_reported", old),
+            ("future Off", BASE.heater, "last_reported", future),
+            ("pre-recovery Off", BASE.heater, "last_reported", at_load - timedelta(seconds=1)),
+            ("Off exactly at recovery boundary", BASE.heater, "last_reported", at_load),
+            ("restored Off", BASE.heater, "attributes", {"hvac_action": "off", "restored": True}),
+            ("assumed Off", BASE.heater, "attributes", {"hvac_action": "off", "assumed_state": True}),
+            ("stale current", BASE.heater_current, "last_reported", old),
+            ("heater drawing current", BASE.heater_current, "state", "3"),
+            ("unsafe input", BASE.input_power, "state", "1500"),
+            ("stale input", BASE.input_power, "last_reported", old),
+            ("battery reserve", BASE.battery, "state", "40"),
+        )
+        saves = guard._store.async_save.await_count
+        for label, entity, field, invalid in cases:
+            with self.subTest(evidence=label):
+                observed = self.hass.states.get(entity)
+                original = getattr(observed, field)
+                # Model the cached source report itself, without queuing an
+                # independent electrical-trip event during this ack check.
+                setattr(observed, field, invalid)
+                try:
+                    with self.assertRaises(RuntimeError):
+                        await guard.async_acknowledge_emergency()
+                    self.assertTrue(guard.diagnostics["manual_recovery_required"])
+                    self.assertTrue(guard.diagnostics["latched"])
+                    self.assertTrue(guard.blocked)
+                    self.assertIsNone(guard._off_request_wall)
+                    self.assertEqual(guard._store.async_save.await_count, saves)
+                    self.assertEqual(self.calls, [])
+                finally:
+                    setattr(observed, field, original)
+        self.assertTrue(await guard.async_acknowledge_emergency())
+        self.assertEqual(self.calls, [])
+
+    async def test_restarted_claim_cannot_acknowledge_pending_cleanup(self):
+        guard = await self.load_manual_recovery_claim()
+        guard._compensation_pending = True
+        try:
+            with self.assertRaisesRegex(RuntimeError, "actual heater and AC service jobs"):
+                await guard.async_acknowledge_emergency()
+            self.assertTrue(guard.diagnostics["manual_recovery_required"])
+            self.assertIsNone(guard._off_request_wall)
+            self.assertEqual(self.calls, [])
+        finally:
+            guard._compensation_pending = False
+        self.assertTrue(await guard.async_acknowledge_emergency())
+        self.assertEqual(self.calls, [])
+
+    async def test_restarted_claim_failed_ack_save_cannot_install_shutdown_evidence(self):
+        guard = await self.load_manual_recovery_claim(changed_identity=True)
+        original_trip = guard._tripped_at
+        guard._store.async_save.side_effect = OSError("fixture recovery store unavailable")
+        with self.assertRaisesRegex(RuntimeError, "Cannot persist manual heater recovery"):
+            await guard.async_acknowledge_emergency()
+        self.assertTrue(guard.diagnostics["manual_recovery_required"])
+        self.assertTrue(guard.diagnostics["binding_identity_mismatch"])
+        self.assertTrue(guard.diagnostics["latched"])
+        self.assertFalse(guard._off_confirmed)
+        self.assertIsNone(guard._off_request_wall)
+        self.assertIsNone(getattr(guard, "_manual_off_wall", None))
+        self.assertIsNone(guard._safe_since)
+        self.assertEqual(guard._tripped_at, original_trip)
+        self.assertEqual(self.calls, [])
+
+    async def test_off_expiring_during_restart_ack_save_keeps_durable_inhibition(self):
+        guard = await self.load_manual_recovery_claim(changed_identity=True)
+        entered, release = asyncio.Event(), asyncio.Event()
+        writes = []
+
+        async def held_save(data):
+            writes.append(dict(data))
+            if not data.get("manual_recovery_required"):
+                entered.set()
+                await release.wait()
+
+        guard._store.async_save.side_effect = held_save
+        caller = asyncio.create_task(guard.async_acknowledge_emergency())
+        await self.wait_for(entered.is_set)
+        self.hass.states.get(BASE.heater).last_reported = (
+            datetime.now(timezone.utc) - timedelta(seconds=power.TELEMETRY_MAX_AGE_SECONDS + 1))
+        release.set()
+        with self.assertRaises(RuntimeError):
+            await caller
+        await self.hass.async_block_till_done()
+        self.assertTrue(writes[-1]["manual_recovery_required"])
+        self.assertTrue(writes[-1]["latched"])
+        self.assertTrue(guard.diagnostics["manual_recovery_required"])
+        self.assertTrue(guard.diagnostics["binding_identity_mismatch"])
+        self.assertTrue(guard.blocked)
+        self.assertFalse(guard._off_confirmed)
+        self.assertIsNone(getattr(guard, "_manual_off_wall", None))
+        self.assertEqual(self.calls, [])
+
+    async def test_new_actual_cleanup_during_restart_ack_save_keeps_durable_inhibition(self):
+        guard = await self.load_manual_recovery_claim()
+        entered, release = asyncio.Event(), asyncio.Event()
+        cleanup_entered, finish_cleanup = asyncio.Event(), asyncio.Event()
+        writes = []
+
+        async def held_save(data):
+            writes.append(dict(data))
+            if not data.get("manual_recovery_required"):
+                entered.set()
+                await release.wait()
+
+        async def actual_cleanup(call):
+            self.calls.append((call.domain, call.service, dict(call.data)))
+            cleanup_entered.set()
+            await finish_cleanup.wait()
+            self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"},
+                                       force_update=True)
+
+        guard._store.async_save.side_effect = held_save
+        self.hass.services.async_register("climate", "set_hvac_mode", actual_cleanup)
+        caller = asyncio.create_task(guard.async_acknowledge_emergency())
+        await self.wait_for(entered.is_set)
+        cleanup = self.hass.async_create_task(self.hass.services.async_call(
+            "climate", "set_hvac_mode", {"entity_id": BASE.heater, "hvac_mode": "off"}, blocking=True))
+        guard.pending_external_jobs = lambda: (cleanup,) if not cleanup.done() else ()
+        try:
+            await self.wait_for(cleanup_entered.is_set)
+            release.set()
+            with self.assertRaises(RuntimeError):
+                await caller
+            self.assertTrue(writes[-1]["manual_recovery_required"])
+            self.assertTrue(writes[-1]["latched"])
+            self.assertTrue(guard.diagnostics["manual_recovery_required"])
+            self.assertTrue(guard.blocked)
+            self.assertFalse(guard._off_confirmed)
+            self.assertIsNone(getattr(guard, "_manual_off_wall", None))
+            self.assertEqual(self.calls, [("climate", "set_hvac_mode",
+                                          {"entity_id": BASE.heater, "hvac_mode": "off"})])
+            self.assertEqual(self.switch_calls(SHARED_AC, "turn_on"), [])
+        finally:
+            release.set()
+            finish_cleanup.set()
+            await cleanup
+            await self.hass.async_block_till_done()
+
+    async def test_new_heat_after_restart_ack_revokes_shutdown_proof(self):
+        guard = await self.load_manual_recovery_claim()
+        self.assertTrue(await guard.async_acknowledge_emergency())
+        await self.hass.async_block_till_done()
+        self.ignore_climate = self.ignore_ac = True
+        self.hass.states.async_set(BASE.heater, "heat", {"hvac_action": "heating"},
+                                   force_update=True)
+        await self.hass.async_block_till_done()
+        self.assertFalse(guard.shutdown_confirmed)
+        self.assertFalse(guard.power_cut_confirmed)
+        self.assertTrue(guard.diagnostics["manual_recovery_required"])
+        self.assertTrue(guard.diagnostics["emergency_ac_latched"])
+        self.assertTrue(guard.blocked)
+        self.assertEqual(len(self.switch_calls(SHARED_AC)), 1)
+        self.assertEqual(self.switch_calls(SHARED_AC, "turn_on"), [])
+
     async def test_explicit_off_without_electrical_trip_uses_native_ack(self):
         guard = await self.start()
         self.hass.states.async_set(BASE.heater, "heat", {"hvac_action": "heating"})
