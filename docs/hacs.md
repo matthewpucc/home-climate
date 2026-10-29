@@ -21,7 +21,7 @@ The comfort policy is fixed. Update the private bindings file when equipment ent
 
 Configure contains the live-command opt-in and separate [protection settings](protection-temperatures.md). Room temperature/range changes belong on the dashboard cards and hold until the next schedule change. Upgrades preserve existing entity identities and compatible temporary holds.
 
-The living-room heater power guard is independent of the comfort switch once live commands are permitted. It can cut a manually operated heater for overload, low battery, or missing safety telemetry. It never switches network equipment or the Elite's overall AC output.
+The living-room heater power guard is independent of the comfort switch once live commands are permitted. It can cut a manually operated heater for overload, low battery, or missing safety telemetry. A separately bound shared AC emergency cutoff requires explicit opt-in and manual recovery; it is not enabled by binding a dedicated heater meter. See [meter selection and recovery](heater-emergency-cutoff.md#dedicated-load-meter).
 
 ## Updates
 

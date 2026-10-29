@@ -52,6 +52,8 @@ This replaces the fixed 1350 W budget. Fresh measured voltage is required; missi
 
 Grid charging can remain high after confirmed heater Off. That remains a wall-load diagnostic and heating inhibition, not proof that the heater failed to stop or a new reason to cut shared AC output. A heater already reporting fresh, trusted Off can use state-only evidence without another no-op stop when no tracked job or meter evidence conflicts. No JSON threshold or mapping changes are required, and upgrading does not clear existing recovery latches. See the [wall-budget evidence rules](docs/control.md#heater-load-shedding).
 
+The unreleased dedicated-watts feature adds `power.heater_power` as an alternative to `power.heater_current`. Select one meter: W/kW power or A/mA current, with the unused binding `null`. Both retain the 180-second freshness check. Watts below 100 W can corroborate a fresh native Off report; thermostat idle alone does not qualify. Stale low readings cannot authorize restoration, and a new watt-based restoration requires post-command low-load feedback. This is operational load evidence, not RMS-overcurrent enforcement or physical isolation proof. See [dedicated meter configuration](docs/heater-emergency-cutoff.md#dedicated-load-meter). Do not apply the new field to 0.8.6.
+
 ## Device recovery and diagnostics
 
 The native integration learns stable, device-specific supported modes and can repair a persistent loss of a previously available mode. It first waits through explicit refresh/rechecks: at least three failures, 60 seconds apart, over at least two minutes. A successful recheck resets consecutive failures. Reloads have a separate attempt limit and backoff; unused-mode loss can wait while healthy heads are conditioning rooms.

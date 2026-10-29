@@ -95,6 +95,8 @@ Rearming requires circuit and input strictly below 85% of the current voltage-de
 
 These are fixed policy rules, with no new tuning fields. Existing power and voltage bindings are sufficient; no JSON threshold or mapping changes are needed. Installing the change does not erase persisted cutoff or manual-recovery latches.
 
+The optional dedicated-watts feature selects `heater_power` (W/kW) instead of `heater_current` (A/mA); configuring both is rejected. Its strict low-load bound is 100 W, while the legacy amp path retains its strict 1 A bound. These classify load after native Off rather than enforce an RMS-current ceiling. Meter reports must stay fresh within 180 seconds; neither stale-high nor stale-low values authorize activation, rearm, restoration or electrical-Off proof. Native mode Off and post-command meter feedback remain separate requirements. A thermostat-idle transition is not an Off acknowledgement. New watt-based restoration also requires fresh low watts after its actual Off request within the existing restoration deadline, otherwise it cuts again and remains inhibited. The five-second native-Off deadline and independent wall/output/battery/temperature protections are unchanged.
+
 The cutoff latch and restoration ownership persist through restart. Restoration retries are bounded. Actual dedicated-switch Off feedback can prove the heater is isolated even while its unpowered integration is unavailable, allowing shutdown cleanup to finish. A requested but unacknowledged power cut is not proof.
 
 ## Visibility and stopping

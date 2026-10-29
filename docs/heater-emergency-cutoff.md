@@ -98,6 +98,57 @@ or mA. Aggregate AC watts do not replace heater current, and an absent meter is
 unknown rather than a fresh zero. Configured meters keep their existing
 freshness checks. The dedicated and shared AC switches must be distinct.
 
+### Dedicated load meter
+
+**Unreleased; not accepted by 0.8.6:** a dedicated heater watt sensor can replace
+the amp input through optional `power.heater_power`. Use an actual heater-only
+sensor in W or kW, rather than aggregate battery output or wall power. Select
+one meter; a configuration with both non-null `heater_power` and
+`heater_current` is rejected explicitly.
+
+```json
+"heater_current": null,
+"heater_power": "sensor.auxiliary_heater_power"
+```
+
+Existing amp configurations, absent/null watt bindings, switch-only wiring and
+direct paths retain their existing meaning. Both meter kinds require finite,
+nonnegative readings with trusted timestamps no older than 180 seconds. No
+startup grace or stale-low exception is introduced. Unchanged HA reports can
+renew `last_reported`; a Prometheus scrape alone cannot. HA entity report age
+also does not prove the age of a physical device measurement.
+
+The watt path uses **strictly below 100 W** as an operational low-load boundary,
+allowing ordinary standby/fan load while distinguishing substantial heating.
+It is not derived by converting the legacy 1 A bound to watts, a device rating,
+or proof that electricity is physically isolated. Commission supported fan
+modes and stop behavior before live use. The legacy amp boundary remains
+strictly below 1 A; neither input implements a standalone RMS-overcurrent trip.
+
+Fresh native **mode Off** remains mandatory for a requested stop. Trusted low
+watts must be reported after that request to provide electrical corroboration;
+pre-command, restored, assumed or expired readings do not qualify. Thermostat
+idle is not mode Off. A valid native Off report can remain state-only while
+asynchronous watt evidence arrives; this does not extend the five-second
+native acknowledgement deadline or turn old high watts into a new sample.
+
+Watt-based automatic outlet restoration needs both safe readings and a fresh
+low-watt report after the actual Off request made during restoration. If that
+proof does not arrive within the existing restoration budget, the guard cuts
+again and retains inhibition. Relay-Off meter reporting must be commissioned
+separately: a meter that stops reporting zero can safely prevent automatic
+restoration after the cooldown. Switch-only wiring still requires manual
+verification instead of automatic outlet restoration.
+
+Meter identity participates in persisted ownership. Adding or changing a watt
+meter during a retained claim requires manual wiring recovery; unchanged
+legacy bindings do not acquire a mismatch merely because the new optional
+field is absent or null. Keep comfort control and live permission Off before
+editing private bindings, explicitly reload the integration in Preview, then
+verify units, freshness, ownership and any required acknowledgement before
+coordinating live use. This feature never enables shared AC fallback or
+automatically restores shared AC.
+
 ## Optional household alerts
 
 Local persistent notifications remain the default. To additionally send

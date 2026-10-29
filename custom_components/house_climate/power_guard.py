@@ -30,6 +30,7 @@ INPUT_CURRENT_CEILING_A = 12.0
 WALL_EXCEED_SECONDS = 30.0
 WALL_MINIMUM_REPORTS = 3
 OUTPUT_SPIKE_W = 2000.0  # Operational shedding threshold, not an inverter rating.
+HEATER_OFF_MAX_W = 100.0  # Non-heating evidence, not an amp or appliance-rating conversion.
 BATTERY_RESERVE_PERCENT = 40.0
 TELEMETRY_MAX_AGE_SECONDS = 180
 BATTERY_MAX_AGE_SECONDS = 900
@@ -91,6 +92,7 @@ class PowerReading:
     issue: str | None = None
     telemetry_missing: bool = False
     wall_load_only: bool = False
+    heater_w: float | None = None
 
     @property
     def safe_to_rearm(self):
@@ -99,6 +101,7 @@ class PowerReading:
                 and self.input_w < self.input_budget_w * .85
                 and self.output_w < OUTPUT_SPIKE_W * .8
                 and (self.heater_a is None or self.heater_a < 1)
+                and (self.heater_w is None or self.heater_w < HEATER_OFF_MAX_W)
                 and self.battery_percent > BATTERY_RESERVE_PERCENT)
 
 
@@ -112,13 +115,18 @@ def evaluate_power(states, bindings: PowerBindings, now=None):
         ("output_w", bindings.output_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
         ("battery_percent", bindings.battery, {"%": 1}, BATTERY_MAX_AGE_SECONDS),
         ("heater_a", bindings.heater_current, {"A": 1, "mA": .001}, TELEMETRY_MAX_AGE_SECONDS),
+        ("heater_w", getattr(bindings, "heater_power", None), {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
     )
     missing = []
     for key, entity, units, age in specs:
-        if key == "heater_a" and entity is None:
+        if key in {"heater_a", "heater_w"} and entity is None:
             # An explicitly absent meter is unknown, never a fresh zero.
             continue
         try:
+            if key == "heater_w":
+                _, attrs, _ = _state_parts(states.get(entity))
+                if attrs.get("restored") or attrs.get("assumed_state"):
+                    raise ValueError(f"{entity}: power report is restored or assumed")
             values[key] = _measurement(states, entity, units, now, maximum_age=age)
         except ValueError as exc:
             missing.append(str(exc))
@@ -172,13 +180,16 @@ class HeaterPowerGuard:
             raise TypeError("A validated PowerBindings dataclass is required")
         for role, domain in (("heater", "climate"), ("heater_switch", "switch"),
                              *((role, "sensor") for role in ("battery", "circuit_power", "input_power",
-                                "output_power", "heater_current", "wall_phase_a_voltage", "wall_phase_b_voltage"))):
+                                "output_power", "heater_current", "heater_power",
+                                "wall_phase_a_voltage", "wall_phase_b_voltage"))):
             entity = getattr(bindings, role, None)
-            if entity is None and role in ("heater_switch", "heater_current"):
+            if entity is None and role in ("heater_switch", "heater_current", "heater_power"):
                 continue
             if not isinstance(entity, str) or not entity.startswith(domain + "."):
                 raise ValueError(f"Invalid {role} power binding")
         self.bindings = bindings
+        if bindings.heater_current is not None and getattr(bindings, "heater_power", None) is not None:
+            raise ValueError("Choose either a heater current or heater power meter")
         self.entity_ids = bindings.entity_ids
         self.hass, self.live, self.entry_id, self.notify = hass, live, entry_id, notify
         self._clock, self._wall_clock = clock, wall_clock
@@ -259,8 +270,26 @@ class HeaterPowerGuard:
         return self.hass.states.get(entity) if entity is not None else None
 
     def _binding_identity(self):
-        return {key: getattr(self.bindings, key, None) for key in (
+        identity = {key: getattr(self.bindings, key, None) for key in (
             "heater", "heater_switch", "heater_current", "emergency_ac_switch")}
+        # An absent optional watt meter must compare identically with legacy
+        # four-role identities. A real meter change still fences old claims.
+        power = getattr(self.bindings, "heater_power", None)
+        if power is not None:
+            identity["heater_power"] = power
+        return identity
+
+    def _heater_meter(self):
+        """Select one dedicated electrical signal without converting W to A."""
+        entity = getattr(self.bindings, "heater_power", None)
+        if entity is not None:
+            return entity, {"W": 1, "kW": 1000}, HEATER_OFF_MAX_W, "power"
+        return self.bindings.heater_current, {"A": 1, "mA": .001}, 1.0, (
+            "current" if self.bindings.heater_current is not None else None)
+
+    @property
+    def _heater_meter_configured(self):
+        return self._heater_meter()[0] is not None
 
     @property
     def _emergency_enabled(self):
@@ -288,7 +317,7 @@ class HeaterPowerGuard:
         """Actual dedicated-plug feedback, not completion of a service call."""
         return (not self._identity_mismatch
                 and ((self._switch_cut_observed()
-                      and self._heater_current_stopped(after=self._cut_request_wall) is not False)
+                      and self._heater_meter_stopped(after=self._cut_request_wall) is not False)
                      or self._emergency_cut_observed())
                 and not self._positive_tasks and not self._emergency_service_tasks
                 and not self._compensation_pending and not self._restoring)
@@ -303,8 +332,8 @@ class HeaterPowerGuard:
         if self._off_boundary() is None and self._wall_observed_off_wall is None:
             return self._heater_off()
         if (self._off_boundary() is None and self._wall_observed_off_wall is not None
-                and self.bindings.heater_current is not None
-                and self._heater_current_stopped() is not True):
+                and self._heater_meter_configured
+                and self._heater_meter_stopped() is not True):
             return False
         return self._off_confirmed and self._heater_off(fresh=True)
 
@@ -329,7 +358,9 @@ class HeaterPowerGuard:
                 "power_restore_cleanup_pending": self._compensation_pending,
                 "heater_cutoff_configured": self.bindings.heater_switch is not None,
                 "heater_current_configured": self.bindings.heater_current is not None,
-                "electrical_stop_confirmed": self._heater_current_stopped() is True,
+                "heater_power_configured": getattr(self.bindings, "heater_power", None) is not None,
+                "heater_meter_kind": self._heater_meter()[3],
+                "electrical_stop_confirmed": self._heater_meter_stopped() is True,
                 "shutdown_stage": self._shutdown_stage,
                 "shutdown_confirmation": self._shutdown_confirmation,
                 "wall_power_budget": (self._wall_budget_state.as_dict()
@@ -346,7 +377,8 @@ class HeaterPowerGuard:
                 "persistence_error": self._persistence_error,
                 "circuit_power_w": r.circuit_w, "elite_input_w": r.input_w,
                 "elite_output_w": r.output_w, "battery_percent": r.battery_percent,
-                "heater_current_a": r.heater_a, "input_budget_w": r.input_budget_w,
+                "heater_current_a": r.heater_a, "heater_power_w": r.heater_w,
+                "input_budget_w": r.input_budget_w,
                 "branch_current_measured": False, "live": self.live}
 
     def _publish(self):
@@ -456,6 +488,10 @@ class HeaterPowerGuard:
             self._emergency_ac_request_wall = None
             self._emergency_ac_attempts = 1
         prior_identity = data.get("binding_identity")
+        if isinstance(prior_identity, dict):
+            prior_identity = dict(prior_identity)
+            if prior_identity.get("heater_power") is None:
+                prior_identity.pop("heater_power", None)
         has_claim = self._cut_owned or self._latched or self._emergency_ac_latched
         if (has_claim and prior_identity != self._binding_identity()):
             # Ownership belongs to actual wiring, not just the config-entry ID.
@@ -632,8 +668,8 @@ class HeaterPowerGuard:
         return (self._emergency_ac_latched and self._emergency_ac_request_wall is not None
                 and self._ac_observed("off", after=self._emergency_ac_request_wall))
 
-    def _heater_current_stopped(self, *, after=None):
-        entity = self.bindings.heater_current
+    def _heater_meter_stopped(self, *, after=None):
+        entity, units, low_limit, _ = self._heater_meter()
         boundary = self._off_boundary() if after is None else after
         passive = after is None and boundary is None and self._wall_observed_off_wall is not None
         if passive:
@@ -642,13 +678,13 @@ class HeaterPowerGuard:
             return None
         try:
             observed = self._state(entity)
-            value = _measurement({entity: observed}, entity, {"A": 1, "mA": .001}, self._wall_clock())
+            value = _measurement({entity: observed}, entity, units, self._wall_clock())
             _, attrs, reported = _state_parts(observed)
             stamp = _timestamp(reported)
             if (attrs.get("restored") or attrs.get("assumed_state")
                     or (stamp < boundary if passive else stamp <= boundary)):
                 return None
-            return value < 1
+            return value < low_limit
         except (ValueError, TypeError, OverflowError):
             return None
 
@@ -657,14 +693,14 @@ class HeaterPowerGuard:
         stamp = self._current_off_report_stamp()
         if stamp is None:
             return None
-        entity = self.bindings.heater_current
+        entity, units, low_limit, _ = self._heater_meter()
         if entity is None:
             return stamp
         try:
             observed = self._state(entity)
-            value = _measurement({entity: observed}, entity, {"A": 1, "mA": .001}, self._wall_clock())
+            value = _measurement({entity: observed}, entity, units, self._wall_clock())
             _, attrs, reported = _state_parts(observed)
-            if value >= 1 or attrs.get("restored") or attrs.get("assumed_state"):
+            if value >= low_limit or attrs.get("restored") or attrs.get("assumed_state"):
                 return None
             return min(stamp, _timestamp(reported))
         except (ValueError, TypeError, OverflowError):
@@ -708,7 +744,7 @@ class HeaterPowerGuard:
         value, reported = self._aggregate_sample()
         native_off = None
         if (self._heater_off(fresh=True) and not self._shutdown_contradicted
-                and self._heater_current_stopped() is not False):
+                and self._heater_meter_stopped() is not False):
             try:
                 native_off = _timestamp(_state_parts(self._state(self.bindings.heater))[2])
             except (ValueError, TypeError, OverflowError):
@@ -763,8 +799,8 @@ class HeaterPowerGuard:
             raise RuntimeError("A fresh thermostat Off report is required after manual recovery")
         if not reading.safe_to_rearm:
             raise RuntimeError("Fresh, safe electrical readings and battery above 40% are required")
-        if self.bindings.heater_current is not None and self._heater_current_stopped(after=barrier) is not True:
-            raise RuntimeError("Fresh low heater current after restoration is required")
+        if self._heater_meter_configured and self._heater_meter_stopped(after=barrier) is not True:
+            raise RuntimeError(f"Fresh low heater {self._heater_meter()[3]} after restoration is required")
         return barrier, reading
 
     def _manual_recovery_generation(self):
@@ -897,12 +933,12 @@ class HeaterPowerGuard:
         if (self._wall_observed_off_wall is not None and not self.shutdown_confirmed
                 and self._shutdown_confirmation in {"state_only", "aggregate_corroborated"}):
             self._shutdown_confirmation = "unconfirmed"
-        if self._heater_off(fresh=True) and self._heater_current_stopped() is False:
+        if self._heater_off(fresh=True) and self._heater_meter_stopped() is False:
             self._shutdown_contradicted = True
             self._off_confirmed = False
             self._shutdown_confirmation = "unconfirmed"
             if self.live and not self._emergency_ac_latched and not self._closing:
-                self._trip("Heater current contradicts the requested Off state")
+                self._trip(f"Heater {self._heater_meter()[3]} contradicts the requested Off state")
                 self._start_action(self._followup_shed())
         if self._emergency_ac_latched:
             self._blocked = self._manual_recovery_required = True
@@ -954,7 +990,7 @@ class HeaterPowerGuard:
                         and not self._shutdown_contradicted and not self._service_tasks
                         and not self._positive_tasks and not self.pending_external_jobs()
                         and not self._compensation_pending
-                        and self._heater_current_stopped() is not False):
+                        and self._heater_meter_stopped() is not False):
                     observed_off = self._passive_off_evidence()
                 self._trip(r.issue)
                 if observed_off is not None:
@@ -971,7 +1007,7 @@ class HeaterPowerGuard:
                     # shared AC output Off would not stop AC input charging.
                     self._reason = "Heater Off confirmed; wall load remains above its operating budget; heat inhibited"
                 if self.live and not self._restoring:
-                    if self._off_confirmed and (not self._heater_off() or self._heater_current_stopped() is False):
+                    if self._off_confirmed and (not self._heater_off() or self._heater_meter_stopped() is False):
                         self._off_confirmed = False
                         self._start_action(self._followup_shed())
                     elif not self._off_confirmed and not self.power_cut_confirmed:
@@ -982,11 +1018,16 @@ class HeaterPowerGuard:
             if not self._restoring and not self._off_confirmed and not self.power_cut_confirmed:
                 self._start_action(self._shed())
             if (self._off_confirmed and not self._restoring
-                    and (not self._heater_off() or self._heater_current_stopped() is False)):
+                    and (not self._heater_off() or self._heater_meter_stopped() is False)):
                 self._off_confirmed = False
                 self._start_action(self._followup_shed())
             if (r.safe_to_rearm
-                    and (self._wall_observed_off_wall is None or self.shutdown_confirmed)):
+                    and (self._wall_observed_off_wall is None or self.shutdown_confirmed)
+                    and (self._heater_meter()[3] != "power" or self.power_cut_confirmed
+                         or self._heater_meter_stopped() is True)):
+                # Watts must prove low load after the relevant Off boundary,
+                # not just be a recent pre-command number. Physical cut proof
+                # can qualify an owned relay before its guarded restoration.
                 self._safe_since = self._safe_since if self._safe_since is not None else self._clock()
                 ready = (self._clock() - self._safe_since >= SAFE_LOAD_SECONDS
                          and self._clock() - self._tripped_at >= COOLDOWN_SECONDS)
@@ -994,14 +1035,16 @@ class HeaterPowerGuard:
                         and not self._compensation_pending and not self._persistence_error):
                     switch = _state_parts(self._state(self.bindings.heater_switch))[0]
                     if self._cut_owned and switch == "off":
-                        if self.bindings.heater_current is None:
-                            self._reason = "Dedicated outlet recovery requires manual verification without a heater current meter"
+                        if not self._heater_meter_configured:
+                            self._reason = "Dedicated outlet recovery requires manual verification without a heater current or power meter"
                         elif self._restore_attempts < MAX_RESTORE_ATTEMPTS:
                             self._start_action(self._restore())
                         else:
                             self._reason = "Heater power restoration failed three times; check the dedicated plug and Dyson"
                     elif (self._heater_off(fresh=True)
-                          and (self._wall_observed_off_wall is None or self.shutdown_confirmed)):
+                          and (self._wall_observed_off_wall is None or self.shutdown_confirmed)
+                          and (self._heater_meter()[3] != "power"
+                               or self._heater_meter_stopped() is True)):
                         # Passive Off adoption has no command acknowledgement.
                         # Its configured meter must remain trustworthy through
                         # cooldown, not merely retain a numeric low value.
@@ -1139,7 +1182,8 @@ class HeaterPowerGuard:
         except (Exception, asyncio.CancelledError):
             return False
 
-    async def _off_ack(self, seconds):
+    async def _off_ack(self, seconds, *, require_meter=False):
+        """Bound native Off; restoration can also require post-request watts."""
         contradictory = False
         self._shutdown_contradicted = False
         self._manual_off_wall = None
@@ -1166,12 +1210,12 @@ class HeaterPowerGuard:
                 task.cancel()
                 return False
             if self._heater_off(fresh=True):
-                meter_stop = self._heater_current_stopped()
+                meter_stop = self._heater_meter_stopped()
                 if meter_stop is not None:
                     contradictory = not meter_stop
                     self._shutdown_contradicted = contradictory
                 self._observe_aggregate_stop()
-                if not contradictory:
+                if not contradictory and (not require_meter or meter_stop is True):
                     self._off_confirmed = True
                     self._shutdown_confirmation = "state_only"
                     if self._aggregate_outcome and self._aggregate_outcome.status == "corroborated":
@@ -1187,7 +1231,8 @@ class HeaterPowerGuard:
             task.cancel()  # Do not await cancellation: integrations can ignore it.
         # Inconclusive aggregate evidence is not evidence of continued heating.
         # A fresh native Off acknowledgement remains state-only confirmation.
-        if self._heater_off(fresh=True) and not contradictory:
+        if (self._heater_off(fresh=True) and not contradictory
+                and (not require_meter or self._heater_meter_stopped() is True)):
             self._off_confirmed = True
             self._shutdown_confirmation = "state_only"
             return True
@@ -1323,10 +1368,15 @@ class HeaterPowerGuard:
                 return
             # Power recovery never means heat recovery.  Supersede a retained
             # thermostat mode, then require fresh Off before opening the gate.
-            if await self._off_ack(RESTORE_ACK_SECONDS):
+            # A watt-meter restoration needs new low-load feedback after this
+            # Off request. Wait only within the existing restore deadline; a
+            # cached pre-On low reading must not open the activation gate.
+            require_power = self._heater_meter()[3] == "power"
+            if await self._off_ack(RESTORE_ACK_SECONDS, require_meter=require_power):
                 reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
                 if (reading.safe_to_rearm and not self._closed and not self._closing
-                        and self._switch_observed("on", after=requested)):
+                        and self._switch_observed("on", after=requested)
+                        and (not require_power or self._heater_meter_stopped() is True)):
                     self._reading = reading
                     self._clear()
                     success = True

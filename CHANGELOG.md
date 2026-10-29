@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Add an optional dedicated `heater_power` binding in W/kW as an explicit alternative to the existing A/mA heater-current meter. Reject configurations selecting both meters instead of silently bypassing either. Existing amp, switch-only and direct-path configurations remain valid.
+- Use fresh, trusted native mode-Off feedback and selected-meter evidence consistently for stop corroboration, passive Off, manual recovery and cooldown. Watts use a strict 100 W operational low-load boundary; legacy current keeps its strict 1 A boundary. Neither is a device rating or an RMS-overcurrent limit.
+- Retain the 180-second meter freshness requirement, five-second native-Off acknowledgement, existing restoration deadlines and independent electrical/temperature protections. Watt-based outlet restoration additionally requires a fresh low reading after the actual Off request; old low readings, stale measurements and uncertain jobs cannot restore power. Preserve manual shared-AC recovery and quarantine real meter changes during retained claims without manufacturing mismatches for unchanged legacy bindings.
+
 ## 0.8.6
 
 - Replace the fixed 1350 W circuit/input proxy with a real-power budget of 12 times the lower fresh wall-phase voltage. Qualify circuit and grid input independently for at least 30 seconds and three distinct fresh reports before shedding; pending qualification defers new starts while retaining existing calls. Missing/invalid evidence cannot qualify, and cached or other-source reports do not advance the count. This is not measured RMS current or a physical 12 A guarantee.
