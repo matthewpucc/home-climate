@@ -229,10 +229,10 @@ then allows one guarded restoration attempt. In released 0.8.9, one ten-second
 window covers relay-On feedback, a native Off request and fresh post-request
 low-meter evidence; it is not extended for device boot or HA reconnection.
 
-#### Staged watt-meter commissioning (unreleased)
+#### Staged watt-meter commissioning
 
-The proposed staged path applies only to this explicitly invoked, supervised
-test when a dedicated **watt** meter is selected. It is not available in 0.8.9.
+Available in 0.8.10, the staged path applies only to this explicitly invoked,
+supervised test when a dedicated **watt** meter is selected.
 It does not change normal unattended recovery, its ten-second verification
 window and maximum of three attempts, or the existing amp-meter path. There is
 no new JSON threshold or command parameter to enable the stages.
