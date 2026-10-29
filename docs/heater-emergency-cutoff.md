@@ -182,6 +182,64 @@ verify units, freshness, ownership and any required acknowledgement before
 coordinating live use. This feature never enables shared AC fallback or
 automatically restores shared AC.
 
+### Supervised dedicated-relay commissioning
+
+The new `house_climate.commission_heater_relay` action is a deliberate physical
+test; **0.8.8 does not expose this action**. Installing the change does not run a
+test. It does not create an overload, alter telemetry or disable a protection.
+Use it only when present beside the heater with a local means to stop it.
+
+The action requires Controller enabled **Off**, live equipment commands
+permitted, the heater guard **Ready**, and no retained equipment ownership,
+recovery, uncertain commands or pending service work. The native heater must
+already report trusted, fresh **Off** with fresh dedicated low-load evidence:
+strictly below 100 W on the watt path or below 1 A on the current path. The
+dedicated relay must report trusted On, and external input/output, voltage and
+battery readings must satisfy normal recovery limits. Switch-only/direct wiring
+cannot run this test. Shared AC fallback must already be disabled; the action
+does not change that setting and never commands shared AC output.
+
+After checking those prerequisites, deliberately invoke it once from
+**Developer Tools → Actions → YAML**:
+
+```yaml
+action: house_climate.commission_heater_relay
+data:
+  confirm: true
+```
+
+`confirm` must be the boolean `true`; omitted, false, numeric and string values
+are rejected. The action persists its intent before cutting only the configured
+dedicated outlet. Its successful return confirms that initial cut, **not** a
+passed recovery test. Keep Controller enabled Off and watch the bounded
+`commissioning` attributes on the Heater power guard sensor. Comfort control
+cannot be enabled while the test is active or its actual command/cleanup work
+is still pending, including after a failed test result.
+The diagnostic records the current status/reason and bounded start/finish
+timestamps, with `restore_window_seconds: 10` and `maximum_seconds: 600`.
+
+The test uses actual guard-owned cutoff evidence and the ordinary 60-second
+safe-load qualification plus five-minute cooldown; those periods overlap. It
+then allows one guarded restoration attempt. The existing ten-second window
+covers relay-On feedback, a native Off request and fresh post-request low-meter
+evidence. That deadline is not extended for device boot or HA reconnection.
+The heater may retain Heat across power loss, so cached mode or low readings
+cannot pass the test. Failed or contradictory reconnection recuts the dedicated
+outlet and requires manual recovery rather than repeatedly energizing it.
+
+Repeated invocation while active, manual relay changes, caller cancellation,
+unload or restart cannot silently start another attempt. Interrupted tests
+require manual recovery. Ten minutes is the overall supervision bound; an
+observation interruption longer than the 180-second freshness limit or a clock
+reversal also ends the test without licensing an automatic restart. These bounds
+do not extend the energized ten-second restoration window. Never clear storage,
+fabricate sensor states, raise
+limits or repeatedly power-cycle the heater to obtain a pass. An explicit
+`passed` result establishes only the observed recovery attempt under those
+conditions; it is not electrical/fire safety certification or proof of future
+connectivity. A normal manual thermostat Off test remains a separate check and
+does not establish guard-owned automatic restoration.
+
 ## Optional household alerts
 
 Local persistent notifications remain the default. To additionally send

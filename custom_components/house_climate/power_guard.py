@@ -41,6 +41,7 @@ CHECK_SECONDS = 5
 COOLDOWN_SECONDS = 300.0
 SAFE_LOAD_SECONDS = 60.0
 MAX_RESTORE_ATTEMPTS = 3
+COMMISSIONING_MAX_SECONDS = 600.0
 
 
 def _state_parts(state):
@@ -284,6 +285,17 @@ class HeaterPowerGuard:
         self._group_notice_queued = False
         self._notice_error = None
         self.pending_external_jobs = lambda: ()
+        # Only the runtime can establish that the real comfort controller and
+        # its ownership/jobs are stopped. A standalone guard fails closed.
+        self.commissioning_controller_off = lambda: False
+        self._commissioning_task = None
+        self._commissioning_preparing = False
+        self._commissioning_started_clock = None
+        self._commissioning_caller_cancelled = False
+        self._commissioning = {"active": False, "status": "idle", "reason": None,
+            "started_at": None, "finished_at": None,
+            "restore_window_seconds": RESTORE_ACK_SECONDS,
+            "maximum_seconds": COMMISSIONING_MAX_SECONDS}
 
     def _state(self, entity):
         return self.hass.states.get(entity) if entity is not None else None
@@ -381,6 +393,20 @@ class HeaterPowerGuard:
         return self._cut_owned
 
     @property
+    def commissioning_active(self):
+        return self._commissioning["active"]
+
+    @property
+    def commissioning_busy(self):
+        return bool(self.commissioning_active or (
+            self._commissioning["status"] != "idle" and (
+                self._restoring or self._positive_tasks or self._service_tasks or self._compensation_pending
+                or (self._commissioning_task is not None and not self._commissioning_task.done())
+                or (self._action_task is not None and not self._action_task.done())
+                or (self._save_task is not None and not self._save_task.done())
+                or (self._compensating_task is not None and not self._compensating_task.done()))))
+
+    @property
     def power_cut_confirmed(self):
         """Actual dedicated-plug feedback, not completion of a service call."""
         return (not self._identity_mismatch
@@ -466,6 +492,7 @@ class HeaterPowerGuard:
                 "manual_recovery_required": self._manual_recovery_required,
                 "binding_identity_mismatch": self._identity_mismatch,
                 "persistence_error": self._persistence_error,
+                "commissioning": dict(self._commissioning),
                 "circuit_power_w": r.circuit_w, "elite_input_w": r.input_w,
                 "elite_output_w": r.output_w, "battery_percent": r.battery_percent,
                 "heater_current_a": r.heater_a, "heater_power_w": r.heater_w,
@@ -482,7 +509,7 @@ class HeaterPowerGuard:
             "shutdown_stage", "shutdown_confirmation", "aggregate_stop",
             "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "manual_recovery_required",
-            "binding_identity_mismatch", "emergency_notification_error")}
+            "binding_identity_mismatch", "emergency_notification_error", "commissioning")}
         wall = self._wall_budget_state
         stable["wall_power_budget"] = ((wall.qualified_sources, wall.pending_sources,
                                       wall.unavailable_sources) if wall is not None else None)
@@ -595,6 +622,21 @@ class HeaterPowerGuard:
             self._cut_owned = False
         self._manual_recovery_required |= data.get("manual_recovery_required") is True
         self._manual_recovery_required |= self._emergency_ac_latched
+        prior_test = data.get("commissioning")
+        valid_test = (isinstance(prior_test, dict) and type(prior_test.get("active")) is bool
+                      and prior_test.get("status") in {"idle", "preparing", "waiting_for_recovery",
+                                                       "restoring", "passed", "failed", "interrupted"})
+        interrupted_test = ("commissioning" in data and (not valid_test or prior_test["active"]
+                            or prior_test["status"] in {"preparing", "waiting_for_recovery", "restoring"}))
+        if interrupted_test:
+            # A process restart is not permission to resume a maintenance On.
+            self._manual_recovery_required = True
+            self._commissioning.update(status="interrupted",
+                reason="Restart interrupted relay commissioning; manual recovery required",
+                finished_at=self._wall_clock())
+        elif isinstance(prior_test, dict) and prior_test.get("status") in {"passed", "failed", "interrupted"}:
+            self._commissioning.update(status=prior_test["status"],
+                reason=str(prior_test.get("reason") or "Previous relay commissioning result")[:240])
         if self._manual_recovery_required:
             self._manual_recovery_wall = self._wall_clock()
         try:
@@ -620,6 +662,8 @@ class HeaterPowerGuard:
             self._reason = "Recovering a persisted heater power cutoff"
         if self._manual_recovery_required:
             self._reason = "Heater power recovery requires explicit operator acknowledgement"
+        if interrupted_test:
+            self._save()
         self._publish()
 
     def async_start(self):
@@ -635,6 +679,14 @@ class HeaterPowerGuard:
                 state = _event.data.get("new_state")
                 value, attrs, _ = _state_parts(state)
                 old_value, _, _ = _state_parts(_event.data.get("old_state"))
+                if (self.commissioning_active and not self._cutting and not self._restoring
+                        and (attrs.get("restored") or attrs.get("assumed_state")
+                             or (value != "on" if self._commissioning_preparing else value != "off"))):
+                    preparing = self._commissioning_preparing
+                    self._commissioning_failed("Dedicated relay changed outside the commissioning operation",
+                                               status="interrupted", relinquish=value == "on")
+                    if not preparing and value == "on":
+                        self._start_action(self._cut_switch(force=True))
                 if ((self._cut_owned or self._isolation_report is not None or self._restoring)
                         and (value != "off" or attrs.get("restored") or attrs.get("assumed_state"))):
                     self._invalidate_isolation(self._wall_clock())
@@ -653,6 +705,7 @@ class HeaterPowerGuard:
                     self._manual_recovery_wall = self._wall_clock()
                     self._cut_owned = False
                     self._save()
+                    self._commissioning_failed("Manual relay change interrupted restoration", status="interrupted")
             if _event and _event.data.get("entity_id") in (
                     self.bindings.input_power, self.bindings.circuit_power,
                     self.bindings.wall_phase_a_voltage, self.bindings.wall_phase_b_voltage):
@@ -875,6 +928,160 @@ class HeaterPowerGuard:
             # evidence and shutdown_confirmed property have already lost.
             self._shutdown_confirmation = "unconfirmed"
 
+    def _commissioning_failed(self, reason, *, status="failed", relinquish=False):
+        """End a maintenance attempt without granting a future power-On claim."""
+        if not self.commissioning_active:
+            return
+        self._commissioning.update(active=False, status=status, reason=str(reason)[:240],
+                                   finished_at=self._wall_clock())
+        self._latched = self._blocked = self._manual_recovery_required = True
+        self._manual_recovery_wall = self._wall_clock()
+        self._restore_interrupted = True
+        self._safe_since = None
+        if relinquish:
+            self._cut_owned = False
+        self._save()
+        self._publish()
+
+    def _commissioning_prerequisites(self, *, preparing=False):
+        if (not self.live or self._closed or self._closing or self._restoring
+                or self._cutting or self._manual_recovery_required or self._identity_mismatch
+                or self._emergency_ac_latched or self._persistence_error
+                or self._cut_owned or self._positive_tasks or self._service_tasks
+                or self._compensation_pending or self.pending_external_jobs()
+                or (self._action_task is not None and not self._action_task.done())):
+            raise RuntimeError("Live, idle heater protection without pending recovery or jobs is required")
+        if (not preparing and (self.blocked or self._latched or self.commissioning_active
+                or (self._save_task is not None and not self._save_task.done()))):
+            raise RuntimeError("Wait for the heater power guard to be Ready")
+        if preparing and (not self.commissioning_active or not self._commissioning_preparing):
+            raise RuntimeError("Relay commissioning was interrupted")
+        if not self._commissioning_controller_stopped():
+            raise RuntimeError("Controller must be Off with no equipment ownership or pending jobs")
+        if self._store is None:
+            raise RuntimeError("Persistent heater protection storage is not ready")
+        if self.bindings.heater_switch is None or not self._heater_meter_configured:
+            raise RuntimeError("A dedicated heater relay and current or power meter are required")
+        if self._emergency_enabled:
+            raise RuntimeError("Relay commissioning requires shared AC fallback already disabled")
+        state, attrs, reported = _state_parts(self._state(self.bindings.heater_switch))
+        try:
+            relay_stamp = _timestamp(reported)
+            relay_time_valid = math.isfinite(relay_stamp) and relay_stamp <= self._wall_clock() + 5
+        except (ValueError, TypeError, OverflowError):
+            relay_time_valid = False
+        if (state != "on" or attrs.get("restored") or attrs.get("assumed_state")
+                or not relay_time_valid or self._switch_changed() is None):
+            raise RuntimeError("The dedicated heater relay must report trusted On")
+        reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
+        if (not self._commissioning_external_trusted() or not reading.safe_to_rearm
+                or self._passive_off_evidence() is None):
+            raise RuntimeError("Fresh native Off, low heater load, safe electricals and battery above 40% are required")
+        return self._switch_changed()
+
+    def _commissioning_controller_stopped(self):
+        try:
+            return self.commissioning_controller_off() is True
+        except Exception:
+            return False
+
+    def _commissioning_external_trusted(self):
+        for role in ("battery", "input_power", "output_power", "wall_phase_a_voltage", "wall_phase_b_voltage"):
+            _, attrs, _ = _state_parts(self._state(getattr(self.bindings, role)))
+            if attrs.get("restored") or attrs.get("assumed_state"):
+                return False
+        return True
+
+    def _commissioning_expired(self):
+        if not self.commissioning_active or self._commissioning_started_clock is None:
+            return False
+        elapsed = self._clock() - self._commissioning_started_clock
+        return elapsed < 0 or elapsed >= COMMISSIONING_MAX_SECONDS
+
+    async def _persist_commissioning(self):
+        self._save()
+        task = self._save_task
+        if task is None:
+            return False
+        done, _ = await asyncio.wait((task,), timeout=SERVICE_TIMEOUT_SECONDS)
+        if not done or task.cancelled() or task.exception() is not None:
+            # The actual write remains tracked. A late completion must save the
+            # subsequently queued interrupted state too, never license a retry.
+            self._persistence_error = "Cannot persist relay commissioning before its deadline"
+            return False
+        return self._persistence_error is None
+
+    async def async_commission_relay(self, *, confirm=False):
+        """Explicit supervised maintenance; returns after cut, not after cooldown."""
+        if type(confirm) is not bool or not confirm:
+            raise RuntimeError("Explicit confirm: true is required for a physical relay test")
+        if self._commissioning_task is not None and not self._commissioning_task.done():
+            raise RuntimeError("Relay commissioning is already running")
+        changed = self._commissioning_prerequisites()
+        # Reserve before the first await, including before scheduling a child:
+        # neither controller enable nor caller cancellation may slip between
+        # validation and establishment of the maintenance lease.
+        self._commissioning = {"active": True, "status": "preparing",
+            "reason": "Supervised dedicated relay recovery test; no heat requested",
+            "started_at": self._wall_clock(), "finished_at": None,
+            "restore_window_seconds": RESTORE_ACK_SECONDS,
+            "maximum_seconds": COMMISSIONING_MAX_SECONDS}
+        self._commissioning_started_clock = self._clock()
+        self._commissioning_caller_cancelled = False
+        self._commissioning_preparing = True
+        self._trip("Supervised dedicated heater relay commissioning")
+        self._publish()
+        try:
+            self._commissioning_task = self.hass.async_create_task(self._commission_relay(changed), eager_start=False)
+        except Exception:
+            self._commissioning_failed("Cannot start relay commissioning; manual recovery required")
+            raise
+        # A cancelled HTTP/service caller does not abandon an actual Off job.
+        self._commissioning_task.add_done_callback(
+            lambda task: task.exception() if not task.cancelled() else None)
+        try:
+            return await asyncio.shield(self._commissioning_task)
+        except asyncio.CancelledError:
+            self._commissioning_caller_cancelled = True
+            self._commissioning_failed("Commissioning request cancelled; manual recovery required", status="interrupted")
+            raise
+
+    async def _commission_relay(self, changed):
+        try:
+            if not self.commissioning_active:
+                raise RuntimeError("Relay commissioning was cancelled before dispatch")
+            if not await self._persist_commissioning():
+                raise RuntimeError("Cannot persist commissioning intent; no relay command issued")
+            self._commissioning_prerequisites(preparing=True)
+            if self._switch_changed() != changed:
+                raise RuntimeError("Dedicated relay changed during commissioning preparation")
+            # This is a deliberate maintenance cut, not a fabricated overload
+            # or a failed native Off. Use the real ownership and isolation path.
+            if not await self._cut_switch() or not self._observe_isolation(self._wall_clock()):
+                raise RuntimeError("Dedicated relay cutoff is unconfirmed; verify it manually")
+            if not self.commissioning_active:
+                raise RuntimeError("Relay commissioning was interrupted")
+            self._commissioning_preparing = False
+            self._commissioning.update(status="waiting_for_recovery",
+                reason="Dedicated relay isolated; normal safe-load interval and cooldown apply")
+            if not await self._persist_commissioning():
+                raise RuntimeError("Cannot persist commissioning cutoff; manual recovery required")
+            if not self.commissioning_active:
+                raise RuntimeError("Relay commissioning was interrupted")
+            self._publish()
+            return True
+        except BaseException as exc:
+            self._commissioning_failed("Relay commissioning did not complete; manual recovery required")
+            if self._commissioning_caller_cancelled and isinstance(exc, RuntimeError):
+                # There is no longer a service caller to receive this expected
+                # interrupted result. Keep cleanup tracked without an orphaned
+                # shield-future exception in HA's event loop.
+                return False
+            raise
+        finally:
+            self._commissioning_preparing = False
+            self._schedule_check()
+
     async def async_acknowledge_emergency(self):
         """Acknowledge manual recovery; never energize an outlet or shared AC."""
         if self._recovery_task is None or self._recovery_task.done():
@@ -889,7 +1096,8 @@ class HeaterPowerGuard:
                 or self._service_tasks or self._compensation_pending
                 or self.pending_external_jobs()
                 or (self._save_task is not None and not self._save_task.done())
-                or (self._action_task is not None and not self._action_task.done())):
+                or (self._action_task is not None and not self._action_task.done())
+                or (self._commissioning_task is not None and not self._commissioning_task.done())):
             raise RuntimeError("Wait for all actual heater and AC service jobs to finish")
         if self._emergency_ac_latched and not self._ac_observed("on", after=self._emergency_ac_request_wall):
             raise RuntimeError("Manually restore and verify AC output before acknowledging recovery")
@@ -1027,6 +1235,22 @@ class HeaterPowerGuard:
         if self._closed:
             return
         now = self._wall_clock()
+        if self.commissioning_active and self._commissioning_expired():
+            self._commissioning_failed("Supervised relay test exceeded its time limit", status="interrupted")
+        if (self.commissioning_active and self._last_observation_wall is not None
+                and (now < self._last_observation_wall
+                     or now - self._last_observation_wall > TELEMETRY_MAX_AGE_SECONDS)):
+            self._commissioning_failed("Observation continuity was lost during relay commissioning", status="interrupted")
+        if self.commissioning_active and not self._commissioning_controller_stopped():
+            self._commissioning_failed("Comfort controller is no longer stopped", status="interrupted")
+        if (self.commissioning_active and not self._commissioning_preparing
+                and not self._restoring and not self._cutting):
+            value, attrs, _ = _state_parts(self._state(self.bindings.heater_switch))
+            if value != "off" or attrs.get("restored") or attrs.get("assumed_state"):
+                self._commissioning_failed("Dedicated relay isolation was interrupted",
+                                           status="interrupted", relinquish=value == "on")
+                if value == "on":
+                    self._start_action(self._cut_switch(force=True))
         if (self._cut_owned and self._last_observation_wall is not None
                 and (now < self._last_observation_wall
                      or now - self._last_observation_wall > TELEMETRY_MAX_AGE_SECONDS)):
@@ -1035,6 +1259,9 @@ class HeaterPowerGuard:
         self._observe_isolation(now)
         states = self._states()
         reading = evaluate_power(states, self.bindings, now)
+        if self.commissioning_active and (self._external_power().issue
+                                         or not self._commissioning_external_trusted()):
+            self._commissioning_failed("Authoritative electrical protection interrupted commissioning")
         wall = self._observe_wall_budget(states, reading, now)
         if wall.unavailable_sources and (reading.issue is None or reading.wall_load_only):
             reading = replace(reading, issue="Wall-load power reports are unavailable or not current",
@@ -1050,6 +1277,13 @@ class HeaterPowerGuard:
             self._save_retry_at = self._clock() + 60
             self._save()
         self._observe_aggregate_stop()
+        if self.commissioning_active and self._commissioning_preparing:
+            # The explicit maintenance task owns this initial negative action.
+            # Healthy-state callbacks must not start a competing native stop.
+            self._blocked = True
+            self._reason = "Preparing supervised dedicated relay commissioning"
+            self._publish()
+            return
         if (self._wall_observed_off_wall is not None and not self.shutdown_confirmed
                 and self._shutdown_confirmation in {"state_only", "aggregate_corroborated"}):
             self._shutdown_confirmation = "unconfirmed"
@@ -1205,6 +1439,10 @@ class HeaterPowerGuard:
     def _clear(self):
         if self._emergency_ac_latched or self._manual_recovery_required:
             return
+        if self.commissioning_active:
+            self._commissioning.update(active=False, status="passed",
+                reason="Dedicated relay restored with fresh native Off and low heater load",
+                finished_at=self._wall_clock())
         self._latched = self._blocked = self._cut_owned = False
         self._restore_intent = False
         self._reason = None
@@ -1248,7 +1486,8 @@ class HeaterPowerGuard:
                 "emergency_ac_latched": self._emergency_ac_latched,
                 "emergency_ac_reason": self._emergency_ac_reason,
                 "emergency_ac_request_wall": self._emergency_ac_request_wall,
-                "emergency_ac_attempts": self._emergency_ac_attempts}
+                "emergency_ac_attempts": self._emergency_ac_attempts,
+                "commissioning": dict(self._commissioning)}
 
     async def _persist_restore_intent(self):
         """Relinquish durable auto-On ownership BEFORE energizing the plug.
@@ -1493,6 +1732,8 @@ class HeaterPowerGuard:
         self._publish()
 
     async def _restore(self):
+        if self._commissioning_expired():
+            self._commissioning_failed("Supervised relay test exceeded its time limit", status="interrupted")
         if (self.bindings.heater_switch is None or self._emergency_ac_latched
                 or self._manual_recovery_required or self._identity_mismatch
                 or not self._cut_owned or self._manual_power_seen
@@ -1510,6 +1751,10 @@ class HeaterPowerGuard:
         prior_meter_missing = evaluate_power(
             self._states(), self.bindings, self._wall_clock()).telemetry_missing
         generation = (self._isolation_revision, self._binding_identity(), self._cut_owned)
+        commissioning = self.commissioning_active
+        if commissioning:
+            self._commissioning.update(status="restoring",
+                reason="One bounded restoration attempt; fresh Off and low load required")
         self._restoring = True
         self._restore_interrupted = False
         self._restore_on_requested = False
@@ -1523,6 +1768,12 @@ class HeaterPowerGuard:
             # Storage can yield to an operator, state event or electrical
             # change. A durable intent is not permission to use old evidence.
             current = self._isolated_recovery_reading()
+            if self._commissioning_expired():
+                self._commissioning_failed("Supervised relay test exceeded its time limit", status="interrupted")
+            if commissioning and not self._commissioning_external_trusted():
+                self._commissioning_failed("Authoritative electrical reports are not trusted")
+            if commissioning and not self._commissioning_controller_stopped():
+                self._commissioning_failed("Comfort controller is no longer stopped", status="interrupted")
             if (current is None or not current.safe_to_rearm or self._closed or self._closing
                     or self._restore_interrupted or self._manual_recovery_required
                     or self._identity_mismatch or self._manual_power_seen
@@ -1538,6 +1789,9 @@ class HeaterPowerGuard:
             # bounded window for On feedback AND native Off/low-meter proof,
             # and comfort commands remain blocked throughout it.
             deadline = time.monotonic() + RESTORE_ACK_SECONDS
+            if commissioning:
+                remaining = COMMISSIONING_MAX_SECONDS - (self._clock() - self._commissioning_started_clock)
+                deadline = min(deadline, time.monotonic() + max(0, remaining))
             on_attempted = True
             self._restore_on_requested = True
             if not await self._bounded_service("switch", "turn_on", self.bindings.heater_switch,
@@ -1568,6 +1822,9 @@ class HeaterPowerGuard:
                 reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
                 if (reading.safe_to_rearm and not self._closed and not self._closing
                         and time.monotonic() < deadline
+                        and (not commissioning or (not self._commissioning_expired()
+                             and self._commissioning_external_trusted()
+                             and self._commissioning_controller_stopped()))
                         and not self._restore_interrupted and not self._manual_recovery_required
                         and not self._service_tasks and not self._positive_tasks and not self._compensation_pending
                         and not self.pending_external_jobs()
@@ -1578,6 +1835,8 @@ class HeaterPowerGuard:
                     success = True
         finally:
             if not success:
+                if commissioning:
+                    self._commissioning_failed("Restoration was not verified within its deadline; manual recovery required")
                 if on_attempted or self._positive_tasks:
                     await self._cut_switch(force=True)
                 self._restore_intent = False
@@ -1593,10 +1852,11 @@ class HeaterPowerGuard:
         """Stop observation; never restore power or enable heat during teardown."""
         if self._closed:
             return True
+        self._commissioning_failed("Integration stopped during relay commissioning", status="interrupted")
         first = not self._closing
         self._closing = True
         self._blocked = True
-        tasks = [t for t in (self._check_task, self._action_task) if t and not t.done()]
+        tasks = [t for t in (self._check_task, self._action_task, self._commissioning_task) if t and not t.done()]
         if first:
             if self._check_task is not None and not self._check_task.done():
                 self._check_task.cancel()
