@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Separate verified guard-owned relay isolation from energized heater-meter supervision. A dedicated meter that stops reporting while its relay is Off remains unknown, while fresh external electrical/battery readings can qualify bounded recovery after the existing safe-load interval and cooldown.
+- Require continuous trusted cutoff ownership, new relay-Off evidence after restart or observation loss, and revalidation after persisting restoration intent. Manual relay changes, unavailable/restored states and fresh contradictory load cannot authorize automatic On.
+- Keep comfort inhibited through one ten-second restoration verification window, requiring native Off and fresh post-request low-meter evidence before recovery. Failed/cancelled restoration recuts; late On completions are compensated, manual interruption cannot resurrect old ownership, and unload no longer recursively requeues its own confirmed cutoff.
+- Preserve the Emporia/input wall-budget policy, meter freshness while energized, output/battery/temperature protections and manual-only shared AC recovery. No JSON migration is required.
+
 ## 0.8.7
 
 - Add an optional dedicated `heater_power` binding in W/kW as an explicit alternative to the existing A/mA heater-current meter. Reject configurations selecting both meters instead of silently bypassing either. Existing amp, switch-only and direct-path configurations remain valid.
