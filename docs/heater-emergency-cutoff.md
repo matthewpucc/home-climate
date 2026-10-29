@@ -112,9 +112,10 @@ one meter; a configuration with both non-null `heater_power` and
 ```
 
 Existing amp configurations, absent/null watt bindings, switch-only wiring and
-direct paths retain their existing meaning. Both meter kinds require finite,
-nonnegative readings with trusted timestamps no older than 180 seconds. No
-startup grace or stale-low exception is introduced. Unchanged HA reports can
+direct paths retain their existing meaning. Energized supervision and stop
+corroboration require finite, nonnegative readings with trusted timestamps no
+older than 180 seconds. There is no general startup or stale-low exemption;
+bounded isolated recovery is described below. Unchanged HA reports can
 renew `last_reported`; a Prometheus scrape alone cannot. HA entity report age
 also does not prove the age of a physical device measurement.
 
@@ -132,13 +133,37 @@ idle is not mode Off. A valid native Off report can remain state-only while
 asynchronous watt evidence arrives; this does not extend the five-second
 native acknowledgement deadline or turn old high watts into a new sample.
 
-Watt-based automatic outlet restoration needs both safe readings and a fresh
-low-watt report after the actual Off request made during restoration. If that
-proof does not arrive within the existing restoration budget, the guard cuts
-again and retains inhibition. Relay-Off meter reporting must be commissioned
-separately: a meter that stops reporting zero can safely prevent automatic
-restoration after the cooldown. Switch-only wiring still requires manual
-verification instead of automatic outlet restoration.
+Watt-based automatic outlet restoration needs fresh low watts after the actual
+Off request made during restoration. A stale zero is never electrical proof.
+Switch-only wiring still requires manual verification instead of automatic
+outlet restoration.
+
+### Recovery while the dedicated relay is isolated
+
+The next patch separates an observed, guard-owned relay cutoff from energized
+meter supervision. Some dedicated meters stop reporting while the relay is Off;
+their readings expire before the five-minute cooldown ends. For a matching,
+trusted cutoff whose relay remains Off and available, fresh external circuit,
+input, output, voltage and battery readings can qualify the existing 60-second
+safe interval and five-minute cooldown. The meter stays unknown, rather than
+being replaced with zero. Fresh post-cut high load contradicts isolation.
+
+This path does not apply to an unowned or manually changed outlet, restored or
+assumed relay feedback, wiring mismatch, manual/shared emergency recovery,
+pending service work or a missing meter binding. On/unavailable/removal events
+invalidate the observed isolation even if later cached state says Off. A
+restart or observation gap exceeding the freshness limit requires new trusted
+relay-Off feedback and a new safe interval; stored ownership alone is not proof.
+
+Before On, restoration intent is persisted and current ownership and external
+safety are rechecked. The relay may boot the heater in its retained Heat mode,
+so comfort stays inhibited through a single ten-second verification window for
+On feedback, native Off and fresh post-request low-meter evidence. Failure,
+contradictory feedback or cancellation recuts and retains inhibition. A manual
+relay change during restoration quarantines automatic recovery; the guard never
+automatically restores shared AC. Whether a physical heater reconnects within
+that window remains a separate supervised commissioning check. No JSON changes
+are required by this recovery policy.
 
 Meter identity participates in persisted ownership. Adding or changing a watt
 meter during a retained claim requires manual wiring recovery; unchanged

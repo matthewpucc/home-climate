@@ -205,8 +205,9 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.guard.diagnostics["restore_attempts"], 3)
 
     async def test_normal_restart_keeps_real_cutoff_ownership_and_restores_safely(self):
-        self.hass.states.async_set(B.heater_switch, "off")
-        old = datetime.now(timezone.utc).timestamp() - 600
+        self.use_source_clock()
+        await self.report(0, {B.heater_switch: ("off", {})})
+        old = self.origin - 600
         store = Mock(async_load=AsyncMock(return_value={"latched": True,
                      "switch_cut_owned": True, "restore_attempts": 0,
                      "binding_identity": self.guard._binding_identity(),
@@ -214,12 +215,24 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
                      async_save=AsyncMock())
         with patch("homeassistant.helpers.storage.Store", return_value=store):
             await self.guard.async_load()
-        clock = [self.guard._clock()]
-        self.guard._clock = lambda: clock[0]
         self.guard._observe()
         await self.hass.async_block_till_done()
         self.assertTrue(self.guard.switch_cut_owned)
-        clock[0] += 61
+        self.assertTrue(self.guard.blocked)
+        self.assertEqual(self.calls, [])
+        # A saved claim does not authenticate a startup-recreated Off state.
+        # A real post-load relay report starts the new safe-load interval.
+        await self.report(1, only=(B.heater_switch,))
+        self.guard._observe()
+        await self.hass.async_block_till_done()
+        sensors = tuple(entity for entity in sorted(self.guard.entity_ids)
+                        if entity.startswith("sensor."))
+        for elapsed in (31, 60):
+            await self.report(elapsed, only=sensors)
+            self.guard._observe()
+            await self.hass.async_block_till_done()
+            self.assertTrue(self.guard.blocked)
+        await self.report(62, only=sensors)
         self.guard._observe()
         await self.hass.async_block_till_done()
         self.assertFalse(self.guard.blocked)
