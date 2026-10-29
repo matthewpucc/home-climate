@@ -180,6 +180,33 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(self.hass.states.get(self.b.heater_power).last_reported.timestamp(),
                            self.origin + 301)
 
+    async def test_isolated_recovery_ignores_missing_or_high_advisory_circuit(self):
+        for index, circuit in enumerate(("unavailable", 5000)):
+            with self.subTest(circuit=circuit):
+                if index:
+                    await self.guard.async_close()
+                    self.wall = self.origin
+                    self.calls.clear()
+                    self.guard = power.HeaterPowerGuard(
+                        self.hass, self.b, live=True, entry_id="watt-fixture",
+                        notify=lambda: None, wall_clock=lambda: self.wall,
+                        clock=lambda: self.wall - self.origin)
+                    self.write_snapshot(0)
+                self.put(self.b.circuit_power, circuit, {"unit_of_measurement": "W"})
+                await self.verified_cut()
+                self.resume_heat_after_on = True
+                await self.advance_isolated(181)
+                self.assertIsNone(self.guard._reading.heater_w)
+                self.assertNotIn("turn_on", [call[1] for call in self.calls])
+                await self.advance_isolated(301)
+                self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+                self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "on")
+                self.assertEqual(self.hass.states.get(self.b.heater).state, "off")
+                self.assertFalse(self.guard.blocked)
+                self.assertFalse(self.guard.diagnostics["latched"])
+                self.assertGreater(self.hass.states.get(self.b.heater_power).last_reported.timestamp(),
+                                   self.origin + 301)
+
     async def test_repeated_trusted_off_reports_preserve_safe_isolation_interval(self):
         await self.verified_cut()
         for elapsed in range(30, 300, 30):

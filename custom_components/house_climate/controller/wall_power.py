@@ -111,7 +111,7 @@ new runtime starts empty. The caller must invalidate any known bad event that
 could otherwise be hidden by later coalesced cached-state reads.
     """
 
-    def __init__(self, max_age_seconds=180, hold_seconds=30, minimum_reports=3):
+    def __init__(self, max_age_seconds=180, hold_seconds=30, minimum_reports=3, *, roles=ROLES):
         self.max_age_seconds = _finite(max_age_seconds)
         self.hold_seconds = _finite(hold_seconds)
         if self.max_age_seconds <= 0 or self.hold_seconds < 0:
@@ -120,7 +120,12 @@ could otherwise be hidden by later coalesced cached-state reads.
                 or minimum_reports < 3):
             raise ValueError("At least three distinct reports are required")
         self.minimum_reports = minimum_reports
-        self._sources = {role: _Source() for role in ROLES}
+        if (not isinstance(roles, (tuple, list)) or not roles
+                or any(not isinstance(role, str) or role not in ROLES for role in roles)
+                or len(set(roles)) != len(roles)):
+            raise ValueError("Choose distinct supported wall-power roles")
+        self.roles = tuple(roles)
+        self._sources = {role: _Source() for role in self.roles}
         self._last_now = None
         self._budget = None
 
@@ -145,15 +150,15 @@ could otherwise be hidden by later coalesced cached-state reads.
     def invalidate(self, role, now):
         """Fence an invalid or low event before a later cached read hides it."""
         if role not in self._sources:
-            raise ValueError("Only input and circuit source roles are supported")
+            raise ValueError("Only configured source roles are supported")
         now = self._clock(now)
         if now is not None:
             self._sources[role].invalidate(now, "Source evidence was invalidated")
 
     def observe(self, now, budget_w, reports):
         """Observe coherent cached state; duplicate report timestamps add nothing."""
-        if not isinstance(reports, Mapping) or set(reports) - set(ROLES):
-            raise ValueError("Only input and circuit source roles are supported")
+        if not isinstance(reports, Mapping) or set(reports) - set(self.roles):
+            raise ValueError("Only configured source roles are supported")
         now = self._clock(now)
         if now is None:
             return self._snapshot()

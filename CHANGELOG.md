@@ -1,11 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.8.8
 
+- Make whole-circuit power advisory only. Its high, invalid, unavailable or stale readings no longer shed the heater, defer activation, block acknowledgement or prevent recovery. Retain the source binding and measurements, explicitly report that it is not enforced, and publish advisory-health changes without high-frequency numeric status updates.
+- Keep the Bluetti grid-input operating budget at 12 times the lower fresh wall-phase voltage, with three distinct reports and 30 seconds of exceedance. Only input contributes qualification or its 85% rearm test; circuit telemetry cannot replace missing input or voltage. Battery reserve, output, temperature, heater-meter and cutoff protections are unchanged. No JSON migration is required.
 - Separate verified guard-owned relay isolation from energized heater-meter supervision. A dedicated meter that stops reporting while its relay is Off remains unknown, while fresh external electrical/battery readings can qualify bounded recovery after the existing safe-load interval and cooldown.
 - Require continuous trusted cutoff ownership, new relay-Off evidence after restart or observation loss, and revalidation after persisting restoration intent. Manual relay changes, unavailable/restored states and fresh contradictory load cannot authorize automatic On.
 - Keep comfort inhibited through one ten-second restoration verification window, requiring native Off and fresh post-request low-meter evidence before recovery. Failed/cancelled restoration recuts; late On completions are compensated, manual interruption cannot resurrect old ownership, and unload no longer recursively requeues its own confirmed cutoff.
-- Preserve the Emporia/input wall-budget policy, meter freshness while energized, output/battery/temperature protections and manual-only shared AC recovery. No JSON migration is required.
+- Preserve meter freshness while energized, output/battery/temperature protections and manual-only shared AC recovery. Physical heater reconnection within the restoration window still requires supervised commissioning.
 
 ## 0.8.7
 

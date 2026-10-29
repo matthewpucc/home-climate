@@ -441,6 +441,7 @@ class HeaterPowerStatus(ControllerEntity):
                  "power_restore_cleanup_pending", "persistence_error", "live",
                  "heater_cutoff_configured", "heater_current_configured", "heater_power_configured",
                  "heater_meter_kind", "electrical_stop_confirmed",
+                 "circuit_enforced",
                  "shutdown_stage", "shutdown_confirmation", "aggregate_stop", "wall_power_budget",
                  "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "emergency_notification_error", "manual_recovery_required",

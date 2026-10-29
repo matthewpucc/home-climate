@@ -29,4 +29,10 @@ The rename to Home Climate preserves the existing integration, entities, stored 
 
 Install a published release through HACS and restart Home Assistant. Comfort control starts disabled. The persisted power-cut latch survives restart; the dedicated outlet is not blindly re-enabled. Review the power-guard and recovery statuses before starting another trial.
 
+Version 0.8.8 combines isolated dedicated-relay recovery and advisory whole-circuit
+telemetry. Existing meter/binding selections remain valid; no JSON migration is
+required. Keep comfort and live commands Off while updating, then verify guard
+status and fresh source reports before a supervised commissioning check. Shared
+AC fallback and manual-recovery latches are not enabled or cleared by upgrading.
+
 See [fixed wiring](configuration.md) and [operating rules](control.md).

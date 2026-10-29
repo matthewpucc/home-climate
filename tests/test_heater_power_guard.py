@@ -340,6 +340,38 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(power._timestamp(self.hass.data[WATTS]["last_reported"]),
                            power._timestamp(self.hass.data[B.heater]["last_reported"]))
 
+    async def test_advisory_circuit_cannot_block_verified_isolated_recovery(self):
+        for circuit_value in ("unavailable", 2200):
+            with self.subTest(circuit_power=circuit_value):
+                previous_on = sum(call[1] == "turn_on" for call in self.hass.calls)
+                self.hass.set(B.circuit_power, circuit_value, {"unit_of_measurement": "W"})
+                await self.isolated_cut()
+                await self.observe_isolated_for(181)
+                raw = power.evaluate_power(self.hass.data, self.bindings, self.clock.wall)
+                # The isolated meter is still unknown. Advisory circuit data
+                # must not become another restoration interlock.
+                self.assertTrue(raw.telemetry_missing)
+                self.assertIsNone(raw.heater_w)
+                self.assertIn(WATTS, raw.issue)
+                self.assertNotIn(B.circuit_power, raw.issue)
+                self.assertEqual(sum(call[1] == "turn_on" for call in self.hass.calls),
+                                 previous_on)
+
+                self.hass.ignore_climate = False
+                self.hass.restore_to_heat = True
+                self.hass.post_off_watts = 5.5
+                await self.observe_isolated_for(120)
+                await self.settle()
+                self.assertEqual(sum(call[1] == "turn_on" for call in self.hass.calls),
+                                 previous_on + 1)
+                self.assertEqual(self.hass.data[B.heater_switch]["state"], "on")
+                self.assertEqual(self.hass.data[B.heater]["state"], "off")
+                self.assertEqual(self.hass.data[WATTS]["state"], "5.5")
+                self.assertFalse(self.guard.blocked)
+                self.assertFalse(self.guard.switch_cut_owned)
+                self.assertGreater(power._timestamp(self.hass.data[WATTS]["last_reported"]),
+                                   power._timestamp(self.hass.data[B.heater]["last_reported"]))
+
     async def test_isolated_restore_cuts_again_without_new_post_off_watts(self):
         await self.isolated_cut()
         self.hass.ignore_climate = False
@@ -522,7 +554,6 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         unsafe = ((B.input_power, "unavailable", "W"),
                   (B.battery, 40, "%"),
                   (B.output_power, 1600, "W"),
-                  (B.circuit_power, 1476 * .85, "W"),
                   (B.wall_phase_b_voltage, "unavailable", "V"))
         self.hass.set(B.input_power, "unavailable")
         await self.observe_isolated_for(120)
