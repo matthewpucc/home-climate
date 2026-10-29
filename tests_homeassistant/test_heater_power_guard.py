@@ -26,7 +26,10 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         self.ignore_switch = False
         self.climate_reports_idle = False
         self.report_meter_after_off = True
+        self.report_zero_after_cut = False
+        self.resume_heat_after_on = False
         self.delayed_on = False
+        self.ignore_on_cancellation = False
         self.on_started = asyncio.Event()
         self.release_on = asyncio.Event()
         self.guard = power.HeaterPowerGuard(
@@ -73,7 +76,8 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
     async def handle(self, call):
         self.calls.append((call.domain, call.service, dict(call.data)))
         if call.domain == "climate":
-            if not self.ignore_climate:
+            plug = self.hass.states.get(self.b.heater_switch)
+            if not self.ignore_climate and plug is not None and plug.state == "on":
                 self.put(self.b.heater, "heat" if self.climate_reports_idle else "off",
                          {"hvac_action": "idle" if self.climate_reports_idle else "off"},
                          timestamp=self.wall + .001, force=True)
@@ -85,11 +89,23 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
             return
         if call.service == "turn_on" and self.delayed_on:
             self.on_started.set()
-            await self.release_on.wait()
+            while not self.release_on.is_set():
+                try:
+                    await self.release_on.wait()
+                except asyncio.CancelledError:
+                    if not self.ignore_on_cancellation:
+                        raise
         desired = "on" if call.service == "turn_on" else "off"
         self.put(self.b.heater_switch, desired, timestamp=self.wall + .001, force=True)
         if desired == "off":
             self.put(self.b.heater, "unavailable", timestamp=self.wall + .001)
+            if self.report_zero_after_cut:
+                self.put(self.b.heater_power, 0, {"unit_of_measurement": "W"},
+                         timestamp=self.wall + .002)
+        elif self.resume_heat_after_on:
+            # An appliance can resume retained heating when mains returns.
+            self.put(self.b.heater, "heat", {"hvac_action": "heating"},
+                     timestamp=self.wall + .001, force=True)
 
     async def start(self, *, listen=False, saved=None):
         if saved is None:
@@ -107,6 +123,11 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
 
     async def refresh(self, elapsed, *, omit=(), changes=None):
         """Write a coherent snapshot before an explicit observation."""
+        self.write_snapshot(elapsed, omit=omit, changes=changes)
+        self.guard._observe()
+        await self.hass.async_block_till_done()
+
+    def write_snapshot(self, elapsed, *, omit=(), changes=None):
         self.wall = self.origin + elapsed
         for entity in self.guard.entity_ids:
             if entity in omit:
@@ -116,13 +137,329 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
                 continue
             value, attrs = (changes or {}).get(entity, (previous.state, previous.attributes))
             self.put(entity, value, attrs, force=True)
-        self.guard._observe()
-        await self.hass.async_block_till_done()
+
+    async def advance_isolated(self, elapsed, *, omit=(), changes=None):
+        """Keep observing isolation without inventing powered-off reports."""
+        omitted = (self.b.heater_power, self.b.heater, self.b.heater_switch, *omit)
+        while self.wall - self.origin < elapsed:
+            await self.refresh(min(elapsed, self.wall - self.origin + 30),
+                               omit=omitted, changes=changes)
 
     def store_claim(self, *, owned=False, identity=None):
         return {"latched": True, "switch_cut_owned": owned, "restore_attempts": 0,
                 "trip_wall": self.origin - 600,
                 "binding_identity": self.guard._binding_identity() if identity is None else identity}
+
+    async def verified_cut(self, *, listen=True):
+        """Observe a real guard-issued cutoff, then stop all meter reports."""
+        self.report_zero_after_cut = True
+        self.ignore_climate = True
+        self.put(self.b.heater, "heat", {"hvac_action": "heating"})
+        self.put(self.b.heater_power, 1300, {"unit_of_measurement": "W"})
+        self.put(self.b.battery, 40, {"unit_of_measurement": "%"})
+        await self.start(listen=listen)
+        self.assertTrue(self.guard.switch_cut_owned)
+        self.assertTrue(self.guard.power_cut_confirmed)
+        self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
+        self.ignore_climate = False
+        self.put(self.b.battery, 90, {"unit_of_measurement": "%"})
+
+    async def test_verified_cut_can_recover_after_off_meter_expires(self):
+        await self.verified_cut()
+        self.resume_heat_after_on = True
+        await self.advance_isolated(181)
+        self.assertTrue(self.guard.blocked)
+        self.assertIsNone(self.guard._reading.heater_w)
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        await self.advance_isolated(301)
+        self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+        self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "on")
+        self.assertEqual(self.hass.states.get(self.b.heater).state, "off")
+        self.assertFalse(self.guard.blocked)
+        self.assertFalse(self.guard.diagnostics["latched"])
+        self.assertGreater(self.hass.states.get(self.b.heater_power).last_reported.timestamp(),
+                           self.origin + 301)
+
+    async def test_isolated_recovery_ignores_missing_or_high_advisory_circuit(self):
+        for index, circuit in enumerate(("unavailable", 5000)):
+            with self.subTest(circuit=circuit):
+                if index:
+                    await self.guard.async_close()
+                    self.wall = self.origin
+                    self.calls.clear()
+                    self.guard = power.HeaterPowerGuard(
+                        self.hass, self.b, live=True, entry_id="watt-fixture",
+                        notify=lambda: None, wall_clock=lambda: self.wall,
+                        clock=lambda: self.wall - self.origin)
+                    self.write_snapshot(0)
+                self.put(self.b.circuit_power, circuit, {"unit_of_measurement": "W"})
+                await self.verified_cut()
+                self.resume_heat_after_on = True
+                await self.advance_isolated(181)
+                self.assertIsNone(self.guard._reading.heater_w)
+                self.assertNotIn("turn_on", [call[1] for call in self.calls])
+                await self.advance_isolated(301)
+                self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+                self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "on")
+                self.assertEqual(self.hass.states.get(self.b.heater).state, "off")
+                self.assertFalse(self.guard.blocked)
+                self.assertFalse(self.guard.diagnostics["latched"])
+                self.assertGreater(self.hass.states.get(self.b.heater_power).last_reported.timestamp(),
+                                   self.origin + 301)
+
+    async def test_repeated_trusted_off_reports_preserve_safe_isolation_interval(self):
+        await self.verified_cut()
+        for elapsed in range(30, 300, 30):
+            # Some integrations force state writes even when Off is unchanged.
+            await self.refresh(elapsed, omit=(self.b.heater_power, self.b.heater))
+            self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        await self.refresh(300, omit=(self.b.heater_power, self.b.heater))
+        self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+        self.assertFalse(self.guard.blocked)
+        self.assertEqual(self.hass.states.get(self.b.heater).state, "off")
+
+    async def test_verified_isolation_never_hides_unsafe_external_power(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        await self.advance_isolated(301, changes={
+            self.b.battery: (40, {"unit_of_measurement": "%"})})
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.assertTrue(self.guard.blocked)
+        self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
+
+    async def test_coalesced_manual_on_off_relinquishes_cutoff_ownership(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        self.wall = self.origin + 200
+        self.put(self.b.heater_switch, "on", timestamp=self.wall + .001, force=True)
+        self.put(self.b.heater_switch, "off", timestamp=self.wall + .002, force=True)
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.guard.switch_cut_owned)
+        await self.advance_isolated(301)
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+
+    async def test_unavailable_relay_prevents_isolated_restoration(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        self.ignore_switch = True
+        self.wall = self.origin + 200
+        self.put(self.b.heater_switch, "unavailable", force=True)
+        await self.hass.async_block_till_done()
+        await self.advance_isolated(301)
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.assertTrue(self.guard.blocked)
+
+    async def test_coalesced_unavailability_restarts_safe_isolation_interval(self):
+        await self.verified_cut()
+        await self.advance_isolated(281)
+        self.wall = self.origin + 290
+        self.put(self.b.heater_switch, "unavailable", timestamp=self.wall + .001, force=True)
+        self.put(self.b.heater_switch, "off", timestamp=self.wall + .002, force=True)
+        await self.hass.async_block_till_done()
+        await self.advance_isolated(301)
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        await self.advance_isolated(351)
+        self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+
+    async def test_fresh_high_watts_during_isolation_are_not_ignored(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        self.put(self.b.heater_power, 1300, {"unit_of_measurement": "W"}, force=True)
+        await self.hass.async_block_till_done()
+        await self.advance_isolated(301)
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.assertTrue(self.guard.blocked)
+
+    async def test_isolated_restore_without_new_low_watts_recuts_and_stays_latched(self):
+        await self.verified_cut()
+        self.report_meter_after_off = False
+        self.resume_heat_after_on = True
+        await self.advance_isolated(301)
+        self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+        self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertTrue(self.guard.blocked)
+        # The recut may produce a fresh zero, but cannot complete restoration.
+        self.assertTrue(self.guard.power_cut_confirmed)
+
+    async def test_isolated_restore_rechecks_external_load_after_persisting_intent(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def save(data):
+            if data.get("restoring"):
+                entered.set()
+                await release.wait()
+
+        self.guard._store = Mock(async_save=AsyncMock(side_effect=save))
+        self.write_snapshot(301, omit=(self.b.heater_power, self.b.heater,
+                                       self.b.heater_switch))
+        self.guard._observe()
+        try:
+            await asyncio.wait_for(entered.wait(), .5)
+            self.put(self.b.battery, 40, {"unit_of_measurement": "%"}, force=True)
+        finally:
+            release.set()
+        await self.hass.async_block_till_done()
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
+        self.assertTrue(self.guard.blocked)
+
+    async def test_manual_off_during_restore_intent_requires_operator_recovery(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def save(data):
+            if data.get("restoring"):
+                entered.set()
+                await release.wait()
+
+        self.guard._store = Mock(async_save=AsyncMock(side_effect=save))
+        self.write_snapshot(301, omit=(self.b.heater_power, self.b.heater,
+                                       self.b.heater_switch))
+        self.guard._observe()
+        try:
+            await asyncio.wait_for(entered.wait(), .5)
+            self.put(self.b.heater_switch, "on", timestamp=self.wall + .001, force=True)
+            self.put(self.b.heater_switch, "off", timestamp=self.wall + .002, force=True)
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        await self.hass.async_block_till_done()
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.assertTrue(self.guard.diagnostics["manual_recovery_required"])
+        self.assertTrue(self.guard.blocked)
+
+    async def test_manual_on_aborts_before_guard_on_then_later_off_stays_unowned(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def save(data):
+            if data.get("restoring"):
+                entered.set()
+                await release.wait()
+
+        self.guard._store = Mock(async_save=AsyncMock(side_effect=save))
+        self.write_snapshot(301, omit=(self.b.heater_power, self.b.heater,
+                                       self.b.heater_switch))
+        self.guard._observe()
+        try:
+            await asyncio.wait_for(entered.wait(), .5)
+            self.put(self.b.heater_switch, "on", timestamp=self.wall + .001, force=True)
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        await self.hass.async_block_till_done()
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.assertFalse(self.guard.switch_cut_owned)
+        self.assertTrue(self.guard.diagnostics["manual_recovery_required"])
+        # The operator requests Off only AFTER the aborted transaction ends.
+        self.wall = self.origin + 302
+        self.put(self.b.heater_switch, "off", timestamp=self.wall + .001, force=True)
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.guard.switch_cut_owned)
+        saved = self.guard._saved_state()
+        self.assertFalse(saved["switch_cut_owned"])
+        self.assertTrue(saved["manual_recovery_required"])
+        await self.guard.async_close()
+        self.guard = power.HeaterPowerGuard(
+            self.hass, self.b, live=True, entry_id="watt-fixture",
+            notify=lambda: None, wall_clock=lambda: self.wall,
+            clock=lambda: self.wall - self.origin)
+        await self.start(listen=True, saved=saved)
+        await self.refresh(363)
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.assertFalse(self.guard.switch_cut_owned)
+        self.assertTrue(self.guard.diagnostics["manual_recovery_required"])
+
+    async def test_fresh_low_watts_do_not_override_untrusted_relay_off(self):
+        for label, attrs in (("restored", {"restored": True}),
+                             ("assumed", {"assumed_state": True}),
+                             ("no_post_load_report", {})):
+            with self.subTest(label=label):
+                await self.guard.async_close()
+                self.wall = self.origin
+                self.calls.clear()
+                self.guard = power.HeaterPowerGuard(
+                    self.hass, self.b, live=True, entry_id="watt-fixture",
+                    notify=lambda: None, wall_clock=lambda: self.wall,
+                    clock=lambda: self.wall - self.origin)
+                self.put(self.b.heater_switch, "off", attrs)
+                self.put(self.b.heater, "off", {"hvac_action": "off"})
+                await self.start(saved=self.store_claim(owned=True))
+                omit = (self.b.heater_switch,) if not attrs else ()
+                await self.refresh(1, omit=omit)
+                await self.refresh(62, omit=omit)
+                self.assertIsNotNone(self.guard._reading.heater_w)
+                self.assertNotIn("turn_on", [call[1] for call in self.calls])
+                self.assertTrue(self.guard.blocked)
+
+    async def test_unobserved_gap_requires_new_relay_evidence_before_restore(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        # No local observations for longer than the telemetry freshness limit.
+        await self.refresh(401, omit=(self.b.heater_power, self.b.heater,
+                                      self.b.heater_switch))
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.write_snapshot(402, omit=(self.b.heater_power, self.b.heater,
+                                       self.b.heater_switch))
+        self.put(self.b.heater_switch, "off", timestamp=self.wall + .001, force=True)
+        await self.hass.async_block_till_done()
+        await self.advance_isolated(463)
+        self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+
+    async def test_restart_claim_needs_fresh_post_load_relay_confirmation(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        saved = self.guard._saved_state()
+        await self.guard.async_close()
+        self.guard = power.HeaterPowerGuard(
+            self.hass, self.b, live=True, entry_id="watt-fixture",
+            notify=lambda: None, wall_clock=lambda: self.wall,
+            clock=lambda: self.wall - self.origin)
+        await self.start(listen=True, saved=saved)
+        await self.advance_isolated(301)
+        self.assertFalse(self.guard.diagnostics["manual_recovery_required"])
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        self.wall = self.origin + 302
+        self.put(self.b.heater_switch, "off", timestamp=self.wall + .001, force=True)
+        await self.hass.async_block_till_done()
+        await self.advance_isolated(363)
+        self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+        self.assertFalse(self.guard.blocked)
+
+    async def test_cancelled_isolated_restore_compensates_late_uncancellable_on(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        self.delayed_on = self.ignore_on_cancellation = True
+        self.write_snapshot(301, omit=(self.b.heater_power, self.b.heater,
+                                       self.b.heater_switch))
+        self.guard._observe()
+        await asyncio.wait_for(self.on_started.wait(), .5)
+        task = self.guard._action_task
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self.release_on.set()
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
+        self.assertTrue(self.guard.blocked)
+
+    async def test_isolated_restore_unload_compensates_late_on(self):
+        await self.verified_cut()
+        await self.advance_isolated(181)
+        self.delayed_on = self.ignore_on_cancellation = True
+        self.write_snapshot(301, omit=(self.b.heater_power, self.b.heater,
+                                       self.b.heater_switch))
+        self.guard._observe()
+        await asyncio.wait_for(self.on_started.wait(), .5)
+        self.assertFalse(await self.guard.async_close())
+        self.release_on.set()
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
+        self.assertTrue(self.guard.blocked)
 
     async def test_fresh_native_off_and_post_request_watts_confirm_electrical_stop(self):
         self.put(self.b.heater, "heat", {"hvac_action": "heating"})
@@ -293,8 +630,8 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
     async def test_relay_off_with_expired_meter_does_not_automatically_restore(self):
         self.put(self.b.heater_switch, "off")
         await self.start(saved=self.store_claim(owned=True))
-        await self.refresh(181, omit=(self.b.heater_power,))
-        await self.refresh(242, omit=(self.b.heater_power,))
+        await self.refresh(181, omit=(self.b.heater_power, self.b.heater_switch))
+        await self.refresh(242, omit=(self.b.heater_power, self.b.heater_switch))
         self.assertTrue(self.guard.blocked)
         self.assertTrue(self.guard.switch_cut_owned)
         self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
@@ -303,7 +640,11 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
     async def test_owned_restore_requires_new_low_watts_after_power_on_and_off_request(self):
         self.put(self.b.heater_switch, "off")
         await self.start(saved=self.store_claim(owned=True))
-        await self.refresh(61)
+        # A saved claim is not post-start relay proof. A fresh report starts
+        # the safe interval; pre-load cached Off cannot backdate that minute.
+        await self.refresh(1)
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+        await self.refresh(61, omit=(self.b.heater_switch,))
         self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "on")
         self.assertEqual(self.hass.states.get(self.b.heater).state, "off")
         self.assertFalse(self.guard.diagnostics["latched"])
@@ -315,7 +656,8 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         self.report_meter_after_off = False
         self.put(self.b.heater_switch, "off")
         await self.start(saved=self.store_claim(owned=True))
-        await self.refresh(61)
+        await self.refresh(1)
+        await self.refresh(61, omit=(self.b.heater_switch,))
         self.assertIn(("switch", "turn_on"), [call[:2] for call in self.calls])
         self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
         self.assertTrue(self.guard.diagnostics["latched"])
@@ -324,6 +666,7 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
     async def test_late_power_on_is_compensated_and_never_left_energized(self):
         self.put(self.b.heater_switch, "off")
         await self.start(saved=self.store_claim(owned=True))
+        await self.refresh(1)
         self.delayed_on = True
         self.wall = self.origin + 61
         task = self.hass.async_create_task(self.guard._restore(), eager_start=False)

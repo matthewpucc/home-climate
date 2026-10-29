@@ -374,6 +374,21 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.hass.set(B.battery, "43")
         self.hass.refresh()
 
+    def refresh_sensor_reports(self):
+        """Keep legacy sensor packets current without inventing relay feedback."""
+        for entity, old in list(self.hass.data.items()):
+            if entity.startswith("sensor."):
+                self.hass.set(entity, old["state"], old["attributes"])
+
+    async def observe_for(self, seconds):
+        """Represent ongoing observation instead of jumping over its validity."""
+        target = self.clock.now + seconds
+        while self.clock.now < target:
+            self.clock.advance(min(30, target - self.clock.now))
+            self.refresh_sensor_reports()
+            self.guard._observe()
+            await asyncio.sleep(0)
+
     async def test_off_ack_avoids_cutting_plug_and_never_touches_network(self):
         self.trip()
         await self.settle()
@@ -559,23 +574,17 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guard.power_cut_confirmed)
         self.healthy()
         self.hass.set(B.battery, "40")
-        self.clock.advance(360)
-        self.hass.refresh()
-        self.guard._observe()
+        await self.observe_for(360)
         await self.settle()
         self.assertNotIn("turn_on", [c[1] for c in self.hass.calls])
         self.hass.set(B.battery, "40.01")
         self.guard._observe()
-        self.clock.advance(59)
-        self.hass.refresh()
-        self.guard._observe()
+        await self.observe_for(59)
         await self.settle()
         self.assertTrue(self.guard.power_cut_confirmed)
-        self.clock.advance(2)
-        self.hass.refresh()
         self.hass.ignore_climate = False
         self.hass.restore_to_heat = True
-        self.guard._observe()
+        await self.observe_for(2)
         await self.settle()
         self.assertFalse(self.guard.blocked)
         self.assertFalse(self.guard.switch_cut_owned)
@@ -619,14 +628,7 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(c[0] == "climate" for c in self.hass.calls), 1)
 
     async def test_output_spike_during_restore_cuts_again_and_keeps_gate_closed(self):
-        self.hass.ignore_climate = True
-        self.trip()
-        await self.settle()
-        self.healthy()
-        self.guard._observe()
-        self.clock.advance(400)
-        self.hass.refresh()
-        self.hass.ignore_climate = False
+        await self.prepare_restore()
         self.hass.restore_overload = True
         self.guard._observe()
         await self.settle()
@@ -646,8 +648,11 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.healthy()
         self.guard._observe()
-        self.clock.advance(400)
-        self.hass.refresh()
+        # Complete observation up to just before eligibility, then leave the
+        # final check to the test so it can install its actual failure mode.
+        await self.observe_for(max(0, self.guard._tripped_at + 299 - self.clock.now))
+        self.clock.advance(2)
+        self.refresh_sensor_reports()
         self.hass.ignore_climate = False
 
     async def test_service_receipt_without_fresh_plug_on_never_clears_latch(self):
