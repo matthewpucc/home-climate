@@ -22,6 +22,21 @@ _spec.loader.exec_module(power)
 B = example_bindings().power
 
 
+def advisory_report(clock, case):
+    """Circuit observations cover ordinary disagreement and unusable data."""
+    if case == "missing":
+        return None
+    value, unit = {"high": (5000, "W"), "unavailable": ("unavailable", "W"),
+                   "unknown": ("unknown", "W"), "nonfinite": ("NaN", "W"),
+                   "wrong_unit": (6, "A")}.get(case, (140, "W"))
+    stamp = clock.wall + 6 if case == "future" else clock.wall - (181 if case == "stale" else 0)
+    attrs = {"unit_of_measurement": unit}
+    if case in ("restored", "assumed_state"):
+        attrs[case] = True
+    return {"state": str(value), "attributes": attrs,
+            "last_reported": datetime.fromtimestamp(stamp, timezone.utc).isoformat()}
+
+
 class Clock:
     def __init__(self):
         self.now = 1000.0
@@ -63,13 +78,50 @@ class PowerPolicyTests(unittest.TestCase):
     def reading(self):
         return power.evaluate_power(self.states, B, self.clock.wall)
 
+    def test_circuit_reading_is_advisory_for_trip_and_rearm(self):
+        for case in ("high", "stale", "future", "restored", "assumed_state",
+                     "unavailable", "unknown", "nonfinite", "wrong_unit", "missing"):
+            with self.subTest(case=case):
+                self.states = measurements(self.clock)
+                circuit = advisory_report(self.clock, case)
+                if circuit is None:
+                    self.states.pop(B.circuit_power)
+                else:
+                    self.states[B.circuit_power] = circuit
+                result = self.reading()
+                self.assertIsNone(result.issue)
+                self.assertFalse(result.telemetry_missing)
+                self.assertFalse(result.wall_load_only)
+                self.assertTrue(result.safe_to_rearm)
+                if case == "high":
+                    self.assertEqual(result.circuit_w, 5000)
+                    self.assertIsNone(result.circuit_issue)
+                else:
+                    self.assertIsNone(result.circuit_w)
+                    self.assertIsNotNone(result.circuit_issue)
+
+    def test_advisory_circuit_never_substitutes_for_missing_input(self):
+        for case in ("high", "stale", "missing"):
+            with self.subTest(case=case):
+                self.states = measurements(self.clock)
+                circuit = advisory_report(self.clock, case)
+                if circuit is None:
+                    self.states.pop(B.circuit_power)
+                else:
+                    self.states[B.circuit_power] = circuit
+                self.states[B.input_power]["state"] = "unavailable"
+                result = self.reading()
+                self.assertTrue(result.telemetry_missing)
+                self.assertIn(B.input_power, result.issue)
+                self.assertFalse(result.safe_to_rearm)
+
     def test_guard_has_no_implicit_device_wiring(self):
         with self.assertRaises(TypeError):
             power.HeaterPowerGuard(SimpleNamespace(), live=True, entry_id="test", notify=lambda: None)
         with self.assertRaises(TypeError):
             power.HeaterPowerGuard(SimpleNamespace(), None, live=True, entry_id="test", notify=lambda: None)
 
-    def test_input_and_circuit_overlap_not_added_and_output_is_separate(self):
+    def test_circuit_is_not_added_to_input_and_output_is_separate(self):
         for entity in (B.circuit_power, B.input_power):
             self.states[entity]["state"] = "1000"
         self.states[B.output_power]["state"] = "1891"
@@ -84,7 +136,6 @@ class PowerPolicyTests(unittest.TestCase):
 
     def test_each_budget_is_reported_at_boundary(self):
         for entity, value, text in (
-            (B.circuit_power, 1476, "budget"),
             (B.input_power, 1476, "budget"),
             (B.output_power, 2000, "output spike"),
             (B.battery, 40, "reserve"),
@@ -94,8 +145,7 @@ class PowerPolicyTests(unittest.TestCase):
                 self.states[entity]["state"] = str(value)
                 result = self.reading()
                 self.assertIn(text, result.issue)
-                self.assertEqual(result.wall_load_only,
-                                 entity in (B.circuit_power, B.input_power))
+                self.assertEqual(result.wall_load_only, entity == B.input_power)
                 self.assertFalse(result.safe_to_rearm)
 
     def test_fresh_lower_phase_sets_budget_without_nominal_watt_cap(self):
@@ -310,7 +360,7 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     def trip(self):
         self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
-        self.hass.set(B.circuit_power, "1500")
+        self.hass.set(B.input_power, "1500")
         for elapsed in (0, 15, 15):
             self.clock.advance(elapsed)
             self.hass.refresh()
@@ -332,9 +382,9 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.guard.switch_cut_owned)
         self.assertEqual([c[0] for c in self.hass.calls], ["climate"])
 
-    async def test_wall_load_waits_for_qualification_before_stopping_running_heat(self):
+    async def test_input_load_waits_for_qualification_before_stopping_running_heat(self):
         self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
-        self.hass.set(B.circuit_power, "1500")
+        self.hass.set(B.input_power, "1500")
         self.guard._observe()
         await self.settle()
         # Public blocked feeds the worker's heater-Off overlay. Positive
@@ -355,6 +405,99 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertTrue(self.guard.diagnostics["latched"])
         self.assertEqual([call[0] for call in self.hass.calls], ["climate"])
+
+    async def test_advisory_circuit_cannot_stop_heat_or_inhibit_activation(self):
+        for case in ("high", "stale", "future", "restored", "assumed_state",
+                     "unavailable", "unknown", "nonfinite", "wrong_unit", "missing"):
+            with self.subTest(case=case):
+                self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
+                circuit = advisory_report(self.clock, case)
+                if circuit is None:
+                    self.hass.data.pop(B.circuit_power, None)
+                else:
+                    self.hass.data[B.circuit_power] = circuit
+                for elapsed in (0, 15, 15):
+                    self.clock.advance(elapsed)
+                    for entity, state in list(self.hass.data.items()):
+                        if entity != B.circuit_power:
+                            self.hass.set(entity, state["state"], state["attributes"])
+                    self.guard._observe()
+                await self.settle()
+                self.assertFalse(self.guard.blocked)
+                self.assertFalse(self.guard.diagnostics["latched"])
+                self.guard.check_activation(B.heater)
+                self.assertEqual(self.hass.data[B.heater]["state"], "heat")
+                self.assertEqual(self.hass.calls, [])
+
+    async def test_advisory_circuit_remains_visible_without_enforcement(self):
+        for case, status in (("high", "available"), ("stale", "unavailable"),
+                             ("unavailable", "unavailable"), ("missing", "unavailable")):
+            with self.subTest(case=case):
+                circuit = advisory_report(self.clock, case)
+                if circuit is None:
+                    self.hass.data.pop(B.circuit_power, None)
+                else:
+                    self.hass.data[B.circuit_power] = circuit
+                self.guard._observe()
+                diagnostics = self.guard.diagnostics
+                self.assertFalse(diagnostics["circuit_enforced"])
+                wall = diagnostics["wall_power_budget"]
+                self.assertEqual(wall["enforced_sources"], ["input"])
+                self.assertTrue(wall["sources"]["input"]["enforced"])
+                advisory = wall["sources"]["circuit"]
+                self.assertEqual(advisory["status"], "advisory")
+                self.assertFalse(advisory["enforced"])
+                self.assertEqual(advisory["reading_status"], status)
+                self.assertEqual(advisory["source"], B.circuit_power)
+                self.assertEqual(advisory["report_count"], 0)
+                self.assertIsNone(advisory["first_reported_at"])
+                self.assertEqual(wall["qualified_sources"], [])
+                self.assertEqual(wall["unavailable_sources"], [])
+                self.assertTrue(advisory["reason"].startswith("Advisory"))
+
+    async def test_missing_input_is_not_replaced_by_advisory_circuit(self):
+        self.hass.set(B.circuit_power, "100")
+        self.hass.set(B.input_power, "unavailable")
+        self.guard._observe()
+        self.assertTrue(self.guard.blocked)
+        self.assertIn(B.input_power, self.guard.diagnostics["reason"])
+        self.assertEqual(self.guard.hass.calls, [])
+
+    async def test_advisory_circuit_cannot_block_manual_recovery_acknowledgement(self):
+        for case in ("high", "unavailable", "missing"):
+            with self.subTest(case=case):
+                self.guard._manual_recovery_required = self.guard._identity_mismatch = True
+                self.guard._latched = True
+                self.guard._tripped_at = self.clock.now - 400
+                self.guard._manual_recovery_wall = self.clock.wall
+                self.hass.set(B.heater, "off", {"hvac_action": "off"})
+                self.hass.set(B.heater_current, ".05")
+                circuit = advisory_report(self.clock, case)
+                if circuit is None:
+                    self.hass.data.pop(B.circuit_power, None)
+                else:
+                    self.hass.data[B.circuit_power] = circuit
+                self.assertTrue(await self.guard.async_acknowledge_emergency())
+                self.assertFalse(self.guard.diagnostics["manual_recovery_required"])
+                self.assertFalse(self.guard.diagnostics["binding_identity_mismatch"])
+                self.assertEqual(self.hass.calls, [])
+
+    async def test_advisory_circuit_cannot_block_owned_outlet_restoration(self):
+        for case in ("high", "unavailable", "missing"):
+            with self.subTest(case=case):
+                await self.prepare_restore()
+                circuit = advisory_report(self.clock, case)
+                if circuit is None:
+                    self.hass.data.pop(B.circuit_power, None)
+                else:
+                    self.hass.data[B.circuit_power] = circuit
+                before = sum(call[1] == "turn_on" for call in self.hass.calls)
+                self.guard._observe()
+                await self.settle()
+                self.assertEqual(sum(call[1] == "turn_on" for call in self.hass.calls), before + 1)
+                self.assertEqual(self.hass.data[B.heater]["state"], "off")
+                self.assertEqual(self.hass.data[B.heater_switch]["state"], "on")
+                self.assertFalse(self.guard.blocked)
 
     async def test_confirmed_off_and_persistent_wall_load_do_not_repeat_shutdown(self):
         self.trip()

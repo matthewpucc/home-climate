@@ -28,6 +28,31 @@ class WallPowerBudgetTests(unittest.TestCase):
         self.assertEqual(outcome.as_dict()["sources"]["input"]["report_count"], 3)
         self.assertEqual(outcome.as_dict()["sources"]["input"]["evidence_seconds"], 30)
 
+    def test_selected_input_role_does_not_require_circuit_reports(self):
+        policy = WallPowerBudget(roles=("input",))
+        for now in (1000, 1015, 1030):
+            outcome = policy.observe(now, 1476, {
+                "input": PowerReport("sensor.fixture_input", 1600, now)})
+        self.assertEqual(outcome.qualified_sources, ("input",))
+        self.assertEqual(outcome.unavailable_sources, ())
+        self.assertEqual(tuple(outcome.as_dict()["sources"]), ("input",))
+
+    def test_selected_input_role_cannot_use_or_invalidate_an_unselected_circuit(self):
+        policy = WallPowerBudget(roles=("input",))
+        with self.assertRaises(ValueError):
+            policy.observe(1000, 1476, {"circuit": PowerReport("sensor.fixture_circuit", 5000, 1000)})
+        with self.assertRaises(ValueError):
+            policy.invalidate("circuit", 1000)
+        for now in (1000, 1015, 1030):
+            outcome = policy.observe(now, 1476, {"input": None})
+        self.assertEqual(outcome.qualified_sources, ())
+        self.assertEqual(outcome.unavailable_sources, ("input",))
+
+    def test_role_selection_rejects_empty_unknown_and_duplicate_roles(self):
+        for roles in ((), ("other",), ("input", "input"), "input", None):
+            with self.subTest(roles=roles), self.assertRaises(ValueError):
+                WallPowerBudget(roles=roles)
+
     def test_elapsed_polling_time_cannot_replace_report_span(self):
         for now in (1000, 1005, 1010):
             self.frame(now)

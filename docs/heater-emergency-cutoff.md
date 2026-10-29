@@ -26,25 +26,25 @@ output control is distinct from whole-station power, DC output and charging.
 If the cut removes the command or feedback network, status remains **requested,
 unconfirmed**; losing contact does not prove either success or failure.
 
-### Sustained wall-load evidence
+### Sustained grid-input evidence
 
-The fixed wall budget is now `12 × min(fresh phase A voltage, fresh phase B
-voltage)` watts, replacing the 1350 W cap. There is no extra power-factor reserve
-or nominal 120 V ceiling. It is a real-power budget, not measured RMS branch
-current or a physical 12 A guarantee, and it applies to circuit/grid input rather
-than battery-assisted AC output.
+The grid-input budget remains `12 × min(fresh phase A voltage, fresh phase B
+voltage)` watts. It is a real-power operating budget, not measured RMS current
+or a physical 12 A guarantee, and it applies to grid input rather than
+battery-assisted AC output. Whole-circuit power is now advisory and is not
+enforced. Other branch loads are outside this input policy.
 
-Circuit and grid input each need at least 30 seconds and three distinct fresh
-reports at or above the budget to shed a running heater. Cached duplicates,
-voltage-only updates and alternating reports from different sources cannot
-complete that qualification. Invalid reports or reporting gaps invalidate it;
-missing or invalid voltage has no nominal fallback. Pending qualification
+Grid input needs at least 30 seconds and three distinct fresh reports at or
+above the budget to shed a running heater. Cached duplicates, circuit reports
+and voltage-only updates cannot complete qualification. Invalid input reports
+or reporting gaps invalidate it; missing input or voltage has no circuit or
+nominal-voltage fallback. Pending qualification
 defers new starts while retaining an existing call unless another protection
 requires shutdown. Battery at/below 40%, AC output at/above 2000 W, temperature
 protections and existing telemetry checks remain independent.
 
-After confirmed native heater Off, continued charging or another circuit load
-may keep wall consumption high. That remains a diagnostic and heating
+After confirmed native heater Off, continued charging may keep input high.
+That remains a diagnostic and heating
 inhibition, not proof of a failed heater stop or a new shared-AC escalation.
 If the heater was already Off, fresh trusted feedback can provide passive
 state-only evidence without a no-op command when no command, cleanup or meter
@@ -57,9 +57,16 @@ Passive evidence grants no power-restoration ownership and cannot acknowledge
 manual or emergency recovery. An ordinary wall-load latch can clear only after
 the existing safe-load and cooldown requirements are satisfied.
 Switching AC output Off does not switch charging Off. Rearming retains the 85%
-wall-budget threshold, 60-second safe-load qualification and five-minute trip
+input-budget threshold, 60-second safe-load qualification and five-minute trip
 cooldown. Existing JSON bindings work without new thresholds or mappings;
 upgrading does not clear persisted recovery latches.
+
+Circuit telemetry never triggers shedding or blocks activation, acknowledgement
+or recovery, including when stale or unavailable. The guard retains its source
+and bounded advisory diagnostics with `circuit_enforced: false` and circuit
+status `advisory`. Keep the existing circuit binding for visibility; no JSON
+migration is required. Native heater/cutoff feedback still confirms shutdown;
+the advisory policy does not change that evidence or shared-AC ownership.
 
 ## Private wiring
 

@@ -1,9 +1,9 @@
 """Heater-only load shedding for a battery-backed circuit.
 
-Reported real power is not RMS branch current. The wall-load operating budget
-is twelve times the lower fresh wall-phase voltage, with independent sustained
-evidence for input and circuit. It does not measure or guarantee branch amps.
-Input overlaps the circuit reading: they are compared, never added.
+Reported real power is not RMS branch current. The grid-input operating budget
+is twelve times the lower fresh wall-phase voltage, with sustained input
+evidence. Whole-circuit telemetry is advisory and is never a control input or
+a substitute for missing grid-input telemetry. Branch amps are not measured.
 
 The native thermostat is stopped first, followed by an optional dedicated plug.
 An explicitly enabled shared-AC fallback is a final emergency action with manual
@@ -93,11 +93,11 @@ class PowerReading:
     telemetry_missing: bool = False
     wall_load_only: bool = False
     heater_w: float | None = None
+    circuit_issue: str | None = None
 
     @property
     def safe_to_rearm(self):
         return (not self.issue and self.input_budget_w is not None
-                and self.circuit_w < self.input_budget_w * .85
                 and self.input_w < self.input_budget_w * .85
                 and self.output_w < OUTPUT_SPIKE_W * .8
                 and (self.heater_a is None or self.heater_a < 1)
@@ -109,8 +109,17 @@ def evaluate_power(states, bindings: PowerBindings, now=None):
     """Read independent limits; no inferred circuit-current value is presented."""
     now = time.time() if now is None else now
     values = {}
+    try:
+        _, attrs, _ = _state_parts(states.get(bindings.circuit_power))
+        if attrs.get("restored") or attrs.get("assumed_state"):
+            raise ValueError(f"{bindings.circuit_power}: circuit report is restored or assumed")
+        values["circuit_w"] = _measurement(states, bindings.circuit_power,
+                                         {"W": 1, "kW": 1000}, now)
+    except ValueError as exc:
+        # Advisory telemetry is still diagnosed, never replaced with zero,
+        # and cannot inhibit heat or prevent verified recovery.
+        values["circuit_issue"] = str(exc)[:512]
     specs = (
-        ("circuit_w", bindings.circuit_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
         ("input_w", bindings.input_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
         ("output_w", bindings.output_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
         ("battery_percent", bindings.battery, {"%": 1}, BATTERY_MAX_AGE_SECONDS),
@@ -165,9 +174,9 @@ def evaluate_power(states, bindings: PowerBindings, now=None):
                             issue="Power telemetry unavailable: " + "; ".join(missing), telemetry_missing=True)
     if values["battery_percent"] > 100:
         return PowerReading(**values, issue="Power telemetry outside plausible bounds", telemetry_missing=True)
-    if max(values["circuit_w"], values["input_w"]) >= budget:
+    if values["input_w"] >= budget:
         return PowerReading(**values, input_budget_w=budget,
-                            issue=f"Circuit or Elite input reached the {budget:g} W wall-load operating budget",
+                            issue=f"Elite input reached the {budget:g} W grid-input operating budget",
                             wall_load_only=True)
     return PowerReading(**values, input_budget_w=budget, issue=issue)
 
@@ -200,7 +209,7 @@ class HeaterPowerGuard:
             from house_climate.wall_power import PowerReport, WallPowerBudget
         self._wall_report_type = PowerReport
         self._wall_budget = WallPowerBudget(max_age_seconds=TELEMETRY_MAX_AGE_SECONDS,
-            hold_seconds=WALL_EXCEED_SECONDS, minimum_reports=WALL_MINIMUM_REPORTS)
+            hold_seconds=WALL_EXCEED_SECONDS, minimum_reports=WALL_MINIMUM_REPORTS, roles=("input",))
         self._wall_budget_state = None
         self._wall_pending = False
         self._blocked = True
@@ -347,6 +356,29 @@ class HeaterPowerGuard:
         # manual Off is valid isolation proof but never a right to turn it On.
         return self._switch_observed("off", after=self._cut_request_wall)
 
+    def _wall_diagnostics(self):
+        if self._wall_budget_state is None:
+            return None
+        wall = self._wall_budget_state.as_dict()
+        wall["enforced_sources"] = ["input"]
+        wall["sources"]["input"]["enforced"] = True
+        try:
+            _, _, reported = _state_parts(self._state(self.bindings.circuit_power))
+            stamp = _timestamp(reported)
+        except (ValueError, TypeError, OverflowError):
+            stamp = None
+        r = self._reading
+        wall["sources"]["circuit"] = {
+            "role": "circuit", "status": "advisory", "enforced": False,
+            "reading_status": "unavailable" if r.circuit_issue else "available",
+            "reason": ("Advisory only; " + r.circuit_issue if r.circuit_issue else
+                       "Advisory circuit reading; not used for equipment control"),
+            "source": self.bindings.circuit_power, "latest_w": r.circuit_w,
+            "reported_at": stamp, "first_reported_at": None, "report_count": 0,
+            "evidence_seconds": 0, "minimum_w": None,
+        }
+        return wall
+
     @property
     def diagnostics(self):
         r = self._reading
@@ -363,8 +395,8 @@ class HeaterPowerGuard:
                 "electrical_stop_confirmed": self._heater_meter_stopped() is True,
                 "shutdown_stage": self._shutdown_stage,
                 "shutdown_confirmation": self._shutdown_confirmation,
-                "wall_power_budget": (self._wall_budget_state.as_dict()
-                                      if self._wall_budget_state is not None else None),
+                "wall_power_budget": self._wall_diagnostics(),
+                "circuit_enforced": False,
                 "aggregate_stop": self._aggregate_outcome.as_dict() if self._aggregate_outcome else None,
                 "emergency_ac_enabled": self._emergency_enabled,
                 "emergency_ac_latched": self._emergency_ac_latched,
@@ -395,6 +427,7 @@ class HeaterPowerGuard:
         wall = self._wall_budget_state
         stable["wall_power_budget"] = ((wall.qualified_sources, wall.pending_sources,
                                       wall.unavailable_sources) if wall is not None else None)
+        stable["circuit_advisory_health"] = self._reading.circuit_issue
         if stable != self._last_diagnostics:
             self._last_diagnostics = stable
             self.notify()
@@ -897,8 +930,7 @@ class HeaterPowerGuard:
     def _observe_wall_budget(self, states, reading, now):
         reports = {}
         for role, entity, watts in (
-                ("input", self.bindings.input_power, reading.input_w),
-                ("circuit", self.bindings.circuit_power, reading.circuit_w)):
+                ("input", self.bindings.input_power, reading.input_w),):
             _, attrs, reported = _state_parts(states.get(entity))
             try:
                 reports[role] = (self._wall_report_type(entity, watts, _timestamp(reported))

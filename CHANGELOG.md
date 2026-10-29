@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Make whole-circuit power advisory only. Its high, invalid, unavailable or stale readings no longer shed the heater, defer activation, block acknowledgement or prevent recovery. Retain the source binding and measurements, explicitly report that it is not enforced, and publish advisory-health changes without high-frequency numeric status updates.
+- Keep the Bluetti grid-input operating budget at 12 times the lower fresh wall-phase voltage, with three distinct reports and 30 seconds of exceedance. Only input contributes qualification or its 85% rearm test; circuit telemetry cannot replace missing input or voltage. Battery reserve, output, temperature, heater-meter and cutoff protections are unchanged. No JSON migration is required.
+
 ## 0.8.7
 
 - Add an optional dedicated `heater_power` binding in W/kW as an explicit alternative to the existing A/mA heater-current meter. Reject configurations selecting both meters instead of silently bypassing either. Existing amp, switch-only and direct-path configurations remain valid.

@@ -92,7 +92,9 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
 
     async def high_wall(self, elapsed, *, entity=None, watts=1600):
-        await self.report(elapsed, {(entity or B.circuit_power):
+        # Grid input supplies the enforced wall-load operating budget; circuit
+        # telemetry is advisory and cannot manufacture a heater trip.
+        await self.report(elapsed, {(entity or B.input_power):
                                    (watts, {"unit_of_measurement": "W"})})
 
     async def start(self):
@@ -422,7 +424,7 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
         await self.high_wall(1)
         await self.high_wall(16)
         self.wall[0] = self.origin + 26
-        self.hass.states.async_set(B.circuit_power, "1600", {"unit_of_measurement": "W"},
+        self.hass.states.async_set(B.input_power, "1600", {"unit_of_measurement": "W"},
                                    force_update=True, timestamp=self.origin + 10)
         await self.hass.async_block_till_done()
         self.assertFalse(self.guard.diagnostics["latched"])
@@ -478,7 +480,7 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
         await self.start()
         await self.high_wall(1)
         await self.high_wall(16)
-        self.hass.states.async_set(B.circuit_power, "1601", {"unit_of_measurement": "W"},
+        self.hass.states.async_set(B.input_power, "1601", {"unit_of_measurement": "W"},
                                    force_update=True, timestamp=self.origin + 16)
         await self.hass.async_block_till_done()
         self.assertFalse(self.guard.diagnostics["latched"])
