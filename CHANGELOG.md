@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.7
 
 - Add an optional dedicated `heater_power` binding in W/kW as an explicit alternative to the existing A/mA heater-current meter. Reject configurations selecting both meters instead of silently bypassing either. Existing amp, switch-only and direct-path configurations remain valid.
 - Use fresh, trusted native mode-Off feedback and selected-meter evidence consistently for stop corroboration, passive Off, manual recovery and cooldown. Watts use a strict 100 W operational low-load boundary; legacy current keeps its strict 1 A boundary. Neither is a device rating or an RMS-overcurrent limit.

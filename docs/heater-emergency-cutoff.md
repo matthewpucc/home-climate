@@ -100,7 +100,7 @@ freshness checks. The dedicated and shared AC switches must be distinct.
 
 ### Dedicated load meter
 
-**Unreleased; not accepted by 0.8.6:** a dedicated heater watt sensor can replace
+**Available from 0.8.7; not accepted by 0.8.6:** a dedicated heater watt sensor can replace
 the amp input through optional `power.heater_power`. Use an actual heater-only
 sensor in W or kW, rather than aggregate battery output or wall power. Select
 one meter; a configuration with both non-null `heater_power` and
