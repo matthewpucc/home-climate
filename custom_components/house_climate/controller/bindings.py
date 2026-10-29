@@ -54,6 +54,7 @@ class PowerBindings:
     emergency_ac_fallback_enabled: bool = False
     aggregate_stop_confirmation: AggregateStopConfig | None = None
     emergency_notify_service: str | None = None
+    heater_power: str | None = None
 
     def __post_init__(self):
         if type(self.emergency_ac_fallback_enabled) is not bool:
@@ -72,11 +73,16 @@ class PowerBindings:
         values.pop("emergency_ac_fallback_enabled")
         values.pop("emergency_notify_service")
         for role, value in values.items():
-            if value is None and role in {"heater_switch", "heater_current", "emergency_ac_switch"}:
+            if value is None and role in {
+                    "heater_switch", "heater_current", "heater_power", "emergency_ac_switch"}:
                 continue
             domain = ("climate" if role == "heater" else "switch"
                       if role in {"heater_switch", "emergency_ac_switch"} else "sensor")
             _entity(value, domain, f"power.{role}")
+        if self.heater_current is not None and self.heater_power is not None:
+            raise BindingsError(
+                "Choose one heater load meter: power.heater_power or power.heater_current; "
+                "set the unused binding to null")
         entities = [value for value in values.values() if value is not None]
         if len(set(entities)) != len(entities):
             raise BindingsError("Power roles must use distinct device entities")
@@ -101,6 +107,8 @@ class PowerBindings:
             result.pop("emergency_ac_fallback_enabled")
         if self.emergency_notify_service is None:
             result.pop("emergency_notify_service")
+        if self.heater_power is None:
+            result.pop("heater_power")
         if self.aggregate_stop_confirmation is not None:
             result["aggregate_stop_confirmation"] = self.aggregate_stop_confirmation.to_dict()
         return result
@@ -169,7 +177,7 @@ class HouseBindings:
         _keys(raw["fans"], FAN_ROLES, "fans")
         _keys(raw["power"], POWER_ROLES, "power",
               optional={"emergency_ac_switch", "emergency_ac_fallback_enabled",
-                        "aggregate_stop_confirmation", "emergency_notify_service"})
+                        "aggregate_stop_confirmation", "emergency_notify_service", "heater_power"})
         for role, selected in raw["rooms"].items():
             if not isinstance(selected, list):
                 raise BindingsError(f"rooms.{role} must list ambient sensor entity IDs")
