@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.9
 
 - Add the explicitly confirmed `house_climate.commission_heater_relay` action for a supervised dedicated-outlet recovery test while comfort control is Off. Require live permission, fresh trustworthy native Off and low dedicated load, healthy electricals/battery, idle ownership/jobs and an already disabled shared AC fallback. No JSON changes are required.
 - Persist maintenance intent before the real dedicated cutoff and use the normal safe-load interval, cooldown and bounded restoration. Keep the ten-second energized verification maximum; stop after one failed restoration, restart/unload, manual interruption, lost observation continuity or a ten-minute overall limit. Retain manual recovery and block comfort enable through actual outstanding cleanup; never start heat or switch shared AC during this test.
