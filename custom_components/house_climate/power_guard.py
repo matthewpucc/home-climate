@@ -42,6 +42,10 @@ COOLDOWN_SECONDS = 300.0
 SAFE_LOAD_SECONDS = 60.0
 MAX_RESTORE_ATTEMPTS = 3
 COMMISSIONING_MAX_SECONDS = 600.0
+COMMISSIONING_METER_ACQUIRE_SECONDS = 30.0
+COMMISSIONING_REPORT_GAP_SECONDS = 30.0
+COMMISSIONING_RECONNECT_SECONDS = 300.0
+COMMISSIONING_METER_CONFIRM_SECONDS = 30.0
 
 
 def _state_parts(state):
@@ -292,6 +296,9 @@ class HeaterPowerGuard:
         self._commissioning_preparing = False
         self._commissioning_started_clock = None
         self._commissioning_caller_cancelled = False
+        # Process-local supervision; a restart must never resume an energized
+        # commissioning wait from cached low meter data.
+        self._supervised_restore = None
         self._commissioning = {"active": False, "status": "idle", "reason": None,
             "started_at": None, "finished_at": None,
             "restore_window_seconds": RESTORE_ACK_SECONDS,
@@ -675,6 +682,9 @@ class HeaterPowerGuard:
 
         @callback
         def changed(_event=None):
+            if _event and self._supervised_restore is not None:
+                self._supervised_restore_check(
+                    entity=_event.data.get("entity_id"), state=_event.data.get("new_state"))
             if _event and _event.data.get("entity_id") == self.bindings.heater_switch:
                 state = _event.data.get("new_state")
                 value, attrs, _ = _state_parts(state)
@@ -943,6 +953,182 @@ class HeaterPowerGuard:
         self._save()
         self._publish()
 
+    def _supervised_restore_abort(self, reason):
+        watch = self._supervised_restore
+        if watch is None or watch["failure"] is not None:
+            return False
+        watch["failure"] = str(reason)[:240]
+        self._commissioning_failed(watch["failure"])
+        # A service call can be blocked while these event callbacks run. Do
+        # not wait for its completion or for native Off before requesting cut.
+        self._invalid_positive.update(self._positive_tasks)
+        self._schedule_compensating_cut()
+        return False
+
+    def _supervised_restore_check(self, *, entity=None, state=None):
+        """Consume every known event as well as snapshots; bad evidence sticks."""
+        watch = self._supervised_restore
+        if watch is None:
+            return True
+        if watch["failure"] is not None:
+            return False
+        now, wall = self._clock(), self._wall_clock()
+        if (not math.isfinite(now) or not math.isfinite(wall)
+                or now < watch["checked_clock"] or wall < watch["checked_wall"]
+                or now - watch["checked_clock"] >= COMMISSIONING_REPORT_GAP_SECONDS
+                or self._commissioning_expired()):
+            return self._supervised_restore_abort("Supervised restoration observation deadline expired")
+        watch["checked_clock"], watch["checked_wall"] = now, wall
+        if (not self.live or self._closing or self._closed or self._restore_interrupted
+                or self._manual_recovery_required or self._identity_mismatch
+                or self._persistence_error or not self.commissioning_active
+                or not self._commissioning_controller_stopped()
+                or watch["identity"] != self._binding_identity()):
+            return self._supervised_restore_abort("Supervised restoration was interrupted")
+        # Test deadlines before accepting a newly arrived good packet. Late
+        # data cannot erase a real gap merely by arriving ahead of a timer job.
+        if (watch["last_report"] is None
+                and now - watch["requested_clock"] >= COMMISSIONING_METER_ACQUIRE_SECONDS):
+            return self._supervised_restore_abort("Fresh low heater watts did not arrive before the startup deadline")
+        if (watch["last_report"] is not None
+                and (now - watch["seen_clock"] >= COMMISSIONING_REPORT_GAP_SECONDS
+                     or wall - watch["last_report"] >= COMMISSIONING_REPORT_GAP_SECONDS)):
+            return self._supervised_restore_abort("Fresh low heater watt reports stopped during restoration")
+        off_clock, off_task = watch.get("off_clock"), watch.get("off_task")
+        if (not watch["off_acknowledged"] and watch.get("off_ack_deadline") is not None
+                and time.monotonic() >= watch["off_ack_deadline"]):
+            return self._supervised_restore_abort("Fresh native Off was not verified before its acknowledgement deadline")
+        if off_clock is not None and now - off_clock >= COMMISSIONING_METER_CONFIRM_SECONDS:
+            return self._supervised_restore_abort("Post-command low heater watts were not verified before the deadline")
+        if off_task is not None and off_task.done() and (off_task.cancelled() or off_task.exception() is not None):
+            return self._supervised_restore_abort("Native Off service failed during supervised restoration")
+        states = self._states()
+        if entity is not None:
+            states[entity] = state
+        external = replace(self.bindings, heater_current=None, heater_power=None)
+        if evaluate_power(states, external, wall).issue:
+            return self._supervised_restore_abort("Authoritative electrical protection interrupted restoration")
+        for role in ("battery", "input_power", "output_power", "wall_phase_a_voltage", "wall_phase_b_voltage"):
+            _, attrs, _ = _state_parts(states.get(getattr(self.bindings, role)))
+            if attrs.get("restored") or attrs.get("assumed_state"):
+                return self._supervised_restore_abort("Authoritative electrical report is not trusted")
+        native, attrs, _ = _state_parts(states.get(self.bindings.heater))
+        if attrs.get("hvac_action") in ("heating", "cooling"):
+            return self._supervised_restore_abort("Native heating contradicts supervised low-load restoration")
+        if watch["off_acknowledged"]:
+            _, _, native_report = _state_parts(states.get(self.bindings.heater))
+            try:
+                stamp = _timestamp(native_report)
+                still_off = (native == "off" and not attrs.get("restored")
+                             and not attrs.get("assumed_state")
+                             and self._off_request_wall < stamp <= wall + 5
+                             and wall - stamp <= TELEMETRY_MAX_AGE_SECONDS)
+            except (ValueError, TypeError, OverflowError):
+                still_off = False
+            if not still_off:
+                return self._supervised_restore_abort("Verified native Off was lost before restoration completed")
+        relay, attrs, _ = _state_parts(states.get(self.bindings.heater_switch))
+        if (attrs.get("restored") or attrs.get("assumed_state")
+                or relay not in ("off", "on") or (watch["on_wall"] is not None and relay != "on")):
+            return self._supervised_restore_abort("Dedicated relay feedback is not trusted during restoration")
+        observed = states.get(self.bindings.heater_power)
+        _, attrs, reported = _state_parts(observed)
+        try:
+            stamp = _timestamp(reported)
+            # A cached cutoff zero is allowed only as unqualified startup data.
+            # New invalid events must not be hidden by a following good event.
+            new = stamp > watch["requested_wall"]
+            if new or entity == self.bindings.heater_power or watch["last_report"] is not None:
+                value = _measurement(states, self.bindings.heater_power,
+                                     {"W": 1, "kW": 1000}, wall,
+                                     maximum_age=COMMISSIONING_REPORT_GAP_SECONDS)
+                if attrs.get("restored") or attrs.get("assumed_state"):
+                    raise ValueError("Heater power report is not trusted")
+                if value >= HEATER_OFF_MAX_W:
+                    raise ValueError("Heater power reached the supervised low-load limit")
+                if watch["last_report"] is not None:
+                    if stamp < watch["last_report"]:
+                        raise ValueError("Heater power reports arrived out of order")
+                    if stamp == watch["last_report"] and value != watch["last_value"]:
+                        raise ValueError("Heater power changed without a new report timestamp")
+                if watch["on_wall"] is not None and stamp > watch["on_wall"]:
+                    if watch["last_report"] is None or stamp > watch["last_report"]:
+                        watch["last_report"], watch["last_value"] = stamp, value
+                        watch["seen_clock"] = now
+        except (ValueError, TypeError, OverflowError) as exc:
+            if entity == self.bindings.heater_power or watch["last_report"] is not None:
+                return self._supervised_restore_abort(f"Supervised heater power is invalid: {exc}")
+            # No usable pre-On sample is expected with an isolated meter. A
+            # new invalid post-On report, however, is an immediate failure.
+            try:
+                post_request = _timestamp(reported) > watch["requested_wall"]
+            except (ValueError, TypeError, OverflowError):
+                post_request = False
+            if post_request:
+                return self._supervised_restore_abort(f"Supervised heater power is invalid: {exc}")
+        if (not watch["native_ready"]
+                and now - watch["requested_clock"] >= COMMISSIONING_RECONNECT_SECONDS):
+            return self._supervised_restore_abort("Native reconnect and stop verification deadline expired")
+        return True
+
+    def _supervised_phase(self, phase, reason):
+        if not self.commissioning_active:
+            return
+        remaining = max(0, COMMISSIONING_MAX_SECONDS - (
+            self._clock() - self._commissioning_started_clock))
+        self._commissioning.update(phase=phase, reason=reason,
+            phase_started_at=self._wall_clock(),
+            session_deadline_at=self._wall_clock() + remaining)
+        self._publish()
+
+    async def _supervised_reconnect(self):
+        """Watt-only, supervised commissioning. Never used by ordinary recovery."""
+        watch = self._supervised_restore
+        self._supervised_phase("meter_startup", "Waiting for fresh low dedicated watts after relay On")
+        while self._supervised_restore_check() and watch["last_report"] is None:
+            await asyncio.sleep(.1)
+        if watch["failure"] is not None:
+            return False
+        self._supervised_phase("native_reconnect", "Fresh low watts supervised while native HA control reconnects")
+        while self._supervised_restore_check():
+            native, attrs, reported = _state_parts(self._state(self.bindings.heater))
+            try:
+                ready = (native not in (None, "unknown", "unavailable")
+                         and not attrs.get("restored") and not attrs.get("assumed_state")
+                         and watch["on_wall"] < _timestamp(reported) <= self._wall_clock() + 5
+                         and self._wall_clock() - _timestamp(reported) <= TELEMETRY_MAX_AGE_SECONDS)
+            except (ValueError, TypeError, OverflowError):
+                ready = False
+            if ready:
+                watch["native_ready"] = True
+                break
+            await asyncio.sleep(.1)
+        if watch["failure"] is not None:
+            return False
+        self._supervised_phase("native_off", "Requesting native Off before final electrical confirmation")
+        # The watt watchdog remains live inside _off_ack, independently of the
+        # native state. Native acknowledgement and meter cadence have separate
+        # bounds; success of a service call is never an acknowledgement.
+        if not await self._off_ack(RESTORE_ACK_SECONDS, require_meter=False):
+            return self._supervised_restore_abort("Fresh native Off was not verified after reconnection")
+        watch["off_acknowledged"] = True
+        self._supervised_phase("meter_confirmation", "Waiting for new low watts after the native Off request")
+        while self._supervised_restore_check():
+            off_task = watch["off_task"]
+            if off_task.done() and (off_task.cancelled() or off_task.exception() is not None):
+                return self._supervised_restore_abort("Native Off service failed during supervised restoration")
+            if self._heater_meter_stopped() is True and not self._service_tasks:
+                # Let already queued HA state events establish contradictions
+                # before a fast service result could clear the maintenance gate.
+                await asyncio.sleep(0)
+                if (self._supervised_restore_check() and self._heater_off(fresh=True)
+                        and self._heater_meter_stopped() is True and not self._service_tasks):
+                    return True
+            if self._clock() - watch["off_clock"] >= COMMISSIONING_METER_CONFIRM_SECONDS:
+                break
+            await asyncio.sleep(.1)
+        return self._supervised_restore_abort("Post-command low heater watts were not verified before the deadline")
+
     def _commissioning_prerequisites(self, *, preparing=False):
         if (not self.live or self._closed or self._closing or self._restoring
                 or self._cutting or self._manual_recovery_required or self._identity_mismatch
@@ -1026,6 +1212,12 @@ class HeaterPowerGuard:
             "started_at": self._wall_clock(), "finished_at": None,
             "restore_window_seconds": RESTORE_ACK_SECONDS,
             "maximum_seconds": COMMISSIONING_MAX_SECONDS}
+        if self._heater_meter()[3] == "power":
+            self._commissioning.update(phase="preparing", staged_watts=True,
+                meter_acquire_seconds=COMMISSIONING_METER_ACQUIRE_SECONDS,
+                meter_report_gap_seconds=COMMISSIONING_REPORT_GAP_SECONDS,
+                native_reconnect_seconds=COMMISSIONING_RECONNECT_SECONDS,
+                post_off_meter_seconds=COMMISSIONING_METER_CONFIRM_SECONDS)
         self._commissioning_started_clock = self._clock()
         self._commissioning_caller_cancelled = False
         self._commissioning_preparing = True
@@ -1243,6 +1435,7 @@ class HeaterPowerGuard:
             self._commissioning_failed("Observation continuity was lost during relay commissioning", status="interrupted")
         if self.commissioning_active and not self._commissioning_controller_stopped():
             self._commissioning_failed("Comfort controller is no longer stopped", status="interrupted")
+        self._supervised_restore_check()
         if (self.commissioning_active and not self._commissioning_preparing
                 and not self._restoring and not self._cutting):
             value, attrs, _ = _state_parts(self._state(self.bindings.heater_switch))
@@ -1511,14 +1704,21 @@ class HeaterPowerGuard:
             _LOGGER.exception("Could not persist heater power restoration intent")
             return False
 
-    def _service(self, domain, service, entity, **data):
+    def _service(self, domain, service, entity, *, _before_dispatch=None, **data):
         if not self.live:
             raise RuntimeError("Shadow power guard forbids service calls")
         shared = entity == getattr(self.bindings, "emergency_ac_switch", None)
         if shared and (domain != "switch" or service != "turn_off"):
             raise RuntimeError("The emergency guard never turns shared AC On")
-        task = self.hass.async_create_task(self.hass.services.async_call(
-            domain, service, {"entity_id": entity, **data}, blocking=True), eager_start=False)
+        async def dispatch():
+            if _before_dispatch is not None:
+                _before_dispatch()
+            return await self.hass.services.async_call(
+                domain, service, {"entity_id": entity, **data}, blocking=True)
+
+        call = (dispatch() if _before_dispatch is not None else
+                self.hass.services.async_call(domain, service, {"entity_id": entity, **data}, blocking=True))
+        task = self.hass.async_create_task(call, eager_start=False)
         self._service_tasks.add(task)
         if shared:
             self._emergency_service_tasks.add(task)
@@ -1588,15 +1788,29 @@ class HeaterPowerGuard:
         self._shutdown_stage = "dyson_off"
         self._shutdown_confirmation = "unconfirmed"
         self._off_request_wall = self._wall_clock()
-        task = self._service("climate", "set_hvac_mode", self.bindings.heater, hvac_mode="off")
+        watch = self._supervised_restore
+        def dispatched():
+            # A sample arriving while the service task was only queued cannot
+            # confirm an Off command which has not actually been dispatched.
+            self._off_request_wall = self._wall_clock()
+            watch["off_clock"] = self._clock()
+        task = self._service("climate", "set_hvac_mode", self.bindings.heater,
+            hvac_mode="off", _before_dispatch=dispatched if watch is not None else None)
+        if watch is not None:
+            watch["off_task"] = task
         deadline = time.monotonic() + seconds
+        if watch is not None:
+            watch["off_ack_deadline"] = deadline
         while not self._closed and time.monotonic() < deadline:
+            if not self._supervised_restore_check():
+                task.cancel()
+                return False
             if self._restoring and (self._restore_interrupted or self._closing
                     or self._manual_recovery_required or not self._switch_observed("on")
                     or self._external_power().issue):
                 task.cancel()
                 return False
-            if self._heater_off(fresh=True):
+            if self._heater_off(fresh=True) and (watch is None or watch.get("off_clock") is not None):
                 meter_stop = self._heater_meter_stopped()
                 if meter_stop is not None:
                     contradictory = not meter_stop
@@ -1620,7 +1834,8 @@ class HeaterPowerGuard:
             task.cancel()  # Do not await cancellation: integrations can ignore it.
         # Inconclusive aggregate evidence is not evidence of continued heating.
         # A fresh native Off acknowledgement remains state-only confirmation.
-        if (self._heater_off(fresh=True) and not contradictory
+        if (self._supervised_restore_check() and self._heater_off(fresh=True) and not contradictory
+                and (watch is None or watch.get("off_clock") is not None)
                 and (not require_meter or self._heater_meter_stopped() is True)):
             self._off_confirmed = True
             self._shutdown_confirmation = "state_only"
@@ -1752,6 +1967,7 @@ class HeaterPowerGuard:
             self._states(), self.bindings, self._wall_clock()).telemetry_missing
         generation = (self._isolation_revision, self._binding_identity(), self._cut_owned)
         commissioning = self.commissioning_active
+        staged = commissioning and self._heater_meter()[3] == "power"
         if commissioning:
             self._commissioning.update(status="restoring",
                 reason="One bounded restoration attempt; fresh Off and low load required")
@@ -1794,13 +2010,21 @@ class HeaterPowerGuard:
                 deadline = min(deadline, time.monotonic() + max(0, remaining))
             on_attempted = True
             self._restore_on_requested = True
+            if staged:
+                self._supervised_restore = {
+                    "requested_wall": requested, "requested_clock": self._clock(),
+                    "checked_clock": self._clock(), "checked_wall": requested,
+                    "on_wall": None, "last_report": None, "last_value": None,
+                    "seen_clock": None, "failure": None, "identity": self._binding_identity(),
+                    "native_ready": False, "off_acknowledged": False}
+                self._supervised_phase("relay_on", "Requesting dedicated relay On under watt supervision")
             if not await self._bounded_service("switch", "turn_on", self.bindings.heater_switch,
                                               timeout=deadline - time.monotonic()):
                 return
             while (not self._switch_observed("on", after=requested)
                    and not self._closing and time.monotonic() < deadline):
                 if (self._external_power().issue or self._restore_interrupted
-                        or self._manual_recovery_required):
+                        or self._manual_recovery_required or not self._supervised_restore_check()):
                     return
                 await asyncio.sleep(min(.1, RESTORE_ACK_SECONDS / 5))
             if (not self._switch_observed("on", after=requested) or self._closing
@@ -1813,15 +2037,21 @@ class HeaterPowerGuard:
             # Off request. Wait only within the existing restore deadline; a
             # cached pre-On low reading must not open the activation gate.
             require_meter = self._heater_meter()[3] == "power" or prior_meter_missing
-            if await self._off_ack(max(0, deadline - time.monotonic()), require_meter=require_meter):
-                while self._service_tasks and time.monotonic() < deadline:
+            if staged:
+                self._supervised_restore["on_wall"] = _timestamp(
+                    _state_parts(self._state(self.bindings.heater_switch))[2])
+                acknowledged = await self._supervised_reconnect()
+            else:
+                acknowledged = await self._off_ack(max(0, deadline - time.monotonic()), require_meter=require_meter)
+            if acknowledged:
+                while self._service_tasks and (self._supervised_restore_check() if staged else time.monotonic() < deadline):
                     if (self._closing or self._restore_interrupted
                             or self._manual_recovery_required or self._external_power().issue):
                         return
                     await asyncio.sleep(min(.1, RESTORE_ACK_SECONDS / 5))
                 reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
                 if (reading.safe_to_rearm and not self._closed and not self._closing
-                        and time.monotonic() < deadline
+                        and (self._supervised_restore_check() if staged else time.monotonic() < deadline)
                         and (not commissioning or (not self._commissioning_expired()
                              and self._commissioning_external_trusted()
                              and self._commissioning_controller_stopped()))
@@ -1829,6 +2059,7 @@ class HeaterPowerGuard:
                         and not self._service_tasks and not self._positive_tasks and not self._compensation_pending
                         and not self.pending_external_jobs()
                         and self._switch_observed("on", after=requested)
+                        and (not staged or self._heater_off(fresh=True))
                         and (not require_meter or self._heater_meter_stopped() is True)):
                     self._reading = reading
                     self._clear()
@@ -1838,7 +2069,13 @@ class HeaterPowerGuard:
                 if commissioning:
                     self._commissioning_failed("Restoration was not verified within its deadline; manual recovery required")
                 if on_attempted or self._positive_tasks:
-                    await self._cut_switch(force=True)
+                    if staged:
+                        # Serialize early watchdog cuts and final cleanup.
+                        if self._compensating_task is None or self._compensating_task.done():
+                            self._schedule_compensating_cut()
+                        await asyncio.wait((self._compensating_task,), timeout=2 * SERVICE_TIMEOUT_SECONDS + .1)
+                    else:
+                        await self._cut_switch(force=True)
                 self._restore_intent = False
                 self._tripped_at = self._clock()
                 self._trip_wall = self._wall_clock()
@@ -1846,6 +2083,7 @@ class HeaterPowerGuard:
                 self._save()
             self._restoring = False
             self._restore_on_requested = False
+            self._supervised_restore = None
             self._publish()
 
     async def async_close(self):
