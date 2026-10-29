@@ -5,8 +5,9 @@ from datetime import datetime, timezone
 import math
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
-from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers.start import async_at_started
+import voluptuous as vol
 
 from .configuration import generate_configuration, entry_configuration, validate_actuators
 from .const import CONF_LIVE, DOMAIN, NAME
@@ -66,7 +67,25 @@ async def async_setup_entry(hass, entry):
             generate_configuration, runtime.config, hass.config.config_dir
         )
 
+    async def commission_heater_relay(call):
+        # A registered action is not permission to run during unload, Preview,
+        # or against a replacement runtime. The guard checks physical evidence
+        # and controller ownership again immediately before dispatch.
+        if (hass.data.get(DOMAIN) is not runtime or runtime.stop_event.is_set()
+                or runtime.power_guard is None):
+            raise HomeAssistantError("Dedicated heater relay commissioning is unavailable")
+        if not runtime.live:
+            raise HomeAssistantError("Enable live equipment commands before commissioning the dedicated relay")
+        try:
+            await runtime.power_guard.async_commission_relay(confirm=call.data["confirm"])
+        except (RuntimeError, ValueError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
     hass.services.async_register(DOMAIN, "generate_package", generate_package)
+    hass.services.async_register(
+        DOMAIN, "commission_heater_relay", commission_heater_relay,
+        schema=vol.Schema({vol.Required("confirm"): vol.All(bool, vol.In((True,)))}),
+    )
     entry.async_on_unload(entry.add_update_listener(async_update_options))
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, runtime.async_stop))
     entry.async_on_unload(async_at_started(hass, runtime.async_start))
@@ -80,6 +99,7 @@ async def async_unload_entry(hass, entry):
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.services.async_remove(DOMAIN, "generate_package")
+        hass.services.async_remove(DOMAIN, "commission_heater_relay")
         hass.data.pop(DOMAIN, None)
     return unloaded
 

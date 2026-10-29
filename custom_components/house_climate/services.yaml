@@ -4,3 +4,22 @@ generate_package:
     Write the current enable, lease, and optional auxiliary-watchdog package and
     dashboard card to house_climate_generated in the Home Assistant configuration
     directory. Replaces generated files; installation into HA packages is manual.
+
+commission_heater_relay:
+  name: Commission dedicated heater relay recovery
+  description: >-
+    Deliberately cut the dedicated heater outlet while the native heater is
+    already Off, then exercise its normal guarded cooldown and restoration.
+    Requires local supervision, live permission, Controller enabled Off, fresh
+    native Off and low dedicated load, healthy electrical readings, and shared
+    AC fallback disabled. Does not start heating or switch shared AC output.
+    Returns after the initial cutoff; follow progress on the Heater power guard.
+  fields:
+    confirm:
+      name: Confirm supervised dedicated-outlet power cycle
+      description: >-
+        Set true only when beside the heater, ready to stop it manually, and
+        deliberately authorizing this dedicated-outlet cutoff and recovery test.
+      required: true
+      selector:
+        boolean:

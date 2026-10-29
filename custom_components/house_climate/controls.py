@@ -219,6 +219,10 @@ class NativeControls:
 
     async def async_set_enabled(self, enabled):
         if enabled:
+            if (self.power_guard is not None
+                    and getattr(self.power_guard, "commissioning_busy",
+                                getattr(self.power_guard, "commissioning_active", False))):
+                raise HAError("Dedicated heater relay commissioning must finish before enabling comfort control")
             if self._closing:
                 raise HAError("Controller is stopping")
             if not self.active:

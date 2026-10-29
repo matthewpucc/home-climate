@@ -533,6 +533,7 @@ class ControllerRuntime:
                 self.api.power_guard = self.power_guard
                 self.power_guard.pending_external_jobs = lambda: self.api.service_jobs(
                     {self.config.heater_entity})
+                self.power_guard.commissioning_controller_off = self._commissioning_controller_off
                 if self.controls is not None:
                     self.controls.power_guard = self.power_guard
                 await self.power_guard.async_load()
@@ -541,6 +542,18 @@ class ControllerRuntime:
                 await self.power_guard.async_close()
             await self.comfort.async_close()
             raise
+
+    def _commissioning_controller_off(self):
+        """A maintenance cut cannot overlap comfort ownership or device work."""
+        controls = self.controls
+        if (not self.live or self.stop_event.is_set() or self._configuration_reload_pending
+                or controls is None or not controls.live or not controls.active
+                or controls.enabled or controls.owned or controls.pending_fans
+                or controls.recovering or controls._closing or controls._claiming
+                or controls.inflight or controls.service_inflight or controls.auxiliary_inflight):
+            return False
+        devices = {*self.config.climate_entities, *self.config.fans.values()}
+        return not (self.api.service_jobs(devices) or self.api.uncertain_service_jobs(devices))
 
     def _update_power_guard_status(self):
         if self.power_guard is not None:
