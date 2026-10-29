@@ -216,25 +216,90 @@ passed recovery test. Keep Controller enabled Off and watch the bounded
 cannot be enabled while the test is active or its actual command/cleanup work
 is still pending, including after a failed test result.
 The diagnostic records the current status/reason and bounded start/finish
-timestamps, with `restore_window_seconds: 10` and `maximum_seconds: 600`.
+timestamps. The overall commissioning authorization lasts at most 600 seconds,
+including the five-minute cooldown and command or persistence waits. Expiry
+requests dedicated relay Off and retains manual recovery; it cannot guarantee
+when a wireless command or physical cutoff completes. A late On or a service
+that ignores cancellation remains tracked, with comfort blocked while actual
+command or cleanup work is pending, even beyond the authorization deadline.
 
 The test uses actual guard-owned cutoff evidence and the ordinary 60-second
 safe-load qualification plus five-minute cooldown; those periods overlap. It
-then allows one guarded restoration attempt. The existing ten-second window
-covers relay-On feedback, a native Off request and fresh post-request low-meter
-evidence. That deadline is not extended for device boot or HA reconnection.
-The heater may retain Heat across power loss, so cached mode or low readings
-cannot pass the test. Failed or contradictory reconnection recuts the dedicated
-outlet and requires manual recovery rather than repeatedly energizing it.
+then allows one guarded restoration attempt. In released 0.8.9, one ten-second
+window covers relay-On feedback, a native Off request and fresh post-request
+low-meter evidence; it is not extended for device boot or HA reconnection.
+
+#### Staged watt-meter commissioning (unreleased)
+
+The proposed staged path applies only to this explicitly invoked, supervised
+test when a dedicated **watt** meter is selected. It is not available in 0.8.9.
+It does not change normal unattended recovery, its ten-second verification
+window and maximum of three attempts, or the existing amp-meter path. There is
+no new JSON threshold or command parameter to enable the stages.
+
+The staged watt path separates relay, load and native-control evidence:
+
+1. Obtain trusted relay-On acknowledgement within the existing ten-second
+   command window.
+2. Obtain the first trusted dedicated reading **strictly below 100 W** within
+   30 seconds of relay-On dispatch, the earliest possible energization. Its
+   report timestamp must be strictly later than the actual trusted On feedback.
+   The acknowledgement wait consumes part of those same 30 seconds; it does
+   not start an additional window. This is an explicitly supervised period
+   without new post-On load evidence; it is not an unattended startup grace.
+   A cached zero from before power restoration cannot satisfy it.
+3. Keep every observed dedicated reading trusted and below 100 W while waiting
+   for native climate control to reconnect. The gap since the last accepted
+   low-watt report must never exceed 30 seconds, independently of whether the
+   native reconnect deadline has elapsed. Fresh native readiness has at most
+   300 seconds from relay-On dispatch. A later low report cannot erase an intermediate
+   high, invalid or missing report or restart a failed window.
+4. Request native **Off**, then require its fresh acknowledgement within the
+   existing ten-second command and acknowledgement budget, including queue or
+   service waits. Thermostat idle or completion of the service call is not that
+   acknowledgement.
+5. Require a new trusted reading below 100 W strictly after actual native-Off
+   dispatch, within 30 seconds of that dispatch. This meter deadline includes
+   the native acknowledgement wait; it is not an extra 30 seconds after Off is
+   acknowledged. Low readings from the preceding stages cannot substitute for
+   this post-command evidence.
+
+All stage deadlines are clipped by the same 600-second overall commissioning
+limit; they are not added on after the cooldown or used to extend that limit.
+The 300-second deadline covers attaining fresh native readiness; the final Off
+acknowledgement and post-Off meter evidence have their own bounds above, still
+clipped by the overall deadline.
+The ordinary 180-second telemetry freshness policy remains unchanged. During
+the energized staged test, the independent 30-second reporting-gap bound is
+stricter. Report timestamps must advance; repeatedly reading one cached state
+or receiving a fresh Prometheus scrape cannot supply missing load evidence.
+
+A high reading at or above 100 W, invalid, stale, restored, assumed or out-of-order
+feedback, a reporting gap, or a missed stage deadline fails the attempt. The
+guard immediately requests dedicated relay Off and retains a manual recovery
+hold. Requested Off is not proof of a completed physical cutoff. The
+heater may retain Heat across power loss: the test neither requests Heat nor
+allows comfort control before relay, fresh native Off and post-Off low-load
+proof are complete. It never commands shared AC output.
+
+The bounded `commissioning` diagnostic includes `phase`, `phase_started_at`,
+`session_deadline_at` and `staged_watts`, with `meter_acquire_seconds: 30`,
+`meter_report_gap_seconds: 30`, `native_reconnect_seconds: 300` and
+`post_off_meter_seconds: 30` for this path. `restore_window_seconds: 10` remains
+the relay/native acknowledgement budget; it is not the duration of the whole
+staged restoration. `maximum_seconds: 600` remains the overall authorization
+bound, not a promise that pending physical cleanup has finished by then.
 
 Repeated invocation while active, manual relay changes, caller cancellation,
 unload or restart cannot silently start another attempt. Interrupted tests
 require manual recovery. Ten minutes is the overall supervision bound; an
 observation interruption longer than the 180-second freshness limit or a clock
 reversal also ends the test without licensing an automatic restart. These bounds
-do not extend the energized ten-second restoration window. Never clear storage,
-fabricate sensor states, raise
-limits or repeatedly power-cycle the heater to obtain a pass. An explicit
+do not extend normal unattended recovery or the amp path. Never clear storage,
+fabricate sensor states, raise limits or repeatedly power-cycle the heater to
+obtain a pass. The staged implementation still requires supervised hardware
+validation; software tests do not establish physical reconnect timing, actual
+meter measurement age or failure-free recutting. An explicit
 `passed` result establishes only the observed recovery attempt under those
 conditions; it is not electrical/fire safety certification or proof of future
 connectivity. A normal manual thermostat Off test remains a separate check and

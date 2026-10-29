@@ -27,6 +27,7 @@ class CommissioningHass(watts.WattHass):
         self.cut_entered = asyncio.Event()
         self.release_cut = asyncio.Event()
         self.post_off_current = None
+        self.startup_watts = 1
 
     async def service(self, domain, service, body, blocking):
         if domain == "switch" and service == "turn_off":
@@ -38,6 +39,8 @@ class CommissioningHass(watts.WattHass):
         await super().service(domain, service, body, blocking)
         if domain == "switch" and service == "turn_off" and not self.ignore_relay_off:
             self.set(WATTS, 0, {"unit_of_measurement": "W"})
+        if domain == "switch" and service == "turn_on" and not self.ignore_switch_on_feedback:
+            self.set(WATTS, self.startup_watts, {"unit_of_measurement": "W"})
         if domain == "climate" and not self.ignore_climate and self.post_off_current is not None:
             self.set(B.heater_current, self.post_off_current, {"unit_of_measurement": "A"})
 

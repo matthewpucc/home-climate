@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Stage only explicitly supervised watt-meter relay commissioning: retain the ten-second relay acknowledgement, require trusted dedicated output below 100 W reported after actual On feedback and within 30 seconds of On dispatch, then maintain low-watt evidence with a maximum 30-second reporting gap while native control becomes ready within at most 300 seconds of On dispatch. Require native Off acknowledgement within ten seconds and new low-watt evidence within 30 seconds of actual Off dispatch, including acknowledgement time. Clip every stage by the existing 600-second authorization limit including cooldown.
+- Fail and immediately request dedicated Off on high, invalid, missing or expired evidence, lost continuity, cancellation or interrupted ownership; retain a persisted single attempt and manual recovery hold. Track actual late commands and cleanup past the authorization deadline without treating requested Off as physical cutoff proof. Preserve ordinary 180-second freshness, normal unattended ten-second recovery and three-attempt limit, the amp path and independent protections. Never restore shared AC; retain comfort inhibition until proof and actual cleanup complete. Hardware timing and physical recovery remain unverified by software tests.
+
 ## 0.8.9
 
 - Add the explicitly confirmed `house_climate.commission_heater_relay` action for a supervised dedicated-outlet recovery test while comfort control is Off. Require live permission, fresh trustworthy native Off and low dedicated load, healthy electricals/battery, idle ownership/jobs and an already disabled shared AC fallback. No JSON changes are required.
