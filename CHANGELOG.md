@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.12
 
 - Start auxiliary heat with a confirmed target followed by an explicit Heat-mode request when needed, rather than assuming a combined temperature call powers on every integration. Keep one existing activation deadline across both stages and native dispatch, recheck interlocks before each positive command, and retain Off reconciliation on failure or interruption. Already-Heat updates do not cycle power. Adapters without bounded staged dispatch defer these starts explicitly. No JSON or protection-policy change.
 
