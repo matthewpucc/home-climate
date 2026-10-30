@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.11
 
 - Separate confirmed-open cooling eligibility from measured window-effect demand weighting. A confirmed-open room can yield its ordinary shared-head cooling comfort floor and restart margin without first spending five minutes at least 0.5°F outside the band. Retain the active configured emergency floor and existing raw/forecast guard margins, including stronger cold-weather protection. Do not add immediate heating-ceiling relief or change the five-minute priority discount, mode holds, compressor timing or ownership rules.
 - Carry bounded confirmed-open context through planning and minimum-run retention. Unknown, unavailable, restored or assumed contacts withdraw the exception; ordinary report-on-change timestamps and the existing contact debounce remain supported. No JSON migration or fan/hardware change is required.
