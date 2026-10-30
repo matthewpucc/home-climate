@@ -215,8 +215,15 @@ passed recovery test. Keep Controller enabled Off and watch the bounded
 `commissioning` attributes on the Heater power guard sensor. Comfort control
 cannot be enabled while the test is active or its actual command/cleanup work
 is still pending, including after a failed test result.
+Versions 0.8.9 and 0.8.10 kept this result internally but accidentally omitted
+it from the sensor attributes. The corrected sensor exposes the bounded result
+on the same entity; there is no separate commissioning entity to find.
 The diagnostic records the current status/reason and bounded start/finish
-timestamps. The overall commissioning authorization lasts at most 600 seconds,
+timestamps. A completed result remains historical after restart, with invalid
+or unavailable stored timestamps shown as null. Restarting an active test still
+interrupts it and requires manual recovery; a previous `passed` result is not
+current readiness or authorization to resume a test.
+The overall commissioning authorization lasts at most 600 seconds,
 including the five-minute cooldown and command or persistence waits. Expiry
 requests dedicated relay Off and retains manual recovery; it cannot guarantee
 when a wireless command or physical cutoff completes. A late On or a service
@@ -366,10 +373,20 @@ imitate a drop, so this is **operational corroboration**, not isolated electrica
 proof. Inconclusive aggregate data alone does not trigger a shared AC cut when
 fresh native Off is acknowledged and no heater-only reading contradicts it.
 
-The Heater power guard diagnostic exposes `shutdown_stage`,
+The Heater power guard diagnostic exposes `shutdown_active`, `shutdown_stage`,
 `shutdown_confirmation`, `aggregate_stop` and the shared emergency-latch state.
 `state_only` and `aggregate_corroborated` describe different evidence; neither
 claims that a dedicated relay physically isolated the heater.
+After recovery has consumed the required native Off and dedicated-meter proof,
+there is no longer an active stop request. The sensor then shows
+`shutdown_active: false`, `shutdown_stage: idle`,
+`shutdown_confirmation: inactive` and `aggregate_stop: null`. The legacy
+`electrical_stop_confirmed` boolean is false in that inactive context; it is not
+a report of high heater power or a failed completed test. Read `commissioning`
+for the historical test result and the original meter for current watts.
+Pending, failed, latched or uncertain shutdown work retains its current
+diagnostics. This display distinction does not discard evidence used by the
+guard, change its safety gates or extend a recovery deadline.
 
 ### Relative drop option (0.8.4 or later)
 

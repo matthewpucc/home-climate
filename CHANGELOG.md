@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Publish the bounded relay-commissioning result on the existing Heater power guard sensor, including terminal status, reason and validated start/finish timestamps after restart. Keep interrupted tests latched for manual recovery; historical success never resumes a test or authorizes equipment commands.
+- Distinguish an active shutdown check from completed recovery. Inactive diagnostics show `shutdown_active: false`, an idle stage, inactive confirmation and no aggregate session, so an old optional aggregate timeout is not presented as a new recovery failure. Preserve current safety evidence, control decisions, thresholds and unattended recovery behavior.
+
 ## 0.8.10
 
 - Stage only explicitly supervised watt-meter relay commissioning: retain the ten-second relay acknowledgement, require trusted dedicated output below 100 W reported after actual On feedback and within 30 seconds of On dispatch, then maintain low-watt evidence with a maximum 30-second reporting gap while native control becomes ready within at most 300 seconds of On dispatch. Require native Off acknowledgement within ten seconds and new low-watt evidence within 30 seconds of actual Off dispatch, including acknowledgement time. Clip every stage by the existing 600-second authorization limit including cooldown.

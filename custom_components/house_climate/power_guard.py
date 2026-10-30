@@ -66,6 +66,17 @@ def _timestamp(value):
     raise ValueError("missing reporting timestamp")
 
 
+def _diagnostic_timestamp(value):
+    """Retain safe numeric history metadata without granting any control lease."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        value = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
 def _measurement(states, entity, units, now, *, maximum_age=TELEMETRY_MAX_AGE_SECONDS):
     value, attrs, reported = _state_parts(states.get(entity))
     if isinstance(value, bool) or value in (None, "unknown", "unavailable"):
@@ -474,7 +485,18 @@ class HeaterPowerGuard:
     @property
     def diagnostics(self):
         r = self._reading
-        return {"blocked": self.blocked, "reason": self._reason,
+        blocked = self.blocked
+        # A completed request leaves internal evidence available to the control
+        # code. Do not display its later expiry as a new active shutdown. This
+        # projection never clears, refreshes or otherwise changes that evidence.
+        shutdown_active = bool(blocked or self._latched or self._cut_owned
+            or self._restoring or self._cutting or self._restore_intent
+            or self._manual_recovery_required or self._emergency_ac_latched
+            or self.commissioning_active or self._shutdown_contradicted
+            or self._off_boundary() is not None or self._wall_observed_off_wall is not None
+            or self._service_tasks or self._positive_tasks or self._compensation_pending
+            or (self._action_task is not None and not self._action_task.done()))
+        return {"blocked": blocked, "reason": self._reason,
                 "latched": self._latched, "switch_cut_owned": self._cut_owned,
                 "power_cut_confirmed": self.power_cut_confirmed,
                 "restoring": self._restoring, "restore_attempts": self._restore_attempts,
@@ -484,12 +506,14 @@ class HeaterPowerGuard:
                 "heater_current_configured": self.bindings.heater_current is not None,
                 "heater_power_configured": getattr(self.bindings, "heater_power", None) is not None,
                 "heater_meter_kind": self._heater_meter()[3],
-                "electrical_stop_confirmed": self._heater_meter_stopped() is True,
-                "shutdown_stage": self._shutdown_stage,
-                "shutdown_confirmation": self._shutdown_confirmation,
+                "electrical_stop_confirmed": shutdown_active and self._heater_meter_stopped() is True,
+                "shutdown_active": shutdown_active,
+                "shutdown_stage": self._shutdown_stage if shutdown_active else "idle",
+                "shutdown_confirmation": self._shutdown_confirmation if shutdown_active else "inactive",
                 "wall_power_budget": self._wall_diagnostics(),
                 "circuit_enforced": False,
-                "aggregate_stop": self._aggregate_outcome.as_dict() if self._aggregate_outcome else None,
+                "aggregate_stop": (self._aggregate_outcome.as_dict()
+                                   if shutdown_active and self._aggregate_outcome else None),
                 "emergency_ac_enabled": self._emergency_enabled,
                 "emergency_ac_latched": self._emergency_ac_latched,
                 "emergency_ac_status": self._emergency_ac_status,
@@ -513,7 +537,7 @@ class HeaterPowerGuard:
             "blocked", "reason", "latched", "switch_cut_owned", "power_cut_confirmed",
             "restoring", "restore_attempts", "power_restore_inflight",
             "power_restore_cleanup_pending", "persistence_error", "live",
-            "shutdown_stage", "shutdown_confirmation", "aggregate_stop",
+            "shutdown_active", "shutdown_stage", "shutdown_confirmation", "aggregate_stop",
             "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "manual_recovery_required",
             "binding_identity_mismatch", "emergency_notification_error", "commissioning")}
@@ -635,6 +659,10 @@ class HeaterPowerGuard:
                                                        "restoring", "passed", "failed", "interrupted"})
         interrupted_test = ("commissioning" in data and (not valid_test or prior_test["active"]
                             or prior_test["status"] in {"preparing", "waiting_for_recovery", "restoring"}))
+        if valid_test and (interrupted_test or prior_test["status"] in {"passed", "failed", "interrupted"}):
+            # Only historical timestamps are restored. Saved phase deadlines,
+            # timing values and activity never establish a new control lease.
+            self._commissioning["started_at"] = _diagnostic_timestamp(prior_test.get("started_at"))
         if interrupted_test:
             # A process restart is not permission to resume a maintenance On.
             self._manual_recovery_required = True
@@ -643,7 +671,8 @@ class HeaterPowerGuard:
                 finished_at=self._wall_clock())
         elif isinstance(prior_test, dict) and prior_test.get("status") in {"passed", "failed", "interrupted"}:
             self._commissioning.update(status=prior_test["status"],
-                reason=str(prior_test.get("reason") or "Previous relay commissioning result")[:240])
+                reason=str(prior_test.get("reason") or "Previous relay commissioning result")[:240],
+                finished_at=_diagnostic_timestamp(prior_test.get("finished_at")))
         if self._manual_recovery_required:
             self._manual_recovery_wall = self._wall_clock()
         try:
