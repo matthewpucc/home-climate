@@ -6,6 +6,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from dataclasses import dataclass, replace
 import logging
+import math
 import threading
 import time
 from types import SimpleNamespace
@@ -127,8 +128,12 @@ class NativeAPI:
         self._uncertain_service_entities = set()
         self.service_notify = None
         self.settings_provider = None
+        # Volatile controller metadata survives a worker/executor replacement
+        # on this runtime, without becoming a persisted emergency-guard latch.
+        self.auxiliary_startup_failure = None
 
-    def request(self, path, body=None, *, window_authorization=None):
+    def request(self, path, body=None, *, window_authorization=None,
+                activation_deadline=None):
         if body is not None and not self.live:
             raise HAError("Shadow mode forbids all service calls")
         if threading.get_ident() == self.hass.loop_thread_id:
@@ -158,14 +163,21 @@ class NativeAPI:
             generation = self.controls._snapshot["generation"]
         timeout = 2 if self.stop_event.is_set() else 10
         deadline = time.monotonic() + timeout
+        bounded_activation = activation and activation_deadline is not None
+        if bounded_activation:
+            deadline = min(deadline, self._activation_deadline(activation_deadline))
+            if deadline <= time.monotonic():
+                raise HAActivationDeferred("Activation deadline expired before dispatch")
         dispatch = (NativeActivationDispatch(deadline, window_authorization)
-                    if activation and (self.controls is not None or window_authorization is not None) else None)
+                    if activation and (self.controls is not None or window_authorization is not None
+                                       or bounded_activation) else None)
         future = asyncio.run_coroutine_threadsafe(
             self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
                                 repair_epoch=repair_epoch), self.hass.loop
         )
         try:
-            return future.result(timeout=timeout + 1)
+            wait = max(0, deadline - time.monotonic()) if bounded_activation else timeout + 1
+            return future.result(timeout=wait)
         except FutureTimeout:
             # Cancellation alone cannot prevent a queued coroutine from starting
             # first when HA's loop resumes. The shared ticket closes that race.
@@ -439,6 +451,8 @@ class NativeAPI:
                 monotonic_now=time.monotonic(), climate_unit=self.hass.config.units.temperature_unit)
             if not checked:
                 raise HAActivationDeferred(checked.reason)
+        if activation and self.stop_event.is_set():
+            raise HAActivationDeferred("Controller is stopping; activation was not dispatched")
         if dispatch is not None:
             dispatch.begin()
         if controls and activation:
@@ -484,6 +498,26 @@ class NativeAPI:
 
     def service(self, domain, service, **data):
         return self.request(f"services/{domain}/{service}", data)
+
+    @staticmethod
+    def _activation_deadline(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise HAActivationDeferred("Activation deadline must be a finite monotonic time")
+        try:
+            deadline = float(value)
+        except (ValueError, OverflowError):
+            raise HAActivationDeferred("Activation deadline must be a finite monotonic time") from None
+        if not math.isfinite(deadline):
+            raise HAActivationDeferred("Activation deadline must be a finite monotonic time")
+        return deadline
+
+    def service_before(self, domain, service, *, deadline, **data):
+        """Bound positive dispatch without leaking controller metadata to HA."""
+        path = f"services/{domain}/{service}"
+        if self._is_activation(path, data):
+            deadline = self._activation_deadline(deadline)
+        return self.request(path, data,
+                            activation_deadline=deadline)
 
     def service_guarded(self, domain, service, *, ticket, **data):
         """Carry a prior plan's proof; never mint permission from current inputs."""

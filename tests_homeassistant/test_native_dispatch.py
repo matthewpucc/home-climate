@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -149,6 +150,7 @@ class NativeDispatchTests(unittest.IsolatedAsyncioTestCase):
         def started_submission(coroutine, loop):
             actual_futures.append(submit(coroutine, loop))
             return StartedFuture()
+        instant = time.monotonic()
         try:
             with patch(
                 "custom_components.house_climate.runtime.asyncio.run_coroutine_threadsafe",
@@ -156,7 +158,7 @@ class NativeDispatchTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await asyncio.to_thread(
                     executor.climate, heater, "heat", 86,
-                    await asyncio.to_thread(runtime.api.states), 0, heater=True,
+                    await asyncio.to_thread(runtime.api.states), instant, heater=True,
                 )
             self.assertTrue(cancellations)
             self.assertIn(heater, executor.pending)
@@ -173,7 +175,7 @@ class NativeDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime.controls.inflight, 0)
         self.assertEqual(runtime.controls.auxiliary_inflight, 0)
         await asyncio.to_thread(
-            executor.off, heater, await asyncio.to_thread(runtime.api.states), .1,
+            executor.off, heater, await asyncio.to_thread(runtime.api.states), instant + .1,
         )
         self.assertEqual(self.hass.states.get(heater).state, "off")
         self.assertTrue(any(
