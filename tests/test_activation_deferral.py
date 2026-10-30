@@ -191,9 +191,13 @@ class ActivationDeferralTests(unittest.TestCase):
                 ha.defer = False
                 executor.auxiliary(plan, ha.states(), 75)
                 executor.auxiliary(plan, ha.states(), 90)
+                if plan.heater_on:
+                    self.assertEqual([service for _, service, _ in ha.calls],
+                                     ["set_temperature", "set_hvac_mode"])
+                    executor.auxiliary(plan, ha.states(), 105)
                 self.assertNotIn(entity, executor.pending)
                 ha.defer = True
-                executor.auxiliary(Plan(), ha.states(), 105)
+                executor.auxiliary(Plan(), ha.states(), 120 if plan.heater_on else 105)
                 self.assertEqual(ha.data[entity]["state"], "off")
                 self.assertEqual(ha.calls[-1][2]["hvac_mode"], "off")
 

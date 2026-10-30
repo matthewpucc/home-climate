@@ -60,6 +60,22 @@ class HeadCycle:
     profile_signature: tuple | None = None
 
 
+@dataclass
+class AuxiliaryStartup:
+    target: float
+    since: float | None = None
+    phase: str = "target"
+    target_requested: bool = False
+    heat_requested: bool = False
+
+
+@dataclass
+class AuxiliaryFailure:
+    reason: str
+    baseline: tuple
+    waited_for_jobs: bool = False
+
+
 class Executor:
     """Nonblocking, acknowledged all-off barrier before any shared mode change."""
 
@@ -88,6 +104,10 @@ class Executor:
         self._shared_stop_context: tuple[str, str] | None = None
         self.head_transitions = HeadTransitions(config.heads.values())
         self._head_repair_epochs = {}
+        self._auxiliary_startup: AuxiliaryStartup | None = None
+        self._auxiliary_failure: AuxiliaryFailure | None = getattr(ha, "auxiliary_startup_failure", None)
+        if self._auxiliary_failure is not None and self.config.heater_entity is not None:
+            self._publish_auxiliary_failure(self.config.heater_entity)
 
     @staticmethod
     def available(state):
@@ -113,10 +133,13 @@ class Executor:
     def waiting_devices(self):
         return sorted(self.device_issues)
 
-    def ensure(self, entity, service, data, matches, states, now, *, force=False, fresh=False):
+    def ensure(self, entity, service, data, matches, states, now, *, force=False, fresh=False,
+               deadline=None):
         command = (service, tuple(sorted(data.items())))
         pending = self.pending.get(entity)
         observed = states.get(entity, {})
+        if deadline is not None and now >= deadline:
+            raise CommandTimeout(self._command_timeout_message(entity, service, data, observed))
         head_activation = (entity in self.head_cycles and service == "set_temperature"
                            and data.get("hvac_mode") in ("heat", "cool"))
         same_activation = (head_activation and pending is not None
@@ -182,7 +205,14 @@ class Executor:
                 guarded_service(entity.split(".")[0], service, ticket=ticket,
                                 entity_id=entity, **data)
             else:
-                self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
+                if deadline is not None:
+                    bounded = getattr(self.ha, "service_before", None)
+                    if not callable(bounded):
+                        raise HAActivationDeferred("Auxiliary startup requires bounded adapter dispatch")
+                    bounded(entity.split(".")[0], service, deadline=deadline,
+                            entity_id=entity, **data)
+                else:
+                    self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
         except HAActivationDeferred:
             self.head_transitions.record(
                 entity, "dispatch_deferred", observed,
@@ -217,6 +247,14 @@ class Executor:
             self.device_issues.pop(entity, None)
 
     def _issue(self, entity, reason, states=None, *, baseline=None, receipt=False):
+        if entity == self.config.heater_entity and self._auxiliary_startup is not None:
+            observed = self._states if states is None else states
+            pending = self.pending.get(entity)
+            self._remember_auxiliary_failure(AuxiliaryFailure(
+                reason, baseline if baseline is not None else pending.baseline if pending
+                else self.marker(observed.get(entity, {}))))
+            self._auxiliary_startup = None
+            self._publish_auxiliary_failure(entity)
         recovery = self.recoveries.get(entity)
         if recovery:
             recovery.reason = reason
@@ -315,10 +353,12 @@ class Executor:
             self._issue(entity, f"{exc}; off acknowledgement required", states)
         return False
 
-    def _climate_ensure(self, entity, service, data, matches, states, now, *, fresh=False):
+    def _climate_ensure(self, entity, service, data, matches, states, now, *, fresh=False,
+                        force=False, deadline=None):
         try:
             before = self.pending.get(entity)
-            acknowledged = self.ensure(entity, service, data, matches, states, now, fresh=fresh)
+            acknowledged = self.ensure(entity, service, data, matches, states, now,
+                                       fresh=fresh, force=force, deadline=deadline)
             pending = self.pending.get(entity)
             if (service == "set_hvac_mode" and data.get("hvac_mode") == "off"
                     and pending is not None and pending is not before and pending.receipt):
@@ -352,6 +392,14 @@ class Executor:
         return True
 
     def off(self, entity, states, now, *, preserve_capability=False):
+        if entity == self.config.heater_entity:
+            if self._auxiliary_startup is not None:
+                if self._auxiliary_startup.since is not None:
+                    # Target programming is a possible activation even after
+                    # its ACK was consumed and no Heat request was dispatched.
+                    self._issue(entity, "Auxiliary startup stopped before acknowledgement", states,
+                                baseline=self.marker(states.get(entity, {})))
+            self._auxiliary_startup = None
         observed = states.get(entity, {})
         if not preserve_capability:
             self.capability_blocks.pop(entity, None)
@@ -684,6 +732,10 @@ class Executor:
 
     def climate(self, entity, mode, target_f, states, now, heater=False, *, comfort_target_f=None):
         state = states.get(entity, {})
+        if heater and mode == "heat" and self._auxiliary_failure is not None:
+            self.off(entity, states, now, preserve_capability=True)
+            self._publish_auxiliary_failure(entity)
+            return
         if entity in self.head_cycles and (state.get("integration_repair") or {}).get("held"):
             return
         if not self.available(state):
@@ -714,6 +766,16 @@ class Executor:
             return
         if floor_configured and self._head_off_guard(entity, states, now):
             return
+        if heater and mode == "heat" and not self._auxiliary_native_trusted(state):
+            if self._auxiliary_startup is not None and self._auxiliary_startup.since is not None:
+                self._fail_auxiliary_startup(entity, "Auxiliary native feedback became untrusted", states, now)
+            else:
+                self.capability_blocks[entity] = {
+                    "kind": "capability", "missing_modes": [],
+                    "reason": "Auxiliary activation awaits trusted native feedback",
+                }
+                self._sync_issue(entity)
+            return
 
         def matches(observed):
             try:
@@ -721,8 +783,12 @@ class Executor:
             except (ValueError, TypeError):
                 return False
 
-        acknowledged = self._climate_ensure(
-            entity, "set_temperature", {"hvac_mode": mode, "temperature": target}, matches, states, now)
+        if heater and mode == "heat" and (self._auxiliary_startup is not None
+                                          or state.get("state") != "heat"):
+            acknowledged = self._start_auxiliary_heat(entity, target, matches, states, now)
+        else:
+            acknowledged = self._climate_ensure(
+                entity, "set_temperature", {"hvac_mode": mode, "temperature": target}, matches, states, now)
         if acknowledged:
             comfort = target_f if comfort_target_f is None else comfort_target_f
             self._acknowledge_head_run(entity, mode, comfort, to_f(target, self.unit), target, now)
@@ -742,6 +808,42 @@ class Executor:
             return
         if plan.heater_on and plan.auxiliary_fan_only:
             raise ControlFault("The auxiliary heater cannot request heat and fan-only together")
+        if not plan.heater_on:
+            self._consume_auxiliary_heat_ack(entity, states, now)
+            if (self._auxiliary_startup is not None
+                    and self._auxiliary_startup.since is not None):
+                self._issue(entity, "Auxiliary startup cancelled; Off acknowledgement required", states,
+                            baseline=self.marker(states.get(entity, {})))
+            self._auxiliary_startup = None
+        if self._auxiliary_failure is not None:
+            jobs_clear = self._auxiliary_jobs_clear(entity)
+            if not jobs_clear:
+                self._auxiliary_failure.waited_for_jobs = True
+            elif self._auxiliary_failure.waited_for_jobs:
+                # An Off report from before a late positive completion cannot
+                # establish safe rearm. Reconcile again after jobs drain.
+                self._auxiliary_failure.waited_for_jobs = False
+                recovery = self.recoveries.get(entity)
+                if recovery is not None:
+                    recovery.baseline = self.marker(states.get(entity, {}))
+                    recovery.off_receipt = False
+                    recovery.last_attempt = None
+                self._issue(entity, "Auxiliary command cleanup requires a new Off acknowledgement", states,
+                            baseline=self.marker(states.get(entity, {})))
+            stopped = self.off(entity, states, now, preserve_capability=True)
+            observed = states.get(entity, {})
+            attrs = observed.get("attributes", {})
+            if (not plan.heater_on and stopped and entity not in self.pending
+                    and entity not in self.recoveries and self.reports_off(observed)
+                    and not attrs.get("restored") and not attrs.get("assumed_state")
+                    and self._auxiliary_report_after(observed, self._auxiliary_failure.baseline)
+                    and self._auxiliary_jobs_clear(entity)):
+                self._remember_auxiliary_failure(None)
+                self.capability_blocks.pop(entity, None)
+                self._sync_issue(entity)
+            else:
+                self._publish_auxiliary_failure(entity)
+                return
         if not self.available(states.get(entity, {})):
             self._issue(entity, "Entity unavailable; off acknowledgement required", states)
         elif not self.ready(states.get(entity, {})):
@@ -767,6 +869,158 @@ class Executor:
                         states, now)
         else:
             self.off(entity, states, now)
+
+    def _auxiliary_jobs_clear(self, entity):
+        jobs = getattr(self.ha, "service_jobs", None)
+        uncertain = getattr(self.ha, "uncertain_service_jobs", None)
+        if not callable(jobs) or not callable(uncertain):
+            return False
+        try:
+            return not jobs({entity}) and not uncertain({entity})
+        except Exception:
+            return False
+
+    def _remember_auxiliary_failure(self, failure):
+        if failure is not None and not self._auxiliary_jobs_clear(self.config.heater_entity):
+            failure.waited_for_jobs = True
+        self._auxiliary_failure = failure
+        self.ha.auxiliary_startup_failure = failure
+
+    @staticmethod
+    def _auxiliary_native_trusted(observed):
+        attrs = observed.get("attributes", {})
+        return (observed.get("state") in ("off", "heat", "fan_only")
+                and not attrs.get("restored") and not attrs.get("assumed_state")
+                and attrs.get("hvac_action") != "cooling"
+                and not (observed.get("state") != "heat" and attrs.get("hvac_action") == "heating"))
+
+    @staticmethod
+    def _auxiliary_report_after(observed, baseline):
+        try:
+            raw = observed.get("last_reported") or observed.get("last_updated")
+            reported = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if reported.tzinfo is None or not math.isfinite(reported.timestamp()):
+                return False
+            previous = (baseline[4] or baseline[5]) if baseline else None
+            if previous is None:
+                return True
+            earlier = datetime.fromisoformat(previous.replace("Z", "+00:00"))
+            return earlier.tzinfo is not None and reported > earlier
+        except (AttributeError, TypeError, ValueError, OverflowError, IndexError):
+            return False
+
+    def _trusted_auxiliary_feedback(self, entity, observed):
+        if not self._auxiliary_native_trusted(observed):
+            return False
+        pending = self.pending.get(entity)
+        return self._auxiliary_report_after(observed, pending.baseline if pending else None)
+
+    def _consume_auxiliary_heat_ack(self, entity, states, now):
+        """Observe a completed stage before stopping; never dispatch Heat here."""
+        startup, pending = self._auxiliary_startup, self.pending.get(entity)
+        observed = states.get(entity, {})
+        if (startup is None or startup.phase != "heat" or startup.since is None
+                or not startup.since <= now < startup.since + self.config.command_timeout_seconds
+                or pending is None or not pending.receipt
+                or pending.command != ("set_hvac_mode", (("hvac_mode", "heat"),))
+                or not self._auxiliary_jobs_clear(entity)
+                or not self._trusted_auxiliary_feedback(entity, observed)):
+            return
+        try:
+            matched = (observed.get("state") == "heat"
+                       and abs(float(observed.get("attributes", {}).get("temperature")) - startup.target) < .05)
+        except (TypeError, ValueError):
+            matched = False
+        if matched:
+            self.pending.pop(entity, None)
+            self._auxiliary_startup = None
+
+    def _publish_auxiliary_failure(self, entity):
+        self.capability_blocks[entity] = {
+            "kind": "auxiliary_startup", "missing_modes": [],
+            "reason": (f"{self._auxiliary_failure.reason}; auxiliary startup held until a non-heat "
+                       "request, confirmed Off and actual command cleanup. Controller toggles alone do not reset it"),
+        }
+        self._sync_issue(entity)
+
+    def _fail_auxiliary_startup(self, entity, reason, states, now):
+        pending = self.pending.get(entity)
+        if self._auxiliary_failure is None:
+            baseline = pending.baseline if pending else self.marker(states.get(entity, {}))
+            self._remember_auxiliary_failure(AuxiliaryFailure(reason, baseline))
+        self._auxiliary_startup = None
+        self._publish_auxiliary_failure(entity)
+        self._issue(entity, reason, states)
+        self._recovery_off(entity, states, now)
+        return False
+
+    def _start_auxiliary_heat(self, entity, target, matches, states, now):
+        """Program the safe target, then explicitly supply Heat/fan power once."""
+        if not callable(getattr(self.ha, "service_before", None)):
+            self.capability_blocks[entity] = {
+                "kind": "capability", "missing_modes": [],
+                "reason": "Auxiliary startup requires an adapter with bounded activation dispatch",
+            }
+            self._sync_issue(entity)
+            return False
+        startup = self._auxiliary_startup
+        if startup is None:
+            if not self._auxiliary_jobs_clear(entity):
+                self.capability_blocks[entity] = {
+                    "kind": "capability", "missing_modes": [],
+                    "reason": "Auxiliary startup awaits verified cleanup of prior device commands",
+                }
+                self._sync_issue(entity)
+                return False
+            startup = self._auxiliary_startup = AuxiliaryStartup(target)
+            pending = self.pending.get(entity)
+            if pending and pending.command[0] == "set_temperature":
+                startup.since, startup.target_requested = pending.since, True
+                pending.fresh = True
+        if startup.target != target:
+            return self._fail_auxiliary_startup(
+                entity, "Auxiliary target changed during startup", states, now)
+        since = now if startup.since is None else startup.since
+        deadline = since + self.config.command_timeout_seconds
+        if now < since or now >= deadline:
+            return self._fail_auxiliary_startup(
+                entity, "Auxiliary activation acknowledgement timed out", states, now)
+        if startup.phase == "target":
+            def target_matches(observed):
+                try:
+                    raw = observed.get("attributes", {}).get("temperature")
+                    return (self._trusted_auxiliary_feedback(entity, observed)
+                            and not isinstance(raw, bool) and math.isfinite(float(raw))
+                            and abs(float(raw) - target) < .05)
+                except (ValueError, TypeError):
+                    return False
+            acknowledged = self._climate_ensure(entity, "set_temperature",
+                {"hvac_mode": "heat", "temperature": target}, target_matches, states, now,
+                force=not startup.target_requested, fresh=True, deadline=deadline)
+            pending = self.pending.get(entity)
+            if pending and pending.receipt:
+                startup.target_requested = True
+                if startup.since is None:
+                    startup.since = pending.since
+            if entity in self.recoveries:
+                return self._fail_auxiliary_startup(
+                    entity, self.recoveries[entity].reason, states, now)
+            if not acknowledged:
+                return False
+            startup.phase = "heat"
+        def heat_matches(observed):
+            return self._trusted_auxiliary_feedback(entity, observed) and matches(observed)
+        acknowledged = self._climate_ensure(entity, "set_hvac_mode", {"hvac_mode": "heat"},
+            heat_matches, states, now, force=not startup.heat_requested, fresh=True, deadline=deadline)
+        pending = self.pending.get(entity)
+        if pending and pending.receipt:
+            startup.heat_requested = True
+        if entity in self.recoveries:
+            return self._fail_auxiliary_startup(
+                entity, self.recoveries[entity].reason, states, now)
+        if acknowledged:
+            self._auxiliary_startup = None
+        return acknowledged
 
     def fan(self, entity, percentage, plan, states, now):
         """Circulation is optional: retain a visible issue and retry one fan."""
@@ -984,6 +1238,14 @@ class Executor:
         failures = []
         snapshot = self._states if states is None else states
         old_pending = dict(self.pending)
+        if self._auxiliary_startup is not None:
+            entity = self.config.heater_entity
+            pending = self.pending.get(entity)
+            if self._auxiliary_failure is None:
+                self._remember_auxiliary_failure(AuxiliaryFailure(
+                    "Auxiliary startup was interrupted", pending.baseline if pending
+                    else self.marker(snapshot.get(entity, {}))))
+            self._auxiliary_startup = None
         for entity in [*([self.config.heater_entity] if self.config.heater_entity else []), *self.config.heads.values(), *self.config.fans.values()]:
             request_id = None
             try:
@@ -1018,6 +1280,8 @@ class Executor:
         self.device_issues.clear()
         self.recoveries.clear()
         self.capability_blocks.clear()
+        if self._auxiliary_failure is not None:
+            self._publish_auxiliary_failure(self.config.heater_entity)
         for entity in failures:
             if entity in self.config.climate_entities:
                 previous = old_pending.get(entity)

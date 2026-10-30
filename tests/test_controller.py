@@ -69,6 +69,17 @@ class FakeHA:
     def states(self):
         return copy.deepcopy(self.data)
 
+    def service_before(self, domain, service, *, deadline, **data):
+        # The core fake dispatches immediately on its caller's virtual clock.
+        # Native tests exercise the real queued deadline and lease checks.
+        return self.service(domain, service, **data)
+
+    def service_jobs(self, entities):
+        return ()
+
+    def uncertain_service_jobs(self, entities):
+        return ()
+
     def service(self, domain, service, **data):
         self.calls.append((domain, service, data))
         entity = data["entity_id"]

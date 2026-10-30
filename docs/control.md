@@ -70,6 +70,36 @@ Before reload, a per-entry command barrier rejects old queued starts and waits f
 
 Reload success is not proof of device Off. Rejoining requires fresh post-reload Off feedback and normal off-time checks. Calls then use the head's currently validated modes; a still-missing mode remains blocked without withholding all otherwise valid calls solely for that loss. The incident and attempt budget clear only after the frozen missing modes return in fresh, stable reports. Reload attempts use 15/30/60-minute backoff and pause after three attempts in one unresolved incident.
 
+## Auxiliary heat startup
+
+A temperature request does not necessarily turn a climate entity on. Some
+integrations accept a combined temperature/Heat request but only program the
+thermostat while its power remains Off. Auxiliary startup therefore confirms the
+intended target and explicitly requests Heat when the device is not already in
+that mode. An already-Heat device can update its target without a power cycle.
+
+Target programming itself may enable heating on a powered device, so both stages
+remain positive commands subject to the existing probe, ownership, heartbeat and
+electrical interlocks. The sequence shares one existing command-timeout budget;
+the native adapter carries its original deadline through HA's queue rather than
+granting a new service window at the second stage. An adapter that cannot enforce
+this deadline defers a staged start instead of sending an unbounded call.
+Ordinary heat-pump commands and shutdown retain their existing paths.
+
+Completion requires the requested target and Heat-mode feedback. An API receipt
+or an optimistically updated mode is not independent proof of physical heating.
+The separate power guard and meter supervision remain effective. Rejection,
+timeout, changed intent or interrupted ownership uses existing Off reconciliation
+and pending-job cleanup; it does not permit an old delayed Heat request to start
+after a stop. No new startup grace, meter threshold, automatic shared-AC recovery
+or configuration field is introduced.
+
+A failed staged start is held for the remainder of that continuous heat request.
+Internal Off reconciliation does not start another On loop. Rearming requires a
+non-heat request, trusted fresh Off feedback, and completion of actual pending or
+uncertain service work. Controller toggles alone are not a recovery
+acknowledgement. Existing independent persisted guard latches remain separate.
+
 ## Heater load shedding
 
 The independent electrical guard runs on cached-state events and 5-second checks while native live commands are allowed. It remains active when comfort is disabled. Shadow mode performs no writes.
