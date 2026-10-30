@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Separate confirmed-open cooling eligibility from measured window-effect demand weighting. A confirmed-open room can yield its ordinary shared-head cooling comfort floor and restart margin without first spending five minutes at least 0.5°F outside the band. Retain the active configured emergency floor and existing raw/forecast guard margins, including stronger cold-weather protection. Do not add immediate heating-ceiling relief or change the five-minute priority discount, mode holds, compressor timing or ownership rules.
+- Carry bounded confirmed-open context through planning and minimum-run retention. Unknown, unavailable, restored or assumed contacts withdraw the exception; ordinary report-on-change timestamps and the existing contact debounce remain supported. No JSON migration or fan/hardware change is required.
+- Fence relief-dependent positive starts at native HA dispatch against the original scoped contact/probe/profile/outdoor evidence and its expiry. Defer changed or expired authorization; retain Off and ordinary command paths. CLI/HTTP adapters lacking guarded dispatch defer exception-dependent starts explicitly.
+
 ## 0.8.10
 
 - Stage only explicitly supervised watt-meter relay commissioning: retain the ten-second relay acknowledgement, require trusted dedicated output below 100 W reported after actual On feedback and within 30 seconds of On dispatch, then maintain low-watt evidence with a maximum 30-second reporting gap while native control becomes ready within at most 300 seconds of On dispatch. Require native Off acknowledgement within ten seconds and new low-watt evidence within 30 seconds of actual Off dispatch, including acknowledgement time. Clip every stage by the existing 600-second authorization limit including cooldown.

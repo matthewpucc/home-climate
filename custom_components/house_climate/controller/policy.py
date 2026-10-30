@@ -95,6 +95,8 @@ class Plan:
     window_states: dict = field(default_factory=dict)
     protection_context: dict = field(default_factory=dict)
     decision_valid_until_monotonic: float | None = None
+    window_authorizations: dict = field(default_factory=dict)
+    window_authorization_heads: list[str] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -278,7 +280,8 @@ class Policy:
         return {"score": score, "target_f": chosen["target"], "missing_modes": missing,
                 "emergency": chosen.get("emergency", False), "violation_f": chosen.get("violation_f", 0)}
 
-    def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F", *, context=None) -> Plan:
+    def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F", *, context=None,
+               monotonic_now=None) -> Plan:
         self.context = context if context is not None else self.operating.environment(states, now)
         LOW, HIGH = limits(self.config, self.context)
         profiles = {key: settings.profile(room, now, self.config.timezone, key) for key, room in self.config.zones.items()}
@@ -550,4 +553,9 @@ class Policy:
             plan.reasons.append("Auxiliary heater circulating air in fan-only mode")
         from .recovery_inputs import signature
         plan.recovery_inputs = signature(self.config, states, now, settings, climate_unit)
+        from .window_authorization import refresh_window_authorizations
+        tick = self.operating.clock() if monotonic_now is None else monotonic_now
+        refresh_window_authorizations(plan, self.config, states, now, settings,
+            monotonic_now=tick, expires_at_monotonic=tick + self.config.decision_interval_seconds,
+            climate_unit=climate_unit)
         return plan

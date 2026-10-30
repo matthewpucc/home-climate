@@ -168,7 +168,21 @@ class Executor:
         if service == "set_hvac_mode" and data.get("hvac_mode") == "off":
             self._record_controller_head_stop(entity, states, previous_pending=pending)
         try:
-            self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
+            plan = self._diagnostic_plan
+            head = next((key for key, value in self.config.heads.items() if value == entity), None)
+            from .window_authorization import window_relief_required
+            guarded = (head_activation and data.get("hvac_mode") == "cool" and plan is not None
+                       and (head in plan.window_authorization_heads
+                            or window_relief_required(self.config, head, plan, states)))
+            if guarded:
+                ticket = plan.window_authorizations.get(head)
+                guarded_service = getattr(self.ha, "service_guarded", None)
+                if ticket is None or guarded_service is None:
+                    raise HAActivationDeferred("Window-relieved cooling requires a current guarded adapter authorization")
+                guarded_service(entity.split(".")[0], service, ticket=ticket,
+                                entity_id=entity, **data)
+            else:
+                self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
         except HAActivationDeferred:
             self.head_transitions.record(
                 entity, "dispatch_deferred", observed,
@@ -536,6 +550,7 @@ class Executor:
             return None
         return tuple((name, tuple(plan.room_targets[name].get(field) for field in
                                  ("low_f", "high_f", "target_f", "comfort_enabled")),
+                      name in getattr(plan, "protection_context", {}).get("confirmed_open_rooms", ()),
                       tuple(sorted(mode for mode, detail in getattr(plan, "protection_context", {}).get("window_effects", {}).get(name, {}).items()
                                    if detail.get("active"))),
                       limits(self.config, getattr(plan, "protection_context", None)))

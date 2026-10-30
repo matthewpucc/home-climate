@@ -189,6 +189,9 @@ class OperatingState:
                 else:
                     self.active_emergencies.discard(pair)
                     self.previous_emergencies.pop(pair, None)
+        confirmed_open = tuple(sorted(name for name, contact in contacts.items()
+                                      if contact["state"] == "open"))
         result = replace(context, emergencies=emergencies, window_effects=effects,
-                         window_states=contacts, valid_until_monotonic=deadline)
+                         window_states=contacts, confirmed_open_rooms=confirmed_open,
+                         valid_until_monotonic=deadline)
         return replace(result, preferred_emergency_mode=preferred_emergency(result))

@@ -18,6 +18,8 @@ def contact_state(state):
     attrs = state.get("attributes")
     if isinstance(attrs, Mapping) and attrs.get("restored") is True:
         return "unknown", "restored"
+    if isinstance(attrs, Mapping) and attrs.get("assumed_state") is True:
+        return "unknown", "assumed"
     raw = state.get("state")
     if raw == "on":
         return "open", None

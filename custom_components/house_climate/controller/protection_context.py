@@ -25,6 +25,11 @@ def window_affected(context, room, mode):
 
 
 def soft_yield(context, room, mode):
+    # A deliberately open room can yield its normal cooling veto immediately
+    # after contact confirmation. Raw/forecast hard limits are checked first by
+    # every head guard; measured-effect qualification still owns demand weights.
+    if mode == "cool" and room in value(context, "confirmed_open_rooms", ()):
+        return True
     opposing = "heat" if mode == "cool" else "cool"
     return window_affected(context, room, opposing)
 
@@ -63,6 +68,9 @@ class ProtectionContext:
     emergencies: dict = field(default_factory=dict)
     window_effects: dict = field(default_factory=dict)
     window_states: dict = field(default_factory=dict)
+    # Bounded configured room IDs only. Share debounced contact evidence with
+    # fresh guards without serializing contact entities or pending timestamps.
+    confirmed_open_rooms: tuple[str, ...] = ()
     preferred_emergency_mode: str | None = None
     warnings: tuple = ()
     valid_until_monotonic: float | None = None
