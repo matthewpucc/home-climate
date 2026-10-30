@@ -17,6 +17,8 @@ from homeassistant.helpers.event import async_track_state_change_event
 from .const import SIGNAL_STATUS
 from .controller.__main__ import run_loop
 from .controller.ha import HAActivationDeferred, HAError
+from .controller.config import Settings
+from .controller.window_authorization import WindowAuthorization, check_window_authorization
 from .recovery import RecoveryManager
 from .repair_gate import RepairGate
 
@@ -77,8 +79,9 @@ def controller_entity_ids(config):
 class NativeActivationDispatch:
     """Serialize worker abandonment with HA-loop dispatch for one positive call."""
 
-    def __init__(self, deadline):
+    def __init__(self, deadline, window_authorization=None):
         self.deadline = deadline
+        self.window_authorization = window_authorization
         self._lock = threading.Lock()
         self._dispatched = False
         self._abandoned = False
@@ -106,6 +109,7 @@ class NativeAPI:
 
     def __init__(self, hass, live, stop_event, config):
         self.hass = hass
+        self.config = config
         self.live = live
         self.stop_event = stop_event
         self.ownership_entity = config.entity("heater_owned")
@@ -122,8 +126,9 @@ class NativeAPI:
         self._service_jobs = {}
         self._uncertain_service_entities = set()
         self.service_notify = None
+        self.settings_provider = None
 
-    def request(self, path, body=None):
+    def request(self, path, body=None, *, window_authorization=None):
         if body is not None and not self.live:
             raise HAError("Shadow mode forbids all service calls")
         if threading.get_ident() == self.hass.loop_thread_id:
@@ -153,7 +158,8 @@ class NativeAPI:
             generation = self.controls._snapshot["generation"]
         timeout = 2 if self.stop_event.is_set() else 10
         deadline = time.monotonic() + timeout
-        dispatch = NativeActivationDispatch(deadline) if self.controls is not None and activation else None
+        dispatch = (NativeActivationDispatch(deadline, window_authorization)
+                    if activation and (self.controls is not None or window_authorization is not None) else None)
         future = asyncio.run_coroutine_threadsafe(
             self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
                                 repair_epoch=repair_epoch), self.hass.loop
@@ -422,6 +428,17 @@ class NativeAPI:
             # Check on HA's loop immediately before dispatch, not against an old
             # worker snapshot. Off requests always remain allowed.
             self.power_guard.check_activation(body.get("entity_id"), body)
+        if activation and dispatch is not None and dispatch.window_authorization is not None:
+            states = {state["entity_id"]: state for state in self._read_states()}
+            config = replace(self.config, timezone=self.hass.config.time_zone)
+            now = datetime.now(timezone.utc)
+            settings = (self.settings_provider(states, config, now)
+                        if self.settings_provider else Settings.read(states, config))
+            checked = check_window_authorization(dispatch.window_authorization, config,
+                body.get("entity_id"), body.get("hvac_mode"), states, now, settings,
+                monotonic_now=time.monotonic(), climate_unit=self.hass.config.units.temperature_unit)
+            if not checked:
+                raise HAActivationDeferred(checked.reason)
         if dispatch is not None:
             dispatch.begin()
         if controls and activation:
@@ -467,6 +484,13 @@ class NativeAPI:
 
     def service(self, domain, service, **data):
         return self.request(f"services/{domain}/{service}", data)
+
+    def service_guarded(self, domain, service, *, ticket, **data):
+        """Carry a prior plan's proof; never mint permission from current inputs."""
+        if (self._is_activation(f"services/{domain}/{service}", data)
+                and not isinstance(ticket, WindowAuthorization)):
+            raise HAActivationDeferred("Window authorization is missing")
+        return self.request(f"services/{domain}/{service}", data, window_authorization=ticket)
 
 
 class ControllerRuntime:
@@ -517,6 +541,7 @@ class ControllerRuntime:
                                    self._async_comfort_changed, self.wake_event)
         try:
             await self.comfort.async_load()
+            self.api.settings_provider = self.comfort.settings
             await self.recovery.capabilities.async_load(entry_id)
             if not self.config.legacy:
                 from .controls import NativeControls

@@ -75,7 +75,8 @@ class DecisionCadence:
                       context.tie_mode, context.preferred_emergency_mode, emergencies)
         return (tuple(profiles), tuple(sorted(settings.numbers.items())),
                 tuple(sorted((key, value.isoformat()) for key, value in settings.times.items())),
-                tuple(sorted(settings.toggles.items())), effects, protection)
+                tuple(sorted(settings.toggles.items())), effects, protection,
+                context.confirmed_open_rooms)
 
     def _warning(self, message):
         if message not in self._safety_warnings:
@@ -249,7 +250,8 @@ class DecisionCadence:
             # In particular, persistent-outlier confirmation must not restart at
             # every slow decision or wait another interval after a safety breach.
             self.policy.sensors = deepcopy(self.sensors)
-            self.cached_plan = self.policy.decide(states, now, settings, climate_unit, context=context)
+            self.cached_plan = self.policy.decide(states, now, settings, climate_unit,
+                                                  context=context, monotonic_now=stamp)
             self.next_decision = stamp + self.interval
             self._signature = signature
             self._decision_warnings = [warning for warning in self.cached_plan.warnings if warning not in sensor_warnings]
@@ -264,5 +266,9 @@ class DecisionCadence:
         plan.decision_valid_until_monotonic = context.valid_until_monotonic
         from .recovery_inputs import signature
         plan.recovery_inputs = signature(self.config, states, now, settings, climate_unit)
+        from .window_authorization import refresh_window_authorizations
+        refresh_window_authorizations(plan, self.config, states, now, settings,
+            monotonic_now=stamp, expires_at_monotonic=self.next_decision,
+            climate_unit=climate_unit)
         plan.warnings = list(dict.fromkeys(self._decision_warnings + sensor_warnings + self._safety_warnings))
         return plan

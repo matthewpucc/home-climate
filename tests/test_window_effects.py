@@ -119,7 +119,10 @@ class WindowEffectTests(unittest.TestCase):
         held = replace(self.settings, room_profiles={"alpha": self.cfg.zones["alpha"].profile})
         plan = self.tick(421, settings=held)
         self.assertFalse(plan.protection_context["window_effects"]["alpha"]["heat"]["active"])
-        self.assertNotIn("shared", plan.head_targets_f)
+        self.assertEqual(plan.room_targets["alpha"]["effective_comfort_priority"]["heat"], 1)
+        # Resetting demand weighting does not discard independently confirmed
+        # open-contact cooling relief.
+        self.assertIn("shared", plan.head_targets_f)
         changed = replace(held, room_profiles={"alpha": Profile(target_f=70, half_band_f=1, priority=1)})
         plan = self.tick(422, settings=changed)
         self.assertNotIn("alpha", plan.protection_context["window_effects"])

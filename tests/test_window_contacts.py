@@ -83,6 +83,17 @@ class WindowContactTests(unittest.TestCase):
         self.assertEqual(self.observer.observe(data, NOW + timedelta(seconds=120), monotonic_now=120)["alpha"]["state"], "open")
         self.assertEqual(self.observer.observe(data, NOW + timedelta(days=3), monotonic_now=3 * 86400)["alpha"]["state"], "open")
 
+    def test_assumed_contact_cannot_retain_confirmed_open_evidence(self):
+        self.observe("on", 0)
+        self.assertEqual(self.observe("on", 120)["state"], "open")
+        result = self.observe("on", 121, assumed_state=True)
+        self.assertEqual(result["state"], "unknown")
+        self.assertEqual(result["last_confirmed_state"], "open")
+        self.assertEqual(result["contact_issues"][CONTACT], "assumed")
+        self.assertEqual(self.observe("on", 122)["state"], "unknown")
+        self.assertEqual(self.observe("on", 241)["state"], "unknown")
+        self.assertEqual(self.observe("on", 242)["state"], "open")
+
     def test_one_known_open_proves_open_but_closed_requires_all_contacts(self):
         cfg = replace(self.cfg, zones={**self.cfg.zones,
                                       "alpha": replace(self.cfg.zones["alpha"], windows=(CONTACT, SECOND))})
@@ -167,7 +178,7 @@ class WindowContactTests(unittest.TestCase):
         cfg = Config.from_dict(configuration())
         self.assertEqual(WindowContacts(cfg).observe({CONTACT: {"state": "on"}}, NOW), {})
 
-    def test_open_window_diagnostics_do_not_apply_an_unapproved_control_rule(self):
+    def test_contact_metadata_preserves_uncontested_conditioning_requests(self):
         plain = Config.from_dict(configuration())
         baseline, configured = Policy(plain), Policy(self.cfg)
         for seconds in (0, 120, 300):
@@ -180,6 +191,7 @@ class WindowContactTests(unittest.TestCase):
                 result.pop("window_states")
                 result.pop("recovery_inputs")
                 result.pop("decision_valid_until_monotonic")
+                result["protection_context"].pop("confirmed_open_rooms", None)
             self.assertEqual(observed, reference)
 
     def test_window_never_suppresses_raw_shared_room_protection(self):
@@ -207,7 +219,7 @@ class WindowContactTests(unittest.TestCase):
         self.assertNotIn("beta", plan.rooms)
         self.assertIn("alpha", plan.window_states)
 
-    def test_maintenance_updates_contact_diagnostics_without_extra_comfort_decision(self):
+    def test_confirmed_contact_rechecks_comfort_before_long_decision_interval(self):
         cfg = replace(self.cfg, decision_interval_seconds=900)
         policy = Policy(cfg)
         policy.decide = Mock(wraps=policy.decide)
@@ -217,8 +229,9 @@ class WindowContactTests(unittest.TestCase):
         settings = Settings.read({}, cfg)
         cadence.decide(data, NOW, settings, monotonic_now=0)
         plan = cadence.decide(data, NOW + timedelta(seconds=120), settings, monotonic_now=120)
-        self.assertEqual(policy.decide.call_count, 1)
+        self.assertEqual(policy.decide.call_count, 2)
         self.assertEqual(plan.window_states["alpha"]["state"], "open")
+        self.assertEqual(plan.protection_context["confirmed_open_rooms"], ("alpha",))
 
 
 if __name__ == "__main__":
