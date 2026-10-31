@@ -2,8 +2,10 @@
 
 Reported real power is not RMS branch current. The grid-input operating budget
 is twelve times the lower fresh wall-phase voltage, with sustained input
-evidence. Whole-circuit telemetry is advisory and is never a control input or
-a substitute for missing grid-input telemetry. Branch amps are not measured.
+evidence. Whole-circuit load is not enforced. Fresh positive circuit power with
+battery reserve qualifies an exception to the aggregate-output limits; it is
+not proof of charging or a substitute for grid-input telemetry. Branch amps
+are not measured.
 
 The native thermostat is stopped first, followed by an optional dedicated plug.
 An explicitly enabled shared-AC fallback is a final emergency action with manual
@@ -112,10 +114,21 @@ class PowerReading:
     circuit_issue: str | None = None
 
     @property
+    def output_limits_bypassed(self):
+        """Only validated current circuit consumption and reserve qualify.
+
+        These values come from evaluate_power, never from persisted evidence.
+        Positive circuit watts do not establish that the inverter is charging.
+        """
+        return (not self.circuit_issue and self.circuit_w is not None
+                and self.circuit_w > 0 and self.battery_percent is not None
+                and BATTERY_RESERVE_PERCENT < self.battery_percent <= 100)
+
+    @property
     def safe_to_rearm(self):
         return (not self.issue and self.input_budget_w is not None
                 and self.input_w < self.input_budget_w * .85
-                and self.output_w < OUTPUT_SPIKE_W * .8
+                and (self.output_limits_bypassed or self.output_w < OUTPUT_SPIKE_W * .8)
                 and (self.heater_a is None or self.heater_a < 1)
                 and (self.heater_w is None or self.heater_w < HEATER_OFF_MAX_W)
                 and self.battery_percent > BATTERY_RESERVE_PERCENT)
@@ -132,8 +145,8 @@ def evaluate_power(states, bindings: PowerBindings, now=None):
         values["circuit_w"] = _measurement(states, bindings.circuit_power,
                                          {"W": 1, "kW": 1000}, now)
     except ValueError as exc:
-        # Advisory telemetry is still diagnosed, never replaced with zero,
-        # and cannot inhibit heat or prevent verified recovery.
+        # Unknown is not zero or proof of an outage. It cannot qualify the
+        # output exception, but does not independently inhibit heat/recovery.
         values["circuit_issue"] = str(exc)[:512]
     specs = (
         ("input_w", bindings.input_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
@@ -148,10 +161,10 @@ def evaluate_power(states, bindings: PowerBindings, now=None):
             # An explicitly absent meter is unknown, never a fresh zero.
             continue
         try:
-            if key == "heater_w":
+            if key in {"heater_w", "battery_percent"}:
                 _, attrs, _ = _state_parts(states.get(entity))
                 if attrs.get("restored") or attrs.get("assumed_state"):
-                    raise ValueError(f"{entity}: power report is restored or assumed")
+                    raise ValueError(f"{entity}: {key} report is restored or assumed")
             values[key] = _measurement(states, entity, units, now, maximum_age=age)
         except ValueError as exc:
             missing.append(str(exc))
@@ -178,7 +191,8 @@ def evaluate_power(states, bindings: PowerBindings, now=None):
     # The heater plug is downstream of the inverter. Its current is useful for
     # telemetry validation and proving low load before rearming, but must not
     # impose the wall-input 12 A ceiling on normal battery-supplied output.
-    if values.get("output_w", -1) >= OUTPUT_SPIKE_W:
+    if (values.get("output_w", -1) >= OUTPUT_SPIKE_W
+            and not PowerReading(**values).output_limits_bypassed):
         issue = f"Elite output spike reached {OUTPUT_SPIKE_W:g} W"
     elif 0 <= values.get("battery_percent", -1) <= BATTERY_RESERVE_PERCENT:
         issue = "Elite battery is at or below the 40% network reserve"
@@ -475,7 +489,7 @@ class HeaterPowerGuard:
             "role": "circuit", "status": "advisory", "enforced": False,
             "reading_status": "unavailable" if r.circuit_issue else "available",
             "reason": ("Advisory only; " + r.circuit_issue if r.circuit_issue else
-                       "Advisory circuit reading; not used for equipment control"),
+                       "Advisory circuit load; positive watts can qualify the output-limit exception"),
             "source": self.bindings.circuit_power, "latest_w": r.circuit_w,
             "reported_at": stamp, "first_reported_at": None, "report_count": 0,
             "evidence_seconds": 0, "minimum_w": None,
@@ -512,6 +526,7 @@ class HeaterPowerGuard:
                 "shutdown_confirmation": self._shutdown_confirmation if shutdown_active else "inactive",
                 "wall_power_budget": self._wall_diagnostics(),
                 "circuit_enforced": False,
+                "output_limits_bypassed": r.output_limits_bypassed,
                 "aggregate_stop": (self._aggregate_outcome.as_dict()
                                    if shutdown_active and self._aggregate_outcome else None),
                 "emergency_ac_enabled": self._emergency_enabled,
@@ -545,6 +560,7 @@ class HeaterPowerGuard:
         stable["wall_power_budget"] = ((wall.qualified_sources, wall.pending_sources,
                                       wall.unavailable_sources) if wall is not None else None)
         stable["circuit_advisory_health"] = self._reading.circuit_issue
+        stable["output_limits_bypassed"] = self._reading.output_limits_bypassed
         if stable != self._last_diagnostics:
             self._last_diagnostics = stable
             self.notify()
@@ -2047,8 +2063,30 @@ class HeaterPowerGuard:
                     "seen_clock": None, "failure": None, "identity": self._binding_identity(),
                     "native_ready": False, "off_acknowledged": False}
                 self._supervised_phase("relay_on", "Requesting dedicated relay On under watt supervision")
+
+            def before_restore_dispatch():
+                # The service task is queued after the persistence recheck.
+                # Revalidate at its actual dispatch, including time-only loss
+                # of the circuit/reserve exception. Its own tracked job means
+                # _isolated_recovery_reading cannot be used at this boundary.
+                if (not self.live or self._closing or self._closed
+                        or self._restore_interrupted or self._manual_recovery_required
+                        or self._identity_mismatch or self._manual_power_seen
+                        or self._persistence_error or self.pending_external_jobs()
+                        or self._compensation_pending or not self._cut_owned
+                        or not self._observe_isolation(self._wall_clock())
+                        or generation != (self._isolation_revision, self._binding_identity(), self._cut_owned)
+                        or not self._switch_observed("off")
+                        or self._heater_meter_stopped(after=self._isolation_report) is False
+                        or not self._external_power().safe_to_rearm
+                        or (commissioning and (self._commissioning_expired()
+                            or not self._commissioning_external_trusted()
+                            or not self._commissioning_controller_stopped()))):
+                    raise RuntimeError("Heater restoration evidence changed before relay dispatch")
+
             if not await self._bounded_service("switch", "turn_on", self.bindings.heater_switch,
-                                              timeout=deadline - time.monotonic()):
+                                              timeout=deadline - time.monotonic(),
+                                              _before_dispatch=before_restore_dispatch):
                 return
             while (not self._switch_observed("on", after=requested)
                    and not self._closing and time.monotonic() < deadline):

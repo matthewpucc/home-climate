@@ -26,6 +26,8 @@ from custom_components.house_climate.controller.executor import Executor
 from custom_components.house_climate.controller.ha import HAActivationDeferred, HAError
 from custom_components.house_climate.controller.policy import Plan
 from custom_components.house_climate.runtime import NativeAPI
+from custom_components.house_climate.controller.bindings import example_bindings
+from custom_components.house_climate.power_guard import HeaterPowerGuard
 from tests_homeassistant import test_native as fixtures
 from tests_homeassistant import test_native_controls as native
 
@@ -268,6 +270,71 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(command[:2] == ("mode", HVACMode.HEAT)
                              for command in self.heater.commands))
         self.assertFalse(self.api.service_jobs({self.cfg.heater_entity}))
+
+    def use_real_output_policy(self):
+        bindings = replace(example_bindings().power, heater=self.cfg.heater_entity)
+        wall = [round(time.time(), 3)]
+        for entity, value, unit in (
+            (bindings.circuit_power, 140, "W"), (bindings.input_power, 130, "W"),
+            (bindings.output_power, 2500, "W"), (bindings.battery, 100, "%"),
+            (bindings.heater_current, .05, "A"),
+            (bindings.wall_phase_a_voltage, 124, "V"),
+            (bindings.wall_phase_b_voltage, 123, "V"),
+        ):
+            self.hass.states.async_set(entity, str(value), {"unit_of_measurement": unit},
+                                       timestamp=wall[0])
+        self.hass.states.async_set(bindings.heater_switch, "on", timestamp=wall[0])
+        # Real policy at NativeAPI dispatch; no background guard actions needed.
+        self.guard = HeaterPowerGuard(self.hass, bindings, live=False, entry_id="queued-output",
+                                      notify=lambda: None, wall_clock=lambda: wall[0])
+        self.api.power_guard = self.guard
+        return bindings, wall
+
+    async def test_qualifying_high_output_allows_both_real_startup_stages(self):
+        self.use_real_output_policy()
+        try:
+            for seconds in (0, .05, .1, .15):
+                await self.tick(seconds)
+            self.assertTrue(self.heater.fan_power)
+            self.assertTrue(self.guard.diagnostics["output_limits_bypassed"])
+        finally:
+            await self.guard.async_close()
+
+    async def revoked_output_policy(self, case, *, service="set_hvac_mode"):
+        bindings, wall = self.use_real_output_policy()
+        def change():
+            if case == "stale":
+                wall[0] += 181
+                for entity in self.guard.entity_ids - {bindings.circuit_power}:
+                    state = self.hass.states.get(entity)
+                    self.hass.states.async_set(entity, state.state, state.attributes,
+                                               force_update=True, timestamp=wall[0])
+            else:
+                entity, value, unit = ((bindings.battery, 40, "%") if case == "reserve"
+                                       else (bindings.circuit_power, 0, "W"))
+                self.hass.states.async_set(entity, str(value), {"unit_of_measurement": unit})
+        try:
+            if service == "set_hvac_mode":
+                await self.tick()
+                self.assertEqual(self.heater.commands, [("target", 30, "heat")])
+            await self.queued_heat(change, service=service)
+            self.assertFalse(self.heater.fan_power)
+            self.assertFalse(any(command[:2] == ("mode", HVACMode.HEAT)
+                                 for command in self.heater.commands))
+            if service == "set_temperature":
+                self.assertEqual(self.heater.commands, [])
+            self.assertTrue(self.guard.blocked)
+        finally:
+            await self.guard.async_close()
+
+    async def test_circuit_expiry_at_queued_heat_blocks_actual_dispatch(self):
+        await self.revoked_output_policy("stale")
+
+    async def test_circuit_zero_at_queued_target_blocks_actual_dispatch(self):
+        await self.revoked_output_policy("zero", service="set_temperature")
+
+    async def test_battery_floor_at_queued_heat_blocks_actual_dispatch(self):
+        await self.revoked_output_policy("reserve")
 
     async def test_off_after_deferred_heat_resets_latent_heating_parameter(self):
         await self.tick()
