@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.13
 
 - Bypass the aggregate-output 2000 W trip and below-1600 W recovery requirement while fresh, valid, trusted circuit power is positive and battery charge is above 40%. Use the same qualification for activation, acknowledgement, commissioning and restoration. Positive circuit consumption is not proof of charging; zero or unusable circuit reports withdraw only the exception and do not independently prove an outage.
 - Recheck restoration evidence at actual queued relay-On dispatch as well as after persistence. Reject restored/assumed battery reports and expose the current output-limit exception in diagnostics. Preserve grid-input qualification, battery reserve, required telemetry, native Off and dedicated-meter stop proof, aggregate stop corroboration, ownership, cooldown and persistence safety. No configuration migration, hardware-protection change or live enablement; existing latches remain intact.
