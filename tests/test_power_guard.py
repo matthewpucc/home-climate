@@ -128,7 +128,7 @@ class PowerPolicyTests(unittest.TestCase):
         result = self.reading()
         self.assertIsNone(result.issue)
         self.assertFalse(result.wall_load_only)
-        self.assertFalse(result.safe_to_rearm)  # Output must settle before recovery.
+        self.assertTrue(result.safe_to_rearm)  # Fresh circuit power and reserve waive output limits.
         self.states[B.input_power]["state"] = "1476"
         result = self.reading()
         self.assertIn("input", result.issue)
@@ -143,6 +143,7 @@ class PowerPolicyTests(unittest.TestCase):
             with self.subTest(entity=entity):
                 self.states = measurements(self.clock)
                 self.states[entity]["state"] = str(value)
+                self.states[B.circuit_power]["state"] = "0"
                 result = self.reading()
                 self.assertIn(text, result.issue)
                 self.assertEqual(result.wall_load_only, entity == B.input_power)
@@ -190,6 +191,7 @@ class PowerPolicyTests(unittest.TestCase):
         self.states[B.heater_current]["state"] = "13"
         self.assertIsNone(self.reading().issue)
         self.assertFalse(self.reading().safe_to_rearm)  # Heat must stop before a tripped guard rearms.
+        self.states[B.circuit_power]["state"] = "0"
         for entity, value, reason in ((B.output_power, "2000", "output spike"),
                                       (B.input_power, "1476", "budget"),
                                       (B.battery, "40", "reserve")):
@@ -236,7 +238,7 @@ class PowerPolicyTests(unittest.TestCase):
             with self.subTest(entity=entity):
                 self.states = measurements(self.clock)
                 self.states[B.input_power]["state"] = "1600"
-                self.states[B.circuit_power]["state"] = "1600"
+                self.states[B.circuit_power]["state"] = "0"
                 self.states[entity]["state"] = value
                 result = self.reading()
                 self.assertIn(reason, result.issue)
@@ -533,6 +535,7 @@ class PowerGuardAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
         self.hass.set(B.input_power, "1600")
         self.hass.set(B.output_power, "2000")
+        self.hass.set(B.circuit_power, "0")
         self.guard._observe()
         await self.settle()
         self.assertTrue(self.guard.diagnostics["latched"])

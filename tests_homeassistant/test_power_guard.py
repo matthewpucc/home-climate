@@ -284,6 +284,7 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
     async def test_physical_off_requires_feedback_and_defers_close_if_unconfirmed(self):
         await self.start()
         self.ignore_climate = self.ignore_switch = True
+        self.hass.states.async_set(B.circuit_power, "0", {"unit_of_measurement": "W"})
         self.hass.states.async_set(B.heater, "heat", {"hvac_action": "heating"})
         self.hass.states.async_set(B.output_power, "2000", {"unit_of_measurement": "W"})
         await self.hass.async_block_till_done()
@@ -541,13 +542,35 @@ class NativePowerGuardTests(unittest.IsolatedAsyncioTestCase):
         await self.high_wall(62, watts=1450)
         self.assertTrue(self.guard.diagnostics["latched"])
 
+    async def test_circuit_expiry_reinstates_output_trip_on_real_timer(self):
+        self.use_source_clock()
+        await self.report(0, {B.output_power: (2500, {"unit_of_measurement": "W"}),
+                              B.heater: ("heat", {"hvac_action": "heating"})})
+        with patch.object(power, "CHECK_SECONDS", .01):
+            await self.start()
+            self.assertFalse(self.guard.blocked)
+            self.assertEqual(self.calls, [])
+            # Renew all other evidence, then advance only time. No event can
+            # notify the guard of the circuit expiry: its timer must detect it.
+            await self.report(179, only=sorted(self.guard.entity_ids - {B.circuit_power}))
+            self.assertFalse(self.guard.blocked)
+            self.wall[0] = self.origin + 181
+            deadline = asyncio.get_running_loop().time() + 1
+            while not self.guard.diagnostics["latched"] and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(.01)
+            await self.hass.async_block_till_done()
+            self.assertTrue(self.guard.diagnostics["latched"])
+            self.assertFalse(self.guard.diagnostics["output_limits_bypassed"])
+            self.assertEqual(self.calls[0][:2], ("climate", "set_hvac_mode"))
+
     async def test_output_spike_remains_immediate_during_pending_wall_load(self):
         self.use_source_clock()
         await self.report(0)
         await self.start()
         await self.high_wall(1)
         self.assertFalse(self.guard.diagnostics["latched"])
-        await self.report(2, {B.output_power: (2000, {"unit_of_measurement": "W"})})
+        await self.report(2, {B.circuit_power: (0, {"unit_of_measurement": "W"}),
+                              B.output_power: (2000, {"unit_of_measurement": "W"})})
         self.assertTrue(self.guard.diagnostics["latched"])
         self.assertEqual(self.calls[0][:2], ("climate", "set_hvac_mode"))
 

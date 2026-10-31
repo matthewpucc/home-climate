@@ -193,6 +193,7 @@ class RelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.hass.calls, [])
 
     async def test_battery_input_output_and_phase_voltages_remain_authoritative(self):
+        self.hass.set(B.circuit_power, "0")
         for entity, value in ((B.battery, "40"), (B.input_power, "1300"),
                                (B.output_power, "1600"),
                                (B.wall_phase_a_voltage, "unavailable")):

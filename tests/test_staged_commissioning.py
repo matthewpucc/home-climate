@@ -206,6 +206,32 @@ class StagedCommissioningTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.hass.off_commands)
         self.assert_no_heat_or_shared_ac()
 
+    async def test_high_output_survives_supervised_reconnect_with_fresh_circuit(self):
+        self.hass.set(B.output_power, "2500")
+        original = self.fresh_external
+        def fresh():
+            original()
+            self.hass.set(B.circuit_power, "140")
+        with patch.object(self, "fresh_external", fresh):
+            await self.prepare_restore()
+        self.hass.frame_hook = lambda hass: hass.set(B.circuit_power, "140")
+        await self.run_restore()
+        self.assertEqual(self.guard.diagnostics["commissioning"]["status"], "passed")
+        self.assertFalse(self.guard.blocked)
+        self.assertEqual(self.hass.data[B.output_power]["state"], "2500")
+        self.assert_no_heat_or_shared_ac()
+
+    async def test_circuit_loss_during_supervised_high_output_recuts(self):
+        await self.prepare_restore()
+        self.hass.set(B.circuit_power, "140")
+        self.hass.set(B.output_power, "2500")
+        self.hass.frame_hook = lambda hass: hass.set(B.circuit_power, "0")
+        await self.run_restore()
+        self.assertEqual(self.hass.data[B.heater_switch]["state"], "off")
+        self.assertTrue(self.guard.diagnostics["manual_recovery_required"])
+        self.assertTrue(self.guard.blocked)
+        self.assert_no_heat_or_shared_ac()
+
     async def test_first_watt_packet_can_arrive_after_20_seconds_without_fabricated_zero(self):
         self.hass.first_watt_delay = 20
         await self.prepare_restore()
@@ -371,6 +397,7 @@ class StagedCommissioningTests(unittest.IsolatedAsyncioTestCase):
         self.hass.ignore_climate = True
         self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
         self.hass.set(B.output_power, "2000")
+        self.hass.set(B.circuit_power, "0")
         self.guard._observe()
         await self.real_sleep(.09)
         self.assertTrue(self.guard.power_cut_confirmed)

@@ -116,6 +116,7 @@ class HeaterWattPolicyTests(unittest.TestCase):
 
     def test_fresh_output_and_battery_trip_are_not_hidden_by_missing_watts(self):
         self.states[WATTS] = report(self.clock, "unavailable")
+        self.states[B.circuit_power] = report(self.clock, 0)
         for entity, value, reason in ((B.output_power, 2000, "output spike"),
                                       (B.battery, 40, "reserve")):
             with self.subTest(entity=entity):
@@ -567,6 +568,7 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     self.hass.set(healthy, number, {"unit_of_measurement": suffix})
                 self.hass.set(entity, value, {"unit_of_measurement": unit})
+                self.hass.set(B.circuit_power, 0, {"unit_of_measurement": "W"})
                 self.guard._observe()
                 await self.settle()
                 self.assertNotIn("turn_on", [call[1] for call in self.hass.calls])

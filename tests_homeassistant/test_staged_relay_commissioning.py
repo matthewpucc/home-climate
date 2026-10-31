@@ -348,7 +348,8 @@ class StagedRelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
         self.ignore_native_ack = True
 
         def hold_dispatch(coro, *args, **kwargs):
-            if getattr(getattr(coro, "cr_code", None), "co_name", None) == "dispatch":
+            if (getattr(getattr(coro, "cr_code", None), "co_name", None) == "dispatch"
+                    and coro.cr_frame.f_locals.get("domain") == "climate"):
                 async def held():
                     try:
                         queued.set()

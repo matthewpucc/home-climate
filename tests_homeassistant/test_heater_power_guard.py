@@ -282,6 +282,27 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         # The recut may produce a fresh zero, but cannot complete restoration.
         self.assertTrue(self.guard.power_cut_confirmed)
 
+    async def test_high_output_restores_only_with_new_native_off_and_low_watts(self):
+        await self.verified_cut()
+        self.put(self.b.output_power, 2500, {"unit_of_measurement": "W"}, force=True)
+        await self.advance_isolated(301)
+        self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+        self.assertEqual(self.hass.states.get(self.b.heater).state, "off")
+        self.assertGreater(self.hass.states.get(self.b.heater_power).last_reported,
+                           self.hass.states.get(self.b.heater).last_reported)
+        self.assertEqual(self.guard._reading.heater_w, 5.5)
+        self.assertFalse(self.guard.blocked)
+
+    async def test_high_output_does_not_replace_post_off_watt_proof(self):
+        await self.verified_cut()
+        self.put(self.b.output_power, 2500, {"unit_of_measurement": "W"}, force=True)
+        self.report_meter_after_off = False
+        self.resume_heat_after_on = True
+        await self.advance_isolated(301)
+        self.assertEqual([call[1] for call in self.calls].count("turn_on"), 1)
+        self.assertEqual(self.hass.states.get(self.b.heater_switch).state, "off")
+        self.assertTrue(self.guard.blocked)
+
     async def test_isolated_restore_rechecks_external_load_after_persisting_intent(self):
         await self.verified_cut()
         await self.advance_isolated(181)
