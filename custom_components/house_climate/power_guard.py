@@ -299,6 +299,10 @@ class HeaterPowerGuard:
         self._manual_recovery_required = False
         self._recovery_task = None
         self._manual_recovery_wall = None
+        # A loaded ownership claim is not fresh proof that the relay is Off.
+        # This process-local boundary permits explicit, non-actuating recovery
+        # if the relay is already On; it never grants an automatic On lease.
+        self._retained_cut_claim_after = None
         self._identity_mismatch = False
         self._saved_binding_identity = self._binding_identity()
         self._shutdown_confirmation = "unconfirmed"
@@ -317,6 +321,7 @@ class HeaterPowerGuard:
         # Only the runtime can establish that the real comfort controller and
         # its ownership/jobs are stopped. A standalone guard fails closed.
         self.commissioning_controller_off = lambda: False
+        self.recovery_controller_off = lambda: False
         self._commissioning_task = None
         self._commissioning_preparing = False
         self._commissioning_started_clock = None
@@ -536,6 +541,7 @@ class HeaterPowerGuard:
                 "emergency_ac_inflight": bool(self._emergency_service_tasks),
                 "emergency_notification_error": self._notice_error,
                 "manual_recovery_required": self._manual_recovery_required,
+                "retained_cut_recovery_pending": self._retained_cut_recovery_pending,
                 "binding_identity_mismatch": self._identity_mismatch,
                 "persistence_error": self._persistence_error,
                 "commissioning": dict(self._commissioning),
@@ -555,6 +561,7 @@ class HeaterPowerGuard:
             "shutdown_active", "shutdown_stage", "shutdown_confirmation", "aggregate_stop",
             "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "manual_recovery_required",
+            "retained_cut_recovery_pending",
             "binding_identity_mismatch", "emergency_notification_error", "commissioning")}
         wall = self._wall_budget_state
         stable["wall_power_budget"] = ((wall.qualified_sources, wall.pending_sources,
@@ -634,7 +641,8 @@ class HeaterPowerGuard:
 
     async def async_load(self):
         from homeassistant.helpers.storage import Store
-        self._invalidate_isolation(self._wall_clock())
+        loaded_at = self._wall_clock()
+        self._invalidate_isolation(loaded_at)
         self._store = Store(self.hass, 1, f"house_climate.{self.entry_id}.power_guard")
         data = await self._store.async_load() or {}
         if not isinstance(data, dict):
@@ -669,6 +677,7 @@ class HeaterPowerGuard:
             self._cut_owned = False
         self._manual_recovery_required |= data.get("manual_recovery_required") is True
         self._manual_recovery_required |= self._emergency_ac_latched
+        self._retained_cut_claim_after = loaded_at if self._cut_owned else None
         prior_test = data.get("commissioning")
         valid_test = (isinstance(prior_test, dict) and type(prior_test.get("active")) is bool
                       and prior_test.get("status") in {"idle", "preparing", "waiting_for_recovery",
@@ -1216,6 +1225,12 @@ class HeaterPowerGuard:
         except Exception:
             return False
 
+    def _recovery_controller_stopped(self):
+        try:
+            return self.recovery_controller_off() is True
+        except Exception:
+            return False
+
     def _commissioning_external_trusted(self):
         for role in ("battery", "input_power", "output_power", "wall_phase_a_voltage", "wall_phase_b_voltage"):
             _, attrs, _ = _state_parts(self._state(getattr(self.bindings, role)))
@@ -1325,11 +1340,18 @@ class HeaterPowerGuard:
             self._recovery_task = self.hass.async_create_task(self._acknowledge_emergency())
         return await asyncio.shield(self._recovery_task)
 
+    @property
+    def _retained_cut_recovery_pending(self):
+        return (self._retained_cut_claim_after is not None and self._cut_owned
+                and not self._identity_mismatch and not self._manual_recovery_required
+                and not self._emergency_ac_latched and self._switch_observed("on"))
+
     def _manual_recovery_evidence(self):
         """Validate current recovery inputs, including after a storage await."""
-        if not (self._emergency_ac_latched or self._manual_recovery_required):
-            raise RuntimeError("No emergency or wiring recovery is pending")
-        if (not self.live or self._closed or self._positive_tasks
+        retained = self._retained_cut_recovery_pending
+        if not (self._emergency_ac_latched or self._manual_recovery_required or retained):
+            raise RuntimeError("No emergency, wiring or retained cutoff recovery is pending")
+        if ((not self.live and not retained) or self._closed or self._positive_tasks
                 or self._service_tasks or self._compensation_pending
                 or self.pending_external_jobs()
                 or (self._save_task is not None and not self._save_task.done())
@@ -1340,6 +1362,37 @@ class HeaterPowerGuard:
             raise RuntimeError("Manually restore and verify AC output before acknowledging recovery")
         state, attrs, reported = _state_parts(self._state(self.bindings.heater))
         barrier = self._manual_recovery_wall or self._emergency_ac_request_wall or 0
+        if retained:
+            if (self._closing or self._restoring or self._cutting or self._restore_intent
+                    or self.commissioning_active or self._commissioning_preparing
+                    or self._emergency_service_tasks
+                    or (self._compensating_task is not None and not self._compensating_task.done())
+                    or not self._recovery_controller_stopped()):
+                raise RuntimeError("Stop the comfort controller and wait for all recovery jobs to finish")
+            if self._store is None:
+                raise RuntimeError("Durable storage is required to acknowledge a retained heater cutoff")
+            if (self._saved_binding_identity != self._binding_identity()
+                    or not self._heater_meter_configured):
+                raise RuntimeError("Matching heater wiring and a dedicated meter are required")
+            barrier = max(barrier, self._retained_cut_claim_after)
+            relay, relay_attrs, relay_reported = _state_parts(self._state(self.bindings.heater_switch))
+            try:
+                relay_stamp = _timestamp(relay_reported)
+                relay_fresh = (relay_stamp > barrier
+                    and -5 <= self._wall_clock() - relay_stamp <= TELEMETRY_MAX_AGE_SECONDS)
+            except (ValueError, TypeError, OverflowError):
+                relay_fresh = False
+            if (relay != "on" or not relay_fresh or relay_attrs.get("restored")
+                    or relay_attrs.get("assumed_state")):
+                raise RuntimeError("A fresh dedicated relay On report after restart is required")
+            # A subsequent manual relay cycle invalidates pre-restoration Off
+            # and low-meter evidence, even if both samples remain recent.
+            changed = self._switch_changed()
+            if changed is None or changed > relay_stamp:
+                raise RuntimeError("Fresh dedicated relay feedback is required") from None
+            barrier = max(barrier, changed)
+            if not self._commissioning_external_trusted():
+                raise RuntimeError("Trusted electrical reports are required after restart")
         if self._emergency_ac_latched:
             ac_state = self._state(getattr(self.bindings, "emergency_ac_switch", None))
             changed = (ac_state.get("last_changed") if isinstance(ac_state, dict)
@@ -1368,7 +1421,8 @@ class HeaterPowerGuard:
                 self._emergency_ac_attempts, self._emergency_ac_latched,
                 self._manual_recovery_required, self._identity_mismatch,
                 self._latched, self._trip_wall, self._cut_owned,
-                self._off_request_wall, self._shutdown_contradicted)
+                self._off_request_wall, self._shutdown_contradicted,
+                self._retained_cut_claim_after, tuple(sorted(self._binding_identity().items())))
 
     async def _acknowledge_emergency(self):
         barrier, reading = self._manual_recovery_evidence()
@@ -1406,6 +1460,7 @@ class HeaterPowerGuard:
         self._emergency_ac_latched = self._manual_recovery_required = self._identity_mismatch = False
         self._saved_binding_identity = self._binding_identity()
         self._cut_owned = False
+        self._retained_cut_claim_after = None
         self._shutdown_contradicted = False
         self._persistence_error = None
         self._emergency_ac_status = "acknowledged"
@@ -1682,6 +1737,7 @@ class HeaterPowerGuard:
                 reason="Dedicated relay restored with fresh native Off and low heater load",
                 finished_at=self._wall_clock())
         self._latched = self._blocked = self._cut_owned = False
+        self._retained_cut_claim_after = None
         self._restore_intent = False
         self._reason = None
         self._tripped_at = self._trip_wall = self._safe_since = None
@@ -1918,6 +1974,7 @@ class HeaterPowerGuard:
         self._cutting = True
         switch = _state_parts(self._state(self.bindings.heater_switch))[0]
         if switch == "on":
+            self._retained_cut_claim_after = None
             self._cut_owned = True
             self._save()
         if switch != "off" or force:

@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -149,6 +150,92 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         return {"latched": True, "switch_cut_owned": owned, "restore_attempts": 0,
                 "trip_wall": self.origin - 600,
                 "binding_identity": self.guard._binding_identity() if identity is None else identity}
+
+    async def test_already_on_retained_claim_acknowledges_in_preview_and_reloads_without_ownership(self):
+        from homeassistant.helpers.storage import Store
+        from custom_components.house_climate.button import AcknowledgeHeaterRecovery
+
+        self.guard.live = False
+        self.guard.recovery_controller_off = lambda: True
+        key = f"house_climate.{self.guard.entry_id}.power_guard"
+        await Store(self.hass, 1, key).async_save(self.store_claim(owned=True))
+        await self.start(listen=True)
+        self.assertTrue(self.guard.diagnostics["retained_cut_recovery_pending"])
+        self.assertFalse(self.guard.diagnostics["manual_recovery_required"])
+        self.assertTrue(self.guard.blocked)
+        self.assertEqual(self.calls, [])
+
+        # Force actual new reports, including unchanged native Off and watts.
+        await self.refresh(1)
+        await self.refresh(2, omit=(self.b.heater_switch,))
+        button = AcknowledgeHeaterRecovery(SimpleNamespace(
+            entry_id=self.guard.entry_id, runtime_data=SimpleNamespace(power_guard=self.guard)))
+        self.assertTrue(button.available)
+        await button.async_press()
+        await self.hass.async_block_till_done()
+        saved = await Store(self.hass, 1, key).async_load()
+        self.assertFalse(saved["switch_cut_owned"])
+        self.assertTrue(saved["latched"])
+        self.assertFalse(self.guard.switch_cut_owned)
+        self.assertTrue(self.guard.blocked)
+        self.assertEqual(self.calls, [])
+
+        await self.guard.async_close()
+        self.guard = power.HeaterPowerGuard(
+            self.hass, self.b, live=False, entry_id="watt-fixture", notify=lambda: None,
+            wall_clock=lambda: self.wall, clock=lambda: self.wall - self.origin)
+        await self.start(listen=True)
+        self.assertFalse(self.guard.switch_cut_owned)
+        self.assertTrue(self.guard.blocked)
+        self.assertFalse(self.guard._off_confirmed)
+        self.assertEqual(self.calls, [])
+
+    async def test_retained_acknowledgement_keeps_normal_live_stop_and_safe_interval(self):
+        self.guard.live = False
+        self.guard.recovery_controller_off = lambda: True
+        await self.start(saved=self.store_claim(owned=True))
+        await self.refresh(1)
+        await self.refresh(2, omit=(self.b.heater_switch,))
+        self.assertTrue(await self.guard.async_acknowledge_emergency())
+        await self.hass.async_block_till_done()
+        saved = self.store.async_save.call_args.args[0]
+        self.assertFalse(saved["switch_cut_owned"])
+        await self.guard.async_close()
+
+        # The options reload creates a new live guard. It must verify native
+        # Off anew, and retain the ordinary 60-second healthy interval.
+        self.guard = power.HeaterPowerGuard(
+            self.hass, self.b, live=True, entry_id="watt-fixture", notify=lambda: None,
+            wall_clock=lambda: self.wall, clock=lambda: self.wall - self.origin)
+        await self.start(saved=saved)
+        self.assertTrue(self.guard.blocked)
+        self.assertFalse(self.guard.switch_cut_owned)
+        self.assertTrue(self.guard._off_confirmed)
+        await self.refresh(3)
+        await self.refresh(62)
+        self.assertTrue(self.guard.blocked)
+        await self.refresh(64)
+        self.assertFalse(self.guard.blocked)
+        self.assertFalse(self.guard.diagnostics["latched"])
+        self.assertEqual(self.calls, [("climate", "set_hvac_mode",
+                                      {"entity_id": self.b.heater, "hvac_mode": "off"})])
+
+    async def test_retained_claim_waits_for_relay_and_off_reports_after_late_availability(self):
+        self.guard.live = False
+        self.guard.recovery_controller_off = lambda: True
+        self.put(self.b.heater_switch, "unavailable")
+        await self.start(listen=True, saved=self.store_claim(owned=True))
+        self.assertFalse(self.guard.diagnostics["retained_cut_recovery_pending"])
+        await self.refresh(1, changes={self.b.heater_switch: ("on", {})})
+        self.assertTrue(self.guard.diagnostics["retained_cut_recovery_pending"])
+        # The first Off/meter reports coincide with relay restoration, rather
+        # than following it. They cannot prove a stopped reconnected heater.
+        with self.assertRaises(RuntimeError):
+            await self.guard.async_acknowledge_emergency()
+        await self.refresh(2, omit=(self.b.heater_switch,))
+        self.assertTrue(await self.guard.async_acknowledge_emergency())
+        self.assertFalse(self.guard.switch_cut_owned)
+        self.assertEqual(self.calls, [])
 
     async def verified_cut(self, *, listen=True):
         """Observe a real guard-issued cutoff, then stop all meter reports."""

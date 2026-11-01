@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.14
+
+- Allow explicit recovery of a matching saved heater-cutoff claim when the dedicated relay is already On after restart. The existing acknowledgement button is available for dedicated relays and can release this claim in Preview with the comfort controller stopped, trusted post-restart relay-On and native-Off reports, low dedicated load, safe electrical readings, no pending jobs and a durable acknowledgement. Recheck evidence after storage waits; stale, changed or failed evidence retains inhibition. Acknowledgement sends no equipment commands and preserves the ordinary latch, cooldown, telemetry protections and circuit/battery output exception. No configuration or storage-schema migration is required.
+
 ## 0.8.13
 
 - Bypass the aggregate-output 2000 W trip and below-1600 W recovery requirement while fresh, valid, trusted circuit power is positive and battery charge is above 40%. Use the same qualification for activation, acknowledgement, commissioning and restoration. Positive circuit consumption is not proof of charging; zero or unusable circuit reports withdraw only the exception and do not independently prove an outage.
