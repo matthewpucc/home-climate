@@ -13,6 +13,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     entities = [ReloadHeadIntegration(entry, key) for key in entry.runtime_data.config.heads]
     guard = getattr(entry.runtime_data, "power_guard", None)
     if guard is not None and (getattr(guard.bindings, "emergency_ac_switch", None)
+                              or getattr(guard.bindings, "heater_switch", None)
                               or guard.diagnostics.get("manual_recovery_required")):
         entities.append(AcknowledgeHeaterRecovery(entry))
     registry = er.async_get(hass)

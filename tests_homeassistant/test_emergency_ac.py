@@ -242,7 +242,7 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         saves = guard._store.async_save.await_count
         for _ in range(3):
             clock[0] += 10
-            with self.assertRaisesRegex(RuntimeError, "No emergency or wiring recovery"):
+            with self.assertRaisesRegex(RuntimeError, "No emergency, wiring or retained cutoff recovery"):
                 await guard.async_acknowledge_emergency()
             self.assertEqual(guard._off_request_wall, original_boundary)
             self.assertEqual(getattr(guard, "_manual_off_wall", None), original_manual_evidence)

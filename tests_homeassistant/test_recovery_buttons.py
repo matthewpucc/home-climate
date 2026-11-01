@@ -60,6 +60,21 @@ class RecoveryButtonTests(unittest.IsolatedAsyncioTestCase):
         await ReloadHeadIntegration(entry, "second").async_press()
         entry.runtime_data.recovery.async_reload_entity.assert_awaited_once_with("climate.test_second")
 
+    async def test_dedicated_relay_exposes_acknowledgement_before_recovery_is_detected(self):
+        entry = self.entry()
+        entry.runtime_data.power_guard = SimpleNamespace(
+            bindings=SimpleNamespace(heater_switch="switch.fixture_cutoff", emergency_ac_switch=None),
+            diagnostics={"manual_recovery_required": False}, _closed=False,
+            async_acknowledge_emergency=AsyncMock())
+        added = []
+        await async_setup_entry(self.hass, entry, added.extend)
+        recovery = next(button for button in added
+                        if button.unique_id == "recovery_buttons_heater_power_recovery")
+        self.assertTrue(recovery.available)
+        await recovery.async_press()
+        entry.runtime_data.power_guard.async_acknowledge_emergency.assert_awaited_once_with()
+        self.assertEqual(self.calls, [])
+
     async def test_stopping_controller_rejects_reload_and_marks_button_unavailable(self):
         entry = self.entry()
         button = ReloadHeadIntegration(entry, "shared")

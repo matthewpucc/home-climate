@@ -170,6 +170,43 @@ class RelayCommissioningOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.runtime._commissioning_controller_off())
         self.assertTrue(self.runtime._commissioning_controller_off())
 
+    async def test_preview_recovery_requires_idle_controller_without_allowing_commissioning(self):
+        self.runtime.live = self.controls.live = False
+        self.assertTrue(self.runtime._recovery_controller_off())
+        self.assertFalse(self.runtime._commissioning_controller_off())
+        for field, value in (("enabled", True), ("owned", ("climate.fixture_head",)),
+                             ("pending_fans", ("fan.fixture_transfer",)), ("active", False),
+                             ("recovering", True), ("_closing", True), ("_claiming", True),
+                             ("inflight", 1), ("service_inflight", 1), ("auxiliary_inflight", 1)):
+            with self.subTest(field=field):
+                old = getattr(self.controls, field)
+                setattr(self.controls, field, value)
+                self.assertFalse(self.runtime._recovery_controller_off())
+                setattr(self.controls, field, old)
+        for field in ("service_jobs", "uncertain_service_jobs"):
+            with patch.object(self.runtime.api, field, return_value=(object(),)):
+                self.assertFalse(self.runtime._recovery_controller_off())
+        self.runtime.stop_event.set()
+        self.assertFalse(self.runtime._recovery_controller_off())
+        self.runtime.stop_event.clear()
+        self.runtime._configuration_reload_pending = True
+        self.assertFalse(self.runtime._recovery_controller_off())
+
+    async def test_real_preview_setup_wires_independent_recovery_permission(self):
+        runtime = ControllerRuntime(self.hass, self.config, False, house_policy=True,
+                                    power_bindings=example_bindings().power)
+        await runtime.async_setup_controls("preview-recovery-fixture")
+        try:
+            self.assertFalse(runtime.power_guard.recovery_controller_off())
+            runtime.controls.async_start()
+            self.assertTrue(runtime.power_guard.recovery_controller_off())
+            self.assertFalse(runtime.power_guard.commissioning_controller_off())
+            runtime.controls.enabled = True
+            self.assertFalse(runtime.power_guard.recovery_controller_off())
+            runtime.controls.enabled = False
+        finally:
+            await runtime.async_stop()
+
     async def test_active_test_prevents_controller_enable_without_claiming_devices(self):
         self.controls.power_guard = SimpleNamespace(commissioning_active=True)
         with self.assertRaisesRegex(HAError, "commissioning must finish"):

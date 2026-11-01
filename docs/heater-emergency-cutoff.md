@@ -495,6 +495,45 @@ acknowledgement. No shared-AC On command is issued by this process.
 
 ### Dedicated outlet recovery
 
+If a saved dedicated cutoff claim survives a restart while its relay is already
+On, the ordinary latch cannot use that claim as proof of isolation. Waiting
+alone does not resolve it. The **Acknowledge heater power recovery** button is
+available whenever a dedicated relay is configured, including when its first
+report arrives after startup. `retained_cut_recovery_pending: true` identifies
+this specific recovery path; it does not mean the evidence is ready.
+
+For this already-On retained claim:
+
+1. Keep **Controller enabled** and **Allow live commands** Off. Leave the
+   already-On relay as it is and verify the native heater is in mode Off.
+2. Wait for trusted reports received after the integration restart/reload:
+   relay On, native Off, and dedicated power below 100 W (or the configured
+   legacy current meter below 1 A). Native Off and low-load reports must also
+   follow the relay's latest state change. These reports must be at most
+   180 seconds old. Battery must be above 40%, and the existing electrical
+   recovery requirements must pass, including the conditional output exception.
+3. Press **Acknowledge heater power recovery**. It requires matching saved
+   heater/relay/meter bindings, the stopped comfort controller, no pending
+   commands or cleanup, and working durable storage. It sends no equipment
+   commands. A successful acknowledgement writes the released claim before
+   relinquishing ownership in memory and survives another Preview reload.
+4. Verify `switch_cut_owned: false` and `retained_cut_recovery_pending: false`.
+   The ordinary latch remains until live protection verifies current native
+   Off and low load and completes the safe-load interval and remaining
+   cooldown. Enable live commands and comfort control only as part of a
+   separately intended return to operation; saving live permission reloads
+   the integration and may send a native Off command even with Controller Off.
+
+If acknowledgement refuses evidence or storage, leave the controls Off and
+resolve the reported prerequisite. Reloading alone neither releases ownership
+nor carries fresh Off evidence forward. This Preview acknowledgement is only
+for a matching retained dedicated claim with the relay already On; shared AC,
+changed wiring and interrupted commissioning retain their existing manual
+recovery requirements. It does not power-cycle the relay, repeat commissioning,
+clear shared emergencies or bypass a latch. A failed storage write keeps the
+running guard inhibited; changed evidence during a write restores the held
+claim in storage before reporting refusal.
+
 Dedicated-outlet automatic recovery remains separate: it requires a valid heater
 meter, battery above 40%, stable safe load and cooldown, and can restore only
 guard-owned power. Shared AC is never included in that automatic restoration.

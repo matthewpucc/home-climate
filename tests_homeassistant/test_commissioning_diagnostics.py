@@ -79,6 +79,21 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         return self.hass.states.get(self.sensor.entity_id)
 
+    async def test_retained_cutoff_recovery_is_visible_on_existing_preview_sensor(self):
+        from homeassistant.helpers.storage import Store
+
+        store = Store(self.hass, 1, f"house_climate.{self.guard.entry_id}.power_guard")
+        await store.async_save({**self.guard._saved_state(), "latched": True,
+                                "switch_cut_owned": True})
+        await self.guard.async_load()
+        self.hass.states.async_set(self.guard.bindings.heater_switch, "on")
+        state = await self.publish()
+        self.assertTrue(state.attributes["retained_cut_recovery_pending"])
+        self.assertTrue(state.attributes["switch_cut_owned"])
+        self.assertFalse(state.attributes["manual_recovery_required"])
+        self.assertEqual(state.state, "Preview only; live commands are not permitted")
+        self.assertEqual(self.service_calls, [])
+
     async def test_active_commissioning_is_published_without_new_entity_or_control_actions(self):
         self.guard._commissioning.update(
             active=True, status="restoring", phase="native_reconnect",
@@ -207,7 +222,8 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
         self.guard._commissioning_failed("Synthetic failure: " + "R" * 10000)
         state = await self.publish()
         attrs = self.sensor.extra_state_attributes
-        self.assertEqual(set(attrs), ORIGINAL_GUARD_KEYS | {"shutdown_active", "commissioning"})
+        self.assertEqual(set(attrs), ORIGINAL_GUARD_KEYS | {
+            "shutdown_active", "commissioning", "retained_cut_recovery_pending"})
         result = state.attributes["commissioning"]
         self.assertTrue(set(result) <= COMMISSIONING_KEYS)
         self.assertLessEqual(len(result["reason"]), 240)
