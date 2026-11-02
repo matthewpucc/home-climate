@@ -14,7 +14,7 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACAction, HVACMode
 from homeassistant.components.climate.const import DATA_COMPONENT
@@ -22,6 +22,7 @@ from homeassistant.components.climate.services import async_setup_services
 from homeassistant.const import UnitOfTemperature
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_component import EntityComponent
+from homeassistant.util.unit_system import METRIC_SYSTEM
 
 from custom_components.house_climate.controller.config import Config
 from custom_components.house_climate.controller.executor import Executor
@@ -57,6 +58,7 @@ class TemperatureOnlyClimate(ClimateEntity):
         self.heating_parameter = False
         self.cooling_parameter = False
         self.commands = []
+        self.round_target = False
         self.reject_target = False
         self.reject_heat = False
         self.ignore_heat = False
@@ -92,7 +94,8 @@ class TemperatureOnlyClimate(ClimateEntity):
             await self.target_release.wait()
         if self.reject_target:
             raise HomeAssistantError("Synthetic target rejection")
-        self._attr_target_temperature = kwargs["temperature"]
+        self._attr_target_temperature = (float(round(kwargs["temperature"])) if self.round_target
+                                         else kwargs["temperature"])
         self.heating_parameter = True
         self.cooling_parameter = False
         self.async_write_ha_state()
@@ -215,6 +218,247 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
                 if task is not None and not task.done():
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
+
+    def ceiling_80(self):
+        self.cfg = replace(self.cfg, heater_high_setpoint_f=80)
+        self.api.config = self.cfg
+        self.executor.config = self.cfg
+        self.heater.round_target = True
+
+    async def test_whole_celsius_target_80_f_uses_lower_rung_and_exact_ha_display(self):
+        self.ceiling_80()
+        # HA exposes a native 1 C step beside rounded Fahrenheit bounds.
+        attrs = self.hass.states.get(self.cfg.heater_entity).attributes
+        self.assertEqual((attrs["min_temp"], attrs["target_temp_step"]), (34, 1))
+        await self.tick()
+        self.assertEqual(len(self.heater.commands), 1)
+        self.assertEqual((self.heater.commands[0][0], self.heater.commands[0][2]), ("target", "heat"))
+        self.assertAlmostEqual(self.heater.commands[0][1], 26)
+        self.assertFalse(self.heater.fan_power)
+        self.assertEqual(self.hass.states.get(self.cfg.heater_entity).attributes["temperature"], 79)
+        await self.tick(.05)
+        self.assertEqual(self.heater.commands[-1], ("mode", HVACMode.HEAT, 26))
+        for second in (.1, .2, .5):
+            await self.tick(second)
+        self.assertEqual(len(self.heater.commands), 2)
+        self.assertTrue(self.heater.fan_power)
+        self.assertIsNone(self.executor._auxiliary_startup)
+        self.assertIsNone(self.api.auxiliary_startup_failure)
+        self.assertNotIn(self.cfg.heater_entity, self.executor.pending)
+
+    async def test_wrong_81_f_readback_never_reaches_heat_and_keeps_failure_cleanup(self):
+        self.ceiling_80()
+        await self.tick()
+        self.heater._attr_target_temperature = 27
+        self.heater.async_write_ha_state()
+        await self.tick(.05)
+        await self.tick(1)
+        self.assertFalse(self.heater.fan_power)
+        self.assertFalse(any(c[:2] == ("mode", HVACMode.HEAT) for c in self.heater.commands))
+        self.assertEqual(self.heater.commands[-1][1], HVACMode.OFF)
+        self.assertIsNotNone(self.api.auxiliary_startup_failure)
+        await self.tick(1.1, plan=Plan(heater_on=False))
+        self.assertIsNone(self.api.auxiliary_startup_failure)
+
+    async def test_rounded_display_alias_does_not_ack_wrong_native_target(self):
+        self.ceiling_80()
+        await self.tick()
+        self.heater._attr_target_temperature = 26.2
+        self.heater.async_write_ha_state()
+        self.assertEqual(self.hass.states.get(self.cfg.heater_entity).attributes["temperature"], 79)
+        await self.tick(.05)
+        self.assertFalse(self.heater.fan_power)
+        self.assertEqual(len(self.heater.commands), 1)
+
+    async def test_normalized_target_still_needs_a_fresh_report(self):
+        self.ceiling_80()
+        stale = await self.snapshot()
+        await self.tick()
+        stale[self.cfg.heater_entity]["attributes"]["temperature"] = 79
+        await asyncio.to_thread(self.executor.auxiliary, self.plan, stale, self.started + .05)
+        self.assertFalse(self.heater.fan_power)
+        await self.tick(.1)
+        self.assertTrue(self.heater.fan_power)
+
+    async def test_normalized_target_restored_report_cannot_enable_heat(self):
+        self.ceiling_80()
+        await self.tick()
+        states = await self.snapshot()
+        states[self.cfg.heater_entity]["attributes"]["restored"] = True
+        await asyncio.to_thread(self.executor.auxiliary, self.plan, states, self.started + .05)
+        self.assertFalse(self.heater.fan_power)
+        self.assertIsNotNone(self.api.auxiliary_startup_failure)
+
+    async def test_celsius_display_matches_native_target(self):
+        self.ceiling_80()
+        self.hass.config.units = METRIC_SYSTEM
+        self.executor.unit = "°C"
+        self.heater.async_write_ha_state()
+        for second in (0, .05, .1):
+            await self.tick(second)
+        self.assertEqual(self.heater.commands[:2], [("target", 26, "heat"), ("mode", HVACMode.HEAT, 26)])
+        self.assertEqual(self.hass.states.get(self.cfg.heater_entity).attributes["temperature"], 26)
+        self.assertIsNone(self.executor._auxiliary_startup)
+
+    async def test_fahrenheit_native_target_remains_80_f(self):
+        self.ceiling_80()
+        self.heater._attr_temperature_unit = UnitOfTemperature.FAHRENHEIT
+        self.heater._attr_min_temp = 40
+        self.heater._attr_max_temp = 100
+        self.heater._attr_target_temperature = 72
+        self.heater.async_write_ha_state()
+        for second in (0, .05, .1):
+            await self.tick(second)
+        self.assertEqual(self.heater.commands[:2], [("target", 80, "heat"), ("mode", HVACMode.HEAT, 80)])
+        self.assertIsNone(self.executor._auxiliary_startup)
+
+    async def test_capability_change_while_target_queued_prevents_dispatch(self):
+        self.ceiling_80()
+        await self.queued_heat(lambda: setattr(self.heater, "_attr_target_temperature_step", .5),
+                               service="set_temperature", seconds=0)
+        self.assertEqual(self.heater.commands, [])
+        self.assertFalse(self.heater.fan_power)
+
+    async def test_capability_change_while_heat_queued_prevents_dispatch_and_requires_cleanup(self):
+        self.ceiling_80()
+        await self.tick()
+        await self.queued_heat(lambda: setattr(self.heater, "_attr_target_temperature_step", .5))
+        self.assertEqual(len(self.heater.commands), 1)
+        self.assertFalse(self.heater.fan_power)
+        await self.tick(.1)
+        self.assertIsNotNone(self.api.auxiliary_startup_failure)
+        self.assertEqual(self.heater.commands[-1][1], HVACMode.OFF)
+
+    async def test_target_drift_while_heat_queued_prevents_dispatch(self):
+        self.ceiling_80()
+        await self.tick()
+        def change():
+            self.heater._attr_target_temperature = 27
+            self.heater.async_write_ha_state()
+        await self.queued_heat(change)
+        self.assertFalse(self.heater.fan_power)
+        self.assertEqual(len(self.heater.commands), 1)
+
+    async def test_missing_native_entity_inhibits_auxiliary_without_affecting_heads(self):
+        self.ceiling_80()
+        with patch.object(self.component, "get_entity", return_value=None):
+            await self.tick()
+        self.assertEqual(self.heater.commands, [])
+        self.assertIn("native target capabilities unavailable", self.executor.device_issues[self.cfg.heater_entity])
+        self.assertEqual(set(self.executor.device_issues), {self.cfg.heater_entity})
+
+    async def test_native_contract_invalid_values_fail_closed(self):
+        self.ceiling_80()
+        for attribute, invalid in (("_attr_target_temperature_step", None),
+                                   ("_attr_target_temperature_step", 0),
+                                   ("_attr_target_temperature_step", float("nan")),
+                                   ("_attr_min_temp", float("inf")),
+                                   ("_attr_precision", float("nan")),
+                                   ("_attr_temperature_unit", "K")):
+            with self.subTest(attribute=attribute, invalid=invalid), patch.object(self.heater, attribute, invalid, create=True):
+                with self.assertRaisesRegex(HAError, "native target capabilities unavailable"):
+                    await asyncio.to_thread(self.api.auxiliary_target, 80)
+        self.assertEqual(self.heater.commands, [])
+
+    async def test_target_contract_covers_identity_display_and_native_capabilities(self):
+        self.ceiling_80()
+        selected = await asyncio.to_thread(self.api.auxiliary_target, 80)
+        self.assertEqual((selected.native, selected.reported), (26, 79))
+        self.assertAlmostEqual(selected.command, 78.8)
+        for attribute, changed in (("_attr_min_temp", 0), ("_attr_max_temp", 36),
+                                   ("_attr_target_temperature_step", .5), ("_attr_precision", .5)):
+            with self.subTest(attribute=attribute), patch.object(self.heater, attribute, changed, create=True):
+                self.assertNotEqual(selected, await asyncio.to_thread(self.api.auxiliary_target, 80))
+        replacement = TemperatureOnlyClimate(self.cfg.heater_entity)
+        replacement.hass = self.hass
+        with patch.object(self.component, "get_entity", return_value=replacement):
+            self.assertNotEqual(selected, await asyncio.to_thread(self.api.auxiliary_target, 80))
+        self.hass.config.units = METRIC_SYSTEM
+        self.assertNotEqual(selected, await asyncio.to_thread(self.api.auxiliary_target, 80))
+
+    async def test_exact_and_fractional_native_grid_never_raises_configured_ceiling(self):
+        for step, ceiling, wanted in ((1, 86, 30), (1, 80, 26), (.5, 80, 26.5), (.1, 80, 26.6)):
+            with self.subTest(step=step, ceiling=ceiling):
+                self.heater._attr_target_temperature_step = step
+                selected = await asyncio.to_thread(self.api.auxiliary_target, ceiling)
+                self.assertAlmostEqual(selected.native, wanted)
+                self.assertLessEqual(selected.command, ceiling)
+
+    async def test_running_heat_reconciles_target_without_repeating_power_on(self):
+        self.ceiling_80()
+        for second in (0, .05, .1):
+            await self.tick(second)
+        self.heater._attr_target_temperature = 27
+        self.heater.async_write_ha_state()
+        await self.tick(.2)
+        await self.tick(.25)
+        self.assertEqual([command[0] for command in self.heater.commands], ["target", "mode", "target"])
+        self.assertEqual(self.heater.target_temperature, 26)
+        self.assertTrue(self.heater.fan_power)
+        self.assertNotIn(self.cfg.heater_entity, self.executor.pending)
+
+    async def test_unavailable_native_contract_after_target_requests_off_cleanup(self):
+        self.ceiling_80()
+        await self.tick()
+        with patch.object(self.component, "get_entity", return_value=None):
+            await self.tick(.05)
+        self.assertEqual(self.heater.commands[-1][1], HVACMode.OFF)
+        self.assertFalse(self.heater.fan_power)
+        self.assertIsNotNone(self.api.auxiliary_startup_failure)
+
+    async def test_queued_heat_rejects_new_restored_or_assumed_feedback(self):
+        self.ceiling_80()
+        await self.tick()
+        for flag in ("restored", "assumed_state"):
+            with self.subTest(flag=flag):
+                self.heater.async_write_ha_state()
+                def change():
+                    state = self.hass.states.get(self.cfg.heater_entity)
+                    self.hass.states.async_set(self.cfg.heater_entity, state.state,
+                                               {**state.attributes, flag: True})
+                await self.queued_heat(change)
+                self.assertFalse(self.heater.fan_power)
+                self.assertEqual(len(self.heater.commands), 1)
+
+    async def test_queued_target_rejects_new_unavailable_feedback(self):
+        self.ceiling_80()
+        def change():
+            state = self.hass.states.get(self.cfg.heater_entity)
+            self.hass.states.async_set(self.cfg.heater_entity, "unavailable", state.attributes)
+        await self.queued_heat(change, service="set_temperature", seconds=0)
+        self.assertEqual(self.heater.commands, [])
+
+    async def test_provider_metadata_exception_remains_auxiliary_only(self):
+        with patch.object(TemperatureOnlyClimate, "target_temperature_step", new_callable=PropertyMock,
+                          side_effect=RuntimeError("synthetic provider error")):
+            await self.tick()
+        self.assertEqual(self.heater.commands, [])
+        self.assertEqual(set(self.executor.device_issues), {self.cfg.heater_entity})
+        self.assertIn("synthetic provider error", self.executor.device_issues[self.cfg.heater_entity])
+
+    async def test_completed_heat_stop_uses_same_report_cache_without_metadata_wait(self):
+        self.ceiling_80()
+        await self.tick()
+        await self.tick(.05)
+        self.assertTrue(self.heater.fan_power)
+        with patch.object(self.api, "auxiliary_target", side_effect=AssertionError("Stop must not fetch metadata")):
+            await self.tick(.1, plan=Plan(heater_on=False))
+        self.assertFalse(self.heater.fan_power)
+        self.assertEqual(self.heater.commands[-1][1], HVACMode.OFF)
+        self.assertIsNone(self.api.auxiliary_startup_failure)
+
+    async def test_stop_with_mismatched_cached_evidence_does_not_wait_or_claim_success(self):
+        self.ceiling_80()
+        await self.tick()
+        await self.tick(.05)
+        # New report with a native alias cannot borrow the earlier 26 C proof.
+        self.heater._attr_target_temperature = 26.2
+        self.heater.async_write_ha_state()
+        with patch.object(self.api, "auxiliary_target", side_effect=AssertionError("Stop must not fetch metadata")):
+            await self.tick(.1, plan=Plan(heater_on=False))
+        self.assertFalse(self.heater.fan_power)
+        self.assertEqual(self.heater.commands[-1][1], HVACMode.OFF)
+        self.assertIsNotNone(self.api.auxiliary_startup_failure)
 
     async def test_real_temperature_service_does_not_supply_explicit_power_on(self):
         await asyncio.to_thread(self.api.service, "climate", "set_temperature",

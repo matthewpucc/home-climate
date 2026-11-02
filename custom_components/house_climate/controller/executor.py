@@ -12,6 +12,7 @@ from .protection_context import limits
 from .policy import Plan, call_target_f, native_target
 from .sensors import from_f, to_f
 from .auxiliary_dispatch import manual_auxiliary
+from .auxiliary_target import AuxiliaryTarget, trusted_auxiliary_state
 
 
 class ControlFault(RuntimeError):
@@ -74,7 +75,7 @@ class HeadCycle:
 
 @dataclass
 class AuxiliaryStartup:
-    target: float
+    target: AuxiliaryTarget
     since: float | None = None
     phase: str = "target"
     target_requested: bool = False
@@ -147,7 +148,7 @@ class Executor:
         return sorted(self.device_issues)
 
     def ensure(self, entity, service, data, matches, states, now, *, force=False, fresh=False,
-               deadline=None):
+               deadline=None, auxiliary_target=None):
         command = (service, tuple(sorted(data.items())))
         pending = self.pending.get(entity)
         observed = states.get(entity, {})
@@ -223,9 +224,10 @@ class Executor:
                     if not callable(bounded):
                         raise HAActivationDeferred("Auxiliary startup requires bounded adapter dispatch")
                     bounded(entity.split(".")[0], service, deadline=deadline,
-                            entity_id=entity, **data)
+                            entity_id=entity, **data, **({"auxiliary_target": auxiliary_target} if auxiliary_target else {}))
                 else:
-                    self.ha.service(entity.split(".")[0], service, entity_id=entity, **data)
+                    self.ha.service(entity.split(".")[0], service, entity_id=entity, **data,
+                                    **({"auxiliary_target": auxiliary_target} if auxiliary_target else {}))
         except HAActivationDeferred:
             self.head_transitions.record(
                 entity, "dispatch_deferred", observed,
@@ -373,11 +375,11 @@ class Executor:
         return False
 
     def _climate_ensure(self, entity, service, data, matches, states, now, *, fresh=False,
-                        force=False, deadline=None):
+                        force=False, deadline=None, auxiliary_target=None):
         try:
             before = self.pending.get(entity)
             acknowledged = self.ensure(entity, service, data, matches, states, now,
-                                       fresh=fresh, force=force, deadline=deadline)
+                                       fresh=fresh, force=force, deadline=deadline, auxiliary_target=auxiliary_target)
             pending = self.pending.get(entity)
             if (service == "set_hvac_mode" and data.get("hvac_mode") == "off"
                     and pending is not None and pending is not before and pending.receipt):
@@ -774,8 +776,25 @@ class Executor:
                             and entity in self.config.head_cool_min_f)
         if not heater and not floor_configured and self._head_off_guard(entity, states, now):
             return
+        selected = None
         try:
-            target = self.target(entity, target_f, states, heater, mode=mode)
+            provider = getattr(self.ha, "auxiliary_target", None)
+            if heater and mode == "heat" and callable(provider):
+                selected = provider(target_f)
+                target = selected.command
+            else:
+                target = self.target(entity, target_f, states, heater, mode=mode)
+                if heater and mode == "heat":
+                    selected = AuxiliaryTarget(target, target)
+        except HAError as exc:
+            if self._auxiliary_startup is not None:
+                self._fail_auxiliary_startup(entity, str(exc), states, now)
+            else:
+                self.capability_blocks[entity] = {
+                    "kind": "capability", "missing_modes": [], "reason": str(exc)}
+                self._sync_issue(entity)
+                self.off(entity, states, now, preserve_capability=True)
+            return
         except ControlFault as exc:
             if not floor_configured:
                 raise
@@ -802,16 +821,18 @@ class Executor:
 
         def matches(observed):
             try:
-                return observed.get("state") == mode and abs(float(observed.get("attributes", {}).get("temperature")) - target) < .05
+                return observed.get("state") == mode and (selected.matches(observed) if selected else
+                    abs(float(observed.get("attributes", {}).get("temperature")) - target) < .05)
             except (ValueError, TypeError):
                 return False
 
         if heater and mode == "heat" and (self._auxiliary_startup is not None
                                           or state.get("state") != "heat"):
-            acknowledged = self._start_auxiliary_heat(entity, target, matches, states, now)
+            acknowledged = self._start_auxiliary_heat(entity, selected, matches, states, now)
         else:
             acknowledged = self._climate_ensure(
-                entity, "set_temperature", {"hvac_mode": mode, "temperature": target}, matches, states, now)
+                entity, "set_temperature", {"hvac_mode": mode, "temperature": target}, matches, states, now,
+                auxiliary_target=selected if selected and selected.contract else None)
         if acknowledged:
             comfort = target_f if comfort_target_f is None else comfort_target_f
             self._acknowledge_head_run(entity, mode, comfort, to_f(target, self.unit), target, now)
@@ -988,13 +1009,7 @@ class Executor:
         self._auxiliary_failure = failure
         self.ha.auxiliary_startup_failure = failure
 
-    @staticmethod
-    def _auxiliary_native_trusted(observed):
-        attrs = observed.get("attributes", {})
-        return (observed.get("state") in ("off", "heat", "fan_only")
-                and not attrs.get("restored") and not attrs.get("assumed_state")
-                and attrs.get("hvac_action") != "cooling"
-                and not (observed.get("state") != "heat" and attrs.get("hvac_action") == "heating"))
+    _auxiliary_native_trusted = staticmethod(trusted_auxiliary_state)
 
     @staticmethod
     def _auxiliary_report_after(observed, baseline):
@@ -1029,9 +1044,15 @@ class Executor:
                 or not self._trusted_auxiliary_feedback(entity, observed)):
             return
         try:
-            matched = (observed.get("state") == "heat"
-                       and abs(float(observed.get("attributes", {}).get("temperature")) - startup.target) < .05)
-        except (TypeError, ValueError):
+            selected = startup.target
+            if selected.contract:
+                cached = getattr(self.ha, "cached_auxiliary_target", None)
+                current = cached(observed) if callable(cached) else None
+                if current is None or current != selected:
+                    return
+                selected = current
+            matched = observed.get("state") == "heat" and selected.matches(observed)
+        except (TypeError, ValueError, HAError):
             matched = False
         if matched:
             self.pending.pop(entity, None)
@@ -1093,12 +1114,13 @@ class Executor:
                     raw = observed.get("attributes", {}).get("temperature")
                     return (self._trusted_auxiliary_feedback(entity, observed)
                             and not isinstance(raw, bool) and math.isfinite(float(raw))
-                            and abs(float(raw) - target) < .05)
+                            and target.matches(observed))
                 except (ValueError, TypeError):
                     return False
             acknowledged = self._climate_ensure(entity, "set_temperature",
-                {"hvac_mode": "heat", "temperature": target}, target_matches, states, now,
-                force=not startup.target_requested, fresh=True, deadline=deadline)
+                {"hvac_mode": "heat", "temperature": target.command}, target_matches, states, now,
+                force=not startup.target_requested, fresh=True, deadline=deadline,
+                auxiliary_target=target if target.contract else None)
             pending = self.pending.get(entity)
             if pending and pending.receipt:
                 startup.target_requested = True
@@ -1113,7 +1135,8 @@ class Executor:
         def heat_matches(observed):
             return self._trusted_auxiliary_feedback(entity, observed) and matches(observed)
         acknowledged = self._climate_ensure(entity, "set_hvac_mode", {"hvac_mode": "heat"},
-            heat_matches, states, now, force=not startup.heat_requested, fresh=True, deadline=deadline)
+            heat_matches, states, now, force=not startup.heat_requested, fresh=True, deadline=deadline,
+            auxiliary_target=target if target.contract else None)
         pending = self.pending.get(entity)
         if pending and pending.receipt:
             startup.heat_requested = True
