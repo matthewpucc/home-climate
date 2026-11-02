@@ -367,6 +367,8 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.states.get(guest).attributes["temperature"], 73)
         clock.value = 222
         self.queue_heartbeat(runtime)()
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        runtime.controls.confirm_auxiliary_authorization()
         self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
         await asyncio.to_thread(
             runtime.api.service, "climate", "set_temperature",
@@ -422,6 +424,8 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
             )
         clock.value = 222
         self.queue_heartbeat(runtime)()
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        runtime.controls.confirm_auxiliary_authorization()
         self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
         self.assertEqual(runtime.controls.heartbeat_monotonic, 222)
         self.assertTrue(runtime.controls.enabled)
@@ -466,6 +470,8 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
         clock.value = 223
         self.queue_heartbeat(runtime)()
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        runtime.controls.confirm_auxiliary_authorization()
         self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
 
     async def test_late_auxiliary_activation_requires_another_fresh_off_before_rearming(self):
@@ -526,6 +532,8 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
         clock.value = 223
         self.queue_heartbeat(runtime)()
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        runtime.controls.confirm_auxiliary_authorization()
         self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
         self.assertEqual(self.hass.states.get(guest).state, "cool")
 
@@ -573,6 +581,8 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
         clock.value = 223
         self.queue_heartbeat(runtime)()
+        self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+        runtime.controls.confirm_auxiliary_authorization()
         self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
 
     async def test_off_dispatched_before_late_heat_completion_cannot_ack_new_stop_obligation(self):
@@ -637,6 +647,8 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
             clock.value = 223
             self.queue_heartbeat(runtime)()
+            self.assertTrue(runtime.controls.auxiliary_heartbeat_blocked)
+            runtime.controls.confirm_auxiliary_authorization()
             self.assertFalse(runtime.controls.auxiliary_heartbeat_blocked)
             self.assertEqual(self.hass.states.get(guest).state, "cool")
         finally:

@@ -5,6 +5,7 @@ also selects its heating parameter, but only explicit Heat powers the fan on.
 No upstream code, device connection or private installation data is required.
 """
 import asyncio
+from datetime import datetime, timezone
 from dataclasses import replace
 from datetime import timedelta
 import logging
@@ -60,8 +61,10 @@ class TemperatureOnlyClimate(ClimateEntity):
         self.ignore_heat = False
         self.target_release = None
         self.heat_release = None
+        self.fan_release = None
         self.target_entered = asyncio.Event()
         self.heat_entered = asyncio.Event()
+        self.fan_entered = asyncio.Event()
 
     @property
     def hvac_mode(self):
@@ -107,6 +110,12 @@ class TemperatureOnlyClimate(ClimateEntity):
         self.heating_parameter = hvac_mode == HVACMode.HEAT
         self.cooling_parameter = hvac_mode == HVACMode.COOL
         self.async_write_ha_state()
+        if hvac_mode == HVACMode.FAN_ONLY:
+            # Report the real changed state while service completion is still
+            # outstanding, as asynchronous providers are allowed to do.
+            self.fan_entered.set()
+            if self.fan_release is not None:
+                await self.fan_release.wait()
 
     async def async_turn_on(self):
         await self.async_set_hvac_mode(HVACMode.HEAT)
@@ -150,7 +159,7 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         for entity in self.entities.values():
-            for release in (entity.target_release, entity.heat_release):
+            for release in (entity.target_release, entity.heat_release, entity.fan_release):
                 if release is not None:
                     release.set()
         for runtime in self.runtimes:
@@ -284,6 +293,8 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.async_set(entity, str(value), {"unit_of_measurement": unit},
                                        timestamp=wall[0])
         self.hass.states.async_set(bindings.heater_switch, "on", timestamp=wall[0])
+        self.hass.states.async_set(bindings.ac_output_switch, "on", {"device_report": {
+            "state": "on", "reported_at": datetime.fromtimestamp(wall[0], timezone.utc).isoformat()}})
         # Real policy at NativeAPI dispatch; no background guard actions needed.
         self.guard = HeaterPowerGuard(self.hass, bindings, live=False, entry_id="queued-output",
                                       notify=lambda: None, wall_clock=lambda: wall[0])
@@ -296,8 +307,73 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
             for seconds in (0, .05, .1, .15):
                 await self.tick(seconds)
             self.assertTrue(self.heater.fan_power)
-            self.assertTrue(self.guard.diagnostics["output_limits_bypassed"])
+            self.assertFalse(self.guard.diagnostics["watt_limits_enforced"])
         finally:
+            await self.guard.async_close()
+
+    async def test_proved_recovered_stop_allows_real_fan_dispatch_during_heat_hold(self):
+        bindings, wall = self.use_real_output_policy()
+        # Synthetic completed ordinary policy stop, with current native Off
+        # followed by a low dedicated measurement. No failed-stop ownership.
+        self.guard._latched = self.guard._off_confirmed = True
+        self.guard._wall_observed_off_wall = self.hass.states.get(bindings.heater).last_reported.timestamp()
+        self.guard.pending_external_jobs = lambda: self.api.service_jobs({bindings.heater})
+        self.guard._observe()
+        try:
+            self.assertTrue(self.guard.blocked)
+            self.assertFalse(self.guard.fan_blocked)
+            await self.tick(plan=Plan(auxiliary_fan_only=True))
+            wall[0] = time.time()
+            self.assertEqual(self.hass.states.get(bindings.heater).state, 'fan_only')
+            self.assertFalse(self.heater.heating_parameter)
+            self.assertTrue(self.guard.blocked)
+            self.assertFalse(self.guard.fan_blocked)
+            self.assertFalse(self.guard.switch_cut_owned)
+        finally:
+            await self.guard.async_close()
+
+    async def test_slow_admitted_fan_and_lease_renewal_do_not_trigger_competing_stop(self):
+        bindings, wall = self.use_real_output_policy()
+        self.guard.live = True
+        self.guard._latched = self.guard._off_confirmed = True
+        self.guard._wall_observed_off_wall = self.hass.states.get(bindings.heater).last_reported.timestamp()
+        self.guard.pending_external_jobs = lambda: self.api.service_jobs({bindings.heater})
+        self.guard._observe()
+        self.heater.fan_release = asyncio.Event()
+        request = asyncio.create_task(asyncio.to_thread(self.api.service,
+            "climate", "set_hvac_mode", entity_id=bindings.heater, hvac_mode="fan_only"))
+        try:
+            await asyncio.wait_for(self.heater.fan_entered.wait(), 1)
+            wall[0] = time.time()
+            jobs = self.api.service_jobs({bindings.heater})
+            self.assertEqual(len(jobs), 1)
+            self.assertFalse(jobs[0].done())
+            self.assertIs(self.guard._fan_only_task, jobs[0])
+            self.assertEqual(self.hass.states.get(bindings.heater).state, "fan_only")
+            self.guard._observe()
+            self.assertFalse(self.guard.fan_blocked)
+            # A separate authorization/lease check must not replace the
+            # identity of the already admitted, still pending device job.
+            self.guard.check_activation(bindings.heater, {"hvac_mode": "fan_only"})
+            self.guard._observe()
+            self.assertIs(self.guard._fan_only_task, jobs[0])
+            self.assertFalse(self.guard.fan_blocked)
+            self.guard._safe_since = self.guard._clock() - 61
+            self.guard._observe()
+            self.assertTrue(self.guard.blocked)
+            self.assertFalse(request.done())
+            self.assertFalse(self.guard.switch_cut_owned)
+            self.assertFalse(any(command[:2] == ("mode", HVACMode.OFF)
+                                 for command in self.heater.commands))
+            self.heater.fan_release.set()
+            await asyncio.wait_for(request, 2)
+            await self.until(lambda: not self.api.service_jobs({bindings.heater}))
+            self.guard._observe()
+            self.assertFalse(self.guard.blocked)
+            self.assertEqual(self.hass.states.get(bindings.heater).state, "fan_only")
+        finally:
+            self.heater.fan_release.set()
+            await asyncio.gather(request, return_exceptions=True)
             await self.guard.async_close()
 
     async def revoked_output_policy(self, case, *, service="set_hvac_mode"):
@@ -305,13 +381,16 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
         def change():
             if case == "stale":
                 wall[0] += 181
-                for entity in self.guard.entity_ids - {bindings.circuit_power}:
+                # An unchanged event-driven AC-On state is allowed with
+                # current numeric corroboration. Expire the required output
+                # evidence itself at actual queued dispatch.
+                for entity in self.guard.entity_ids - {bindings.output_power}:
                     state = self.hass.states.get(entity)
                     self.hass.states.async_set(entity, state.state, state.attributes,
                                                force_update=True, timestamp=wall[0])
             else:
                 entity, value, unit = ((bindings.battery, 40, "%") if case == "reserve"
-                                       else (bindings.circuit_power, 0, "W"))
+                                       else (bindings.ac_output_switch, "off", ""))
                 self.hass.states.async_set(entity, str(value), {"unit_of_measurement": unit})
         try:
             if service == "set_hvac_mode":
@@ -327,10 +406,10 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await self.guard.async_close()
 
-    async def test_circuit_expiry_at_queued_heat_blocks_actual_dispatch(self):
+    async def test_supply_expiry_at_queued_heat_blocks_actual_dispatch(self):
         await self.revoked_output_policy("stale")
 
-    async def test_circuit_zero_at_queued_target_blocks_actual_dispatch(self):
+    async def test_supply_off_at_queued_target_blocks_actual_dispatch(self):
         await self.revoked_output_policy("zero", service="set_temperature")
 
     async def test_battery_floor_at_queued_heat_blocks_actual_dispatch(self):

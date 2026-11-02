@@ -1,21 +1,13 @@
-"""Heater-only load shedding for a battery-backed circuit.
+"""Auxiliary supply eligibility and independently verified shutdown/recovery.
 
-Reported real power is not RMS branch current. The grid-input operating budget
-is twelve times the lower fresh wall-phase voltage, with sustained input
-evidence. Whole-circuit load is not enforced. Fresh positive circuit power with
-battery reserve qualifies an exception to the aggregate-output limits; it is
-not proof of charging or a substitute for grid-input telemetry. Branch amps
-are not measured.
-
-The native thermostat is stopped first, followed by an optional dedicated plug.
-An explicitly enabled shared-AC fallback is a final emergency action with manual
-recovery; it never automatically restores AC, DC, charging, or network power.
-This module imports HA lazily so its
-measurement policy and asynchronous failure paths can also be tested in isolation.
+Battery reserve and corroborated AC availability govern automated heat. Input,
+aggregate output and circuit watts have no software ceilings. Aggregate output
+corroborates supplying loads, never heater-only draw or a failed shutdown.
 """
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 import logging
@@ -28,10 +20,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-INPUT_CURRENT_CEILING_A = 12.0
-WALL_EXCEED_SECONDS = 30.0
-WALL_MINIMUM_REPORTS = 3
-OUTPUT_SPIKE_W = 2000.0  # Operational shedding threshold, not an inverter rating.
 HEATER_OFF_MAX_W = 100.0  # Non-heating evidence, not an amp or appliance-rating conversion.
 BATTERY_RESERVE_PERCENT = 40.0
 TELEMETRY_MAX_AGE_SECONDS = 180
@@ -113,102 +101,117 @@ class PowerReading:
     heater_w: float | None = None
     circuit_issue: str | None = None
 
-    @property
-    def output_limits_bypassed(self):
-        """Only validated current circuit consumption and reserve qualify.
+    ac_enabled: bool | None = None
+    supply_reported_at: float | None = None
+    meter_issue: str | None = None
+    diagnostic_issues: tuple = ()
+    supply_evidence: str = "unverified"
 
-        These values come from evaluate_power, never from persisted evidence.
-        Positive circuit watts do not establish that the inverter is charging.
-        """
-        return (not self.circuit_issue and self.circuit_w is not None
-                and self.circuit_w > 0 and self.battery_percent is not None
-                and BATTERY_RESERVE_PERCENT < self.battery_percent <= 100)
+    @property
+    def supplying_loads(self):
+        return self.ac_enabled is True and self.output_w is not None and self.output_w > 0
 
     @property
     def safe_to_rearm(self):
-        return (not self.issue and self.input_budget_w is not None
-                and self.input_w < self.input_budget_w * .85
-                and (self.output_limits_bypassed or self.output_w < OUTPUT_SPIKE_W * .8)
+        return (not self.issue and self.ac_enabled is True
+                and self.battery_percent > BATTERY_RESERVE_PERCENT
+                and not self.meter_issue
                 and (self.heater_a is None or self.heater_a < 1)
-                and (self.heater_w is None or self.heater_w < HEATER_OFF_MAX_W)
-                and self.battery_percent > BATTERY_RESERVE_PERCENT)
+                and (self.heater_w is None or self.heater_w < HEATER_OFF_MAX_W))
+
+
+def _device_feedback(state, now, *, after=None):
+    try:
+        from .controller.device_feedback import device_feedback
+    except ImportError:
+        from house_climate.device_feedback import device_feedback
+    return device_feedback(state, now, after=after)
+
+
+def _corroborated_ac(states, bindings, now, *, output_valid):
+    """Read AC intent with independent, current supply telemetry.
+
+    An unchanged event-driven switch need not manufacture a new report. Its
+    available On state is corroborated by the separately bound battery/output
+    reports; this is not a claim of a physical AC read or acquisition time.
+    Explicit, current physical feedback contradicting the HA state wins.
+    """
+    entity = bindings.ac_output_switch or bindings.emergency_ac_switch
+    state = states.get(entity)
+    value, attrs, reported = _state_parts(state)
+    if value not in ("on", "off") or attrs.get("restored") or attrs.get("assumed_state"):
+        return None, None, "unverified"
+    try:
+        stamp = _timestamp(reported)
+        if stamp > now + 5:
+            return None, None, "unverified"
+    except (ValueError, TypeError, OverflowError):
+        return None, None, "unverified"
+    physical, physical_stamp = _device_feedback(state, now)
+    proof = attrs.get("device_report")
+    if isinstance(proof, Mapping) and proof.get("state") in ("on", "off"):
+        try:
+            age = now - _timestamp(proof.get("reported_at"))
+            if -5 <= age <= TELEMETRY_MAX_AGE_SECONDS and proof["state"] != value:
+                return None, None, "contradictory"
+        except (ValueError, TypeError, OverflowError):
+            pass
+    if physical is not None:
+        return physical, physical_stamp, "device_report"
+    if value == "off":
+        return value, stamp, "reported_off"
+    if not output_valid:
+        return None, None, "unverified"
+    # Zero watts is inconclusive before startup, not proof that AC is Off.
+    _, _, output_report = _state_parts(states.get(bindings.output_power))
+    return value, _timestamp(output_report), "corroborating_reports"
 
 
 def evaluate_power(states, bindings: PowerBindings, now=None):
-    """Read independent limits; no inferred circuit-current value is presented."""
+    """Eligibility uses corroborating supply signals, with no watt ceilings."""
     now = time.time() if now is None else now
-    values = {}
-    try:
-        _, attrs, _ = _state_parts(states.get(bindings.circuit_power))
-        if attrs.get("restored") or attrs.get("assumed_state"):
-            raise ValueError(f"{bindings.circuit_power}: circuit report is restored or assumed")
-        values["circuit_w"] = _measurement(states, bindings.circuit_power,
-                                         {"W": 1, "kW": 1000}, now)
-    except ValueError as exc:
-        # Unknown is not zero or proof of an outage. It cannot qualify the
-        # output exception, but does not independently inhibit heat/recovery.
-        values["circuit_issue"] = str(exc)[:512]
+    values, missing, advisory, meter_issues = {}, [], [], []
     specs = (
-        ("input_w", bindings.input_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
-        ("output_w", bindings.output_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
-        ("battery_percent", bindings.battery, {"%": 1}, BATTERY_MAX_AGE_SECONDS),
-        ("heater_a", bindings.heater_current, {"A": 1, "mA": .001}, TELEMETRY_MAX_AGE_SECONDS),
-        ("heater_w", getattr(bindings, "heater_power", None), {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS),
+        ("battery_percent", bindings.battery, {"%": 1}, BATTERY_MAX_AGE_SECONDS, missing),
+        ("output_w", bindings.output_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS, missing),
+        ("input_w", bindings.input_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS, advisory),
+        ("circuit_w", bindings.circuit_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS, advisory),
+        ("heater_a", bindings.heater_current, {"A": 1, "mA": .001}, TELEMETRY_MAX_AGE_SECONDS, meter_issues),
+        ("heater_w", bindings.heater_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS, meter_issues),
     )
-    missing = []
-    for key, entity, units, age in specs:
-        if key in {"heater_a", "heater_w"} and entity is None:
-            # An explicitly absent meter is unknown, never a fresh zero.
+    for key, entity, units, age, errors in specs:
+        if entity is None and key in {"heater_a", "heater_w"}:
             continue
         try:
-            if key in {"heater_w", "battery_percent"}:
-                _, attrs, _ = _state_parts(states.get(entity))
-                if attrs.get("restored") or attrs.get("assumed_state"):
-                    raise ValueError(f"{entity}: {key} report is restored or assumed")
-            values[key] = _measurement(states, entity, units, now, maximum_age=age)
-        except ValueError as exc:
-            missing.append(str(exc))
-    try:
-        # The heater plug is on the inverter output and cannot measure wall
-        # brownouts. The circuit phase is unknown: use the lower wall phase.
-        phases = []
-        for entity in (bindings.wall_phase_a_voltage, bindings.wall_phase_b_voltage):
             _, attrs, _ = _state_parts(states.get(entity))
             if attrs.get("restored") or attrs.get("assumed_state"):
-                raise ValueError(f"{entity}: voltage report is restored or assumed")
+                raise ValueError(f"{entity}: restored or assumed report")
+            values[key] = _measurement(states, entity, units, now, maximum_age=age)
+        except ValueError as exc:
+            errors.append(str(exc))
+            if key == "circuit_w":
+                values["circuit_issue"] = str(exc)
+    phases = []
+    for entity in (bindings.wall_phase_a_voltage, bindings.wall_phase_b_voltage):
+        try:
             phases.append(_measurement(states, entity, {"V": 1}, now))
-        if not all(90 <= voltage <= 140 for voltage in phases):
-            raise ValueError("Wall voltage outside plausible bounds")
-        values["voltage_v"] = min(phases)
-    except ValueError as exc:
-        missing.append(str(exc))
-    # This is an operating budget in real watts, not measured RMS amperage.
-    # Neither missing voltage nor an invalid second phase permits a nominal
-    # fallback. Sustained evidence is applied by the stateful guard below.
-    voltage = values.get("voltage_v")
-    budget = INPUT_CURRENT_CEILING_A * voltage if voltage is not None else None
-    issue = None
-    # The heater plug is downstream of the inverter. Its current is useful for
-    # telemetry validation and proving low load before rearming, but must not
-    # impose the wall-input 12 A ceiling on normal battery-supplied output.
-    if (values.get("output_w", -1) >= OUTPUT_SPIKE_W
-            and not PowerReading(**values).output_limits_bypassed):
-        issue = f"Elite output spike reached {OUTPUT_SPIKE_W:g} W"
-    elif 0 <= values.get("battery_percent", -1) <= BATTERY_RESERVE_PERCENT:
-        issue = "Elite battery is at or below the 40% network reserve"
-    # Missing unrelated telemetry must not hide a conclusive input/output trip.
-    if issue:
-        return PowerReading(**values, input_budget_w=budget, issue=issue)
-    if missing:
-        return PowerReading(**values, input_budget_w=budget,
-                            issue="Power telemetry unavailable: " + "; ".join(missing), telemetry_missing=True)
-    if values["battery_percent"] > 100:
-        return PowerReading(**values, issue="Power telemetry outside plausible bounds", telemetry_missing=True)
-    if values["input_w"] >= budget:
-        return PowerReading(**values, input_budget_w=budget,
-                            issue=f"Elite input reached the {budget:g} W grid-input operating budget",
-                            wall_load_only=True)
-    return PowerReading(**values, input_budget_w=budget, issue=issue)
+        except ValueError as exc:
+            advisory.append(str(exc))
+    values["voltage_v"] = min(phases) if len(phases) == 2 else None
+    ac, stamp, evidence = _corroborated_ac(states, bindings, now,
+        output_valid="output_w" in values and "battery_percent" in values)
+    values.update(ac_enabled=(ac == "on" if ac is not None else None), supply_reported_at=stamp,
+                  supply_evidence=evidence, diagnostic_issues=tuple(advisory),
+                  meter_issue="; ".join(meter_issues) or None)
+    if ac is None:
+        missing.append("AC output requires an available On report corroborated by current battery and output telemetry")
+    battery = values.get("battery_percent")
+    if battery is not None and battery > 100:
+        missing.append("Battery percentage outside plausible bounds")
+    issue = ("Battery is at or below the 40% network reserve" if battery is not None and battery <= 40 else
+             "Battery AC output is disabled" if ac == "off" else
+             "Power telemetry unavailable: " + "; ".join(missing) if missing else None)
+    return PowerReading(**values, issue=issue, telemetry_missing=bool(missing))
 
 
 class HeaterPowerGuard:
@@ -231,17 +234,11 @@ class HeaterPowerGuard:
             raise ValueError("Choose either a heater current or heater power meter")
         self.entity_ids = bindings.entity_ids
         self.hass, self.live, self.entry_id, self.notify = hass, live, entry_id, notify
+        self.manual_override = lambda: False
+        self.alerts = None
+        self._low_battery_alert_active = False
         self._clock, self._wall_clock = clock, wall_clock
         self._reading = PowerReading(issue="Waiting for power telemetry", telemetry_missing=True)
-        try:
-            from .controller.wall_power import PowerReport, WallPowerBudget
-        except ImportError:
-            from house_climate.wall_power import PowerReport, WallPowerBudget
-        self._wall_report_type = PowerReport
-        self._wall_budget = WallPowerBudget(max_age_seconds=TELEMETRY_MAX_AGE_SECONDS,
-            hold_seconds=WALL_EXCEED_SECONDS, minimum_reports=WALL_MINIMUM_REPORTS, roles=("input",))
-        self._wall_budget_state = None
-        self._wall_pending = False
         self._blocked = True
         self._latched = False
         self._cut_owned = False
@@ -274,6 +271,11 @@ class HeaterPowerGuard:
         self._cut_changed = None
         self._persistence_error = None
         self._store = None
+        self._recovery_feedback = {}
+        self.async_read_recovery_feedback = None
+        self._shutdown_fault = False
+        self._legacy_cooldown = False
+        self._restore_approved_until = None
         self._store_lock = asyncio.Lock()
         self._restore_intent = False
         self._manual_power_seen = False
@@ -307,6 +309,8 @@ class HeaterPowerGuard:
         self._saved_binding_identity = self._binding_identity()
         self._shutdown_confirmation = "unconfirmed"
         self._shutdown_contradicted = False
+        self._fan_only_authorized = False
+        self._fan_only_task = None
         self._shutdown_stage = "idle"
         self._aggregate_evidence = None
         self._aggregate_outcome = None
@@ -318,8 +322,8 @@ class HeaterPowerGuard:
         self._group_notice_queued = False
         self._notice_error = None
         self.pending_external_jobs = lambda: ()
-        # Only the runtime can establish that the real comfort controller and
-        # its ownership/jobs are stopped. A standalone guard fails closed.
+        # Runtime callbacks distinguish stopped commissioning from stopped auxiliary
+        # work during recovery. A standalone guard fails closed.
         self.commissioning_controller_off = lambda: False
         self.recovery_controller_off = lambda: False
         self._commissioning_task = None
@@ -335,7 +339,17 @@ class HeaterPowerGuard:
             "maximum_seconds": COMMISSIONING_MAX_SECONDS}
 
     def _state(self, entity):
-        return self.hass.states.get(entity) if entity is not None else None
+        state = self.hass.states.get(entity) if entity is not None else None
+        proof = self._recovery_feedback.get(entity)
+        if proof is None or state is None:
+            return state
+        value, attrs, reported = _state_parts(state)
+        changed = state.get("last_changed") if isinstance(state, dict) else state.last_changed
+        if value != proof["state"] or changed != proof["last_changed"]:
+            self._recovery_feedback.pop(entity, None)
+            return state
+        return {"state": value, "attributes": {**attrs, "device_report": proof},
+                "last_reported": reported, "last_changed": changed}
 
     def _binding_identity(self):
         identity = {key: getattr(self.bindings, key, None) for key in (
@@ -381,7 +395,8 @@ class HeaterPowerGuard:
                 return False
             return True
         try:
-            stamp = _timestamp(reported)
+            _, physical_stamp = _device_feedback(self._state(self.bindings.heater_switch), now)
+            stamp = physical_stamp if physical_stamp is not None else _timestamp(reported)
             after = max(self._isolation_after, self._cut_request_wall or 0)
             if stamp <= after or not -5 <= now - stamp <= TELEMETRY_MAX_AGE_SECONDS:
                 return False
@@ -392,7 +407,7 @@ class HeaterPowerGuard:
         return True
 
     def _external_power(self):
-        """Read wall/inverter safety without inventing an absent heater value."""
+        """Read reserve/supply eligibility without inventing an absent heater value."""
         bindings = replace(self.bindings, heater_current=None, heater_power=None)
         return evaluate_power(self._states(), bindings, self._wall_clock())
 
@@ -424,6 +439,43 @@ class HeaterPowerGuard:
                 or (self.bindings.heater_switch is not None and not self._switch_observed("on"))
                 or (self.bindings.heater_switch is None and not self._emergency_enabled)
                 or (self._emergency_enabled and not self._ac_observed("on")))
+
+    def _fan_recovery_ready(self):
+        """Only a proved ordinary stop can become fan-only during a heat hold."""
+        if (not self._latched or self.manual_control or self._closing or self._closed
+                or self._persistence_error or self._shutdown_fault or self._shutdown_contradicted
+                or self._manual_recovery_required or self._emergency_ac_latched or self._identity_mismatch
+                or self._cut_owned or self._legacy_cooldown or self.commissioning_busy
+                or self._restoring or self._cutting or self._positive_tasks or self._service_tasks
+                or self._compensation_pending or (self._action_task and not self._action_task.done())
+                or self._external_power().issue
+                or (self.bindings.heater_switch is not None and not self._switch_observed("on"))
+                or (self.bindings.heater_switch is None and not self._emergency_enabled)
+                or (self._emergency_enabled and not self._ac_observed("on"))):
+            return False
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if any(job is not current and job is not self._fan_only_task
+               for job in self.pending_external_jobs()):
+            return False
+        if self._heater_meter_stopped() is not True:
+            return False
+        if self._heater_off(fresh=True) and self.shutdown_confirmed:
+            return True
+        state, attrs, reported = _state_parts(self._state(self.bindings.heater))
+        try:
+            return (self._fan_only_authorized and state == "fan_only"
+                    and attrs.get("hvac_action") not in ("heating", "cooling")
+                    and not attrs.get("restored") and not attrs.get("assumed_state")
+                    and 0 <= self._wall_clock() - _timestamp(reported) <= TELEMETRY_MAX_AGE_SECONDS)
+        except (ValueError, TypeError, OverflowError):
+            return False
+
+    @property
+    def fan_blocked(self):
+        return self.blocked and not self._fan_recovery_ready()
 
     @property
     def switch_cut_owned(self):
@@ -479,27 +531,92 @@ class HeaterPowerGuard:
         return self._switch_observed("off", after=self._cut_request_wall)
 
     def _wall_diagnostics(self):
-        if self._wall_budget_state is None:
-            return None
-        wall = self._wall_budget_state.as_dict()
-        wall["enforced_sources"] = ["input"]
-        wall["sources"]["input"]["enforced"] = True
-        try:
-            _, _, reported = _state_parts(self._state(self.bindings.circuit_power))
-            stamp = _timestamp(reported)
-        except (ValueError, TypeError, OverflowError):
-            stamp = None
+        return {"enforced_sources": [], "qualified_sources": [], "pending_sources": [], "sources": {
+            role: {"enforced": False, "status": "advisory", "latest_w": value,
+                   "reading_status": "unavailable" if value is None else "available",
+                   "reason": "Diagnostic only; no watt ceiling"}
+            for role, value in (("input", self._reading.input_w), ("circuit", self._reading.circuit_w))}}
+
+    def _heater_draw_status(self):
         r = self._reading
-        wall["sources"]["circuit"] = {
-            "role": "circuit", "status": "advisory", "enforced": False,
-            "reading_status": "unavailable" if r.circuit_issue else "available",
-            "reason": ("Advisory only; " + r.circuit_issue if r.circuit_issue else
-                       "Advisory circuit load; positive watts can qualify the output-limit exception"),
-            "source": self.bindings.circuit_power, "latest_w": r.circuit_w,
-            "reported_at": stamp, "first_reported_at": None, "report_count": 0,
-            "evidence_seconds": 0, "minimum_w": None,
-        }
-        return wall
+        if r.meter_issue or (r.heater_w is None and r.heater_a is None):
+            return "unknown"
+        substantial = r.heater_w >= HEATER_OFF_MAX_W if r.heater_w is not None else r.heater_a >= 1
+        mode, _, _ = _state_parts(self._state(self.bindings.heater))
+        if substantial:
+            return "heating_draw_observed" if mode == "heat" else "load_without_heat_mode"
+        return "idle" if mode == "heat" else "low_load"
+
+    @property
+    def manual_control(self):
+        """Only explicit durable ownership, never an inferred app adjustment."""
+        try:
+            return self.manual_override() is True
+        except Exception:
+            return False
+
+    @property
+    def _manual_policy_control(self):
+        """A policy-only saved claim does not reclaim deliberate manual heat.
+
+        Actual failed stops, changed bindings and uncertain device work retain
+        their existing cleanup obligations even during manual ownership.
+        """
+        return self.manual_control and not (
+            self._shutdown_fault or self._shutdown_contradicted
+            or self._manual_recovery_required or self._emergency_ac_latched
+            or self._identity_mismatch or self.commissioning_active)
+
+    @property
+    def manual_return_issue(self):
+        """Returning policy ownership cannot acknowledge electrical faults."""
+        if self._persistence_error:
+            return self._persistence_error
+        if (self._identity_mismatch or self._shutdown_fault or self._shutdown_contradicted
+                or self._manual_recovery_required or self._emergency_ac_latched or self._cut_owned):
+            return "Complete explicit heater shutdown/cutoff recovery before returning automated control"
+        if (self._restoring or self._cutting or self._restore_intent or self._compensation_pending
+                or self._positive_tasks or self._service_tasks or self.pending_external_jobs()
+                or (self._action_task is not None and not self._action_task.done())
+                or (self._save_task is not None and not self._save_task.done())):
+            return "Wait for pending heater service and persistence work before returning control"
+        return None
+
+    def _shutdown_evidence(self):
+        if self._shutdown_contradicted:
+            return "contradictory"
+        if self.power_cut_confirmed:
+            return "corroborated_off"
+        if self._heater_off(fresh=True):
+            if self._heater_meter_stopped() is True:
+                return "corroborated_off"
+            return "reported_off_unverified"
+        return "not_observed"
+
+    def _update_alerts(self):
+        if self.alerts is None:
+            return
+        reading = self._reading
+        reserve = reading.battery_percent
+        if reserve is not None and 0 <= reserve <= 100:
+            self._low_battery_alert_active = reserve <= BATTERY_RESERVE_PERCENT
+        try:
+            self.alerts.update("auxiliary_low_battery", self._low_battery_alert_active,
+                "Home Climate: battery reserve low",
+                ("The last qualified battery reading is at or below the 40% reserve. Dyson is under manual control; "
+                 "Home Climate will not apply the automated reserve cutoff." if self.manual_control else
+                 "The last qualified battery reading is at or below the 40% reserve. Automated Dyson heat and circulation are inhibited."),
+                severity="critical")
+            self.alerts.update("auxiliary_shutdown_fault", bool(self._shutdown_fault or self._shutdown_contradicted
+                               or self._emergency_ac_latched),
+                "Home Climate: heater shutdown needs attention",
+                self._reason or "Heater shutdown or isolation requires explicit recovery.", severity="critical")
+            self.alerts.update("auxiliary_retained_recovery", self._retained_cut_recovery_pending,
+                "Home Climate: heater recovery pending",
+                "A saved heater cutoff claim requires supported recovery before automated use.")
+        except Exception:
+            # Notification problems must never interrupt stop/isolation work.
+            _LOGGER.debug("Power-guard alert update failed", exc_info=True)
 
     @property
     def diagnostics(self):
@@ -526,12 +643,19 @@ class HeaterPowerGuard:
                 "heater_power_configured": getattr(self.bindings, "heater_power", None) is not None,
                 "heater_meter_kind": self._heater_meter()[3],
                 "electrical_stop_confirmed": shutdown_active and self._heater_meter_stopped() is True,
+                "shutdown_evidence": self._shutdown_evidence(),
+                "shutdown_contradicted": self._shutdown_contradicted,
+                "manual_override": self.manual_control,
                 "shutdown_active": shutdown_active,
                 "shutdown_stage": self._shutdown_stage if shutdown_active else "idle",
                 "shutdown_confirmation": self._shutdown_confirmation if shutdown_active else "inactive",
                 "wall_power_budget": self._wall_diagnostics(),
                 "circuit_enforced": False,
-                "output_limits_bypassed": r.output_limits_bypassed,
+                "watt_limits_enforced": False,
+                "ac_output_enabled": r.ac_enabled, "supply_reported_at": r.supply_reported_at,
+                "supply_evidence": r.supply_evidence,
+                "supplying_loads": r.supplying_loads, "heater_draw_status": self._heater_draw_status(),
+                "heater_meter_issue": r.meter_issue, "diagnostic_issues": r.diagnostic_issues,
                 "aggregate_stop": (self._aggregate_outcome.as_dict()
                                    if shutdown_active and self._aggregate_outcome else None),
                 "emergency_ac_enabled": self._emergency_enabled,
@@ -541,6 +665,8 @@ class HeaterPowerGuard:
                 "emergency_ac_inflight": bool(self._emergency_service_tasks),
                 "emergency_notification_error": self._notice_error,
                 "manual_recovery_required": self._manual_recovery_required,
+                "shutdown_fault": self._shutdown_fault,
+                "restore_approval_pending": self._restore_approved_until is not None,
                 "retained_cut_recovery_pending": self._retained_cut_recovery_pending,
                 "binding_identity_mismatch": self._identity_mismatch,
                 "persistence_error": self._persistence_error,
@@ -552,6 +678,7 @@ class HeaterPowerGuard:
                 "branch_current_measured": False, "live": self.live}
 
     def _publish(self):
+        self._update_alerts()
         self._publish_emergency_notice()
         current = self.diagnostics
         stable = {key: current[key] for key in (
@@ -559,15 +686,14 @@ class HeaterPowerGuard:
             "restoring", "restore_attempts", "power_restore_inflight",
             "power_restore_cleanup_pending", "persistence_error", "live",
             "shutdown_active", "shutdown_stage", "shutdown_confirmation", "aggregate_stop",
+            "diagnostic_issues", "shutdown_evidence", "shutdown_contradicted", "manual_override", "supply_evidence",
             "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "manual_recovery_required",
-            "retained_cut_recovery_pending",
+            "retained_cut_recovery_pending", "shutdown_fault", "restore_approval_pending",
             "binding_identity_mismatch", "emergency_notification_error", "commissioning")}
-        wall = self._wall_budget_state
-        stable["wall_power_budget"] = ((wall.qualified_sources, wall.pending_sources,
-                                      wall.unavailable_sources) if wall is not None else None)
-        stable["circuit_advisory_health"] = self._reading.circuit_issue
-        stable["output_limits_bypassed"] = self._reading.output_limits_bypassed
+        stable["ac_output_enabled"] = self._reading.ac_enabled
+        stable["heater_draw_status"] = self._heater_draw_status()
+        stable["heater_meter_issue"] = self._reading.meter_issue
         if stable != self._last_diagnostics:
             self._last_diagnostics = stable
             self.notify()
@@ -637,7 +763,7 @@ class HeaterPowerGuard:
         self._publish()
 
     def _states(self):
-        return {entity: self.hass.states.get(entity) for entity in self.entity_ids}
+        return {entity: self._state(entity) for entity in self.entity_ids}
 
     async def async_load(self):
         from homeassistant.helpers.storage import Store
@@ -648,7 +774,10 @@ class HeaterPowerGuard:
         if not isinstance(data, dict):
             data = {"latched": True}
         self._latched = data.get("latched") is True
+        self._shutdown_fault = data.get("shutdown_fault") is True
         self._cut_owned = data.get("switch_cut_owned") is True
+        self._legacy_cooldown = bool(self._latched and (data.get("supply_policy_version") != 1
+                                                      or data.get("legacy_cooldown") is True))
         self._emergency_ac_latched = data.get("emergency_ac_latched") is True
         self._emergency_ac_reason = data.get("emergency_ac_reason")
         self._emergency_ac_status = "unconfirmed" if self._emergency_ac_latched else "idle"
@@ -676,7 +805,7 @@ class HeaterPowerGuard:
             self._saved_binding_identity = prior_identity
             self._cut_owned = False
         self._manual_recovery_required |= data.get("manual_recovery_required") is True
-        self._manual_recovery_required |= self._emergency_ac_latched
+        self._manual_recovery_required |= self._emergency_ac_latched or self._shutdown_fault
         self._retained_cut_claim_after = loaded_at if self._cut_owned else None
         prior_test = data.get("commissioning")
         valid_test = (isinstance(prior_test, dict) and type(prior_test.get("active")) is bool
@@ -770,17 +899,6 @@ class HeaterPowerGuard:
                     self._cut_owned = False
                     self._save()
                     self._commissioning_failed("Manual relay change interrupted restoration", status="interrupted")
-            if _event and _event.data.get("entity_id") in (
-                    self.bindings.input_power, self.bindings.circuit_power,
-                    self.bindings.wall_phase_a_voltage, self.bindings.wall_phase_b_voltage):
-                # Consume each known event, not only a later coalesced state.
-                # Otherwise a low/unavailable interval could disappear before
-                # the scheduled check and be credited as continuous high load.
-                states = self._states()
-                states[_event.data["entity_id"]] = _event.data.get("new_state")
-                now = self._wall_clock()
-                reading = evaluate_power(states, self.bindings, now)
-                self._observe_wall_budget(states, reading, now)
             if _event and self._aggregate_baseline is not None:
                 entity = _event.data.get("entity_id")
                 state = _event.data.get("new_state")
@@ -821,7 +939,25 @@ class HeaterPowerGuard:
         if entity_id != self.bindings.heater:
             return
         self._observe()
-        if self.blocked or self._wall_pending:
+        if self.manual_control:
+            from .controller.ha import HAActivationDeferred
+            raise HAActivationDeferred("Dyson is under manual control; return ownership before automated activation")
+        if ((body or {}).get("hvac_mode") == "fan_only"
+                and not any(key in (body or {}) for key in ("temperature", "target_temp_low", "target_temp_high"))
+                and self._fan_recovery_ready()):
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            jobs = self.pending_external_jobs()
+            if current is not None and current in jobs:
+                if self._fan_only_task in jobs and self._fan_only_task is not current:
+                    from .controller.ha import HAActivationDeferred
+                    raise HAActivationDeferred("Previous fan-only service is still running")
+                self._fan_only_task = current
+            self._fan_only_authorized = True
+            return
+        if self.blocked:
             from .controller.ha import HAActivationDeferred
             raise HAActivationDeferred(self._reason or "Heater power is not available")
 
@@ -886,6 +1022,14 @@ class HeaterPowerGuard:
 
     def _ac_observed(self, desired, *, after=None):
         entity = getattr(self.bindings, "emergency_ac_switch", None)
+        if desired == "on" and after is None:
+            # Ordinary availability follows the same corroborating contract as
+            # admission. Explicit post-emergency restoration below still needs
+            # new evidence after the emergency command boundary.
+            ac, _, _ = _corroborated_ac(self._states(),
+                replace(self.bindings, ac_output_switch=entity), self._wall_clock(),
+                output_valid=self._reading.output_w is not None and self._reading.battery_percent is not None)
+            return ac == "on"
         state, attrs, reported = _state_parts(self._state(entity))
         if state != desired or attrs.get("restored") or attrs.get("assumed_state"):
             return False
@@ -1062,7 +1206,7 @@ class HeaterPowerGuard:
         external = replace(self.bindings, heater_current=None, heater_power=None)
         if evaluate_power(states, external, wall).issue:
             return self._supervised_restore_abort("Authoritative electrical protection interrupted restoration")
-        for role in ("battery", "input_power", "output_power", "wall_phase_a_voltage", "wall_phase_b_voltage"):
+        for role in ("battery", "output_power"):
             _, attrs, _ = _state_parts(states.get(getattr(self.bindings, role)))
             if attrs.get("restored") or attrs.get("assumed_state"):
                 return self._supervised_restore_abort("Authoritative electrical report is not trusted")
@@ -1232,7 +1376,7 @@ class HeaterPowerGuard:
             return False
 
     def _commissioning_external_trusted(self):
-        for role in ("battery", "input_power", "output_power", "wall_phase_a_voltage", "wall_phase_b_voltage"):
+        for role in ("battery", "output_power"):
             _, attrs, _ = _state_parts(self._state(getattr(self.bindings, role)))
             if attrs.get("restored") or attrs.get("assumed_state"):
                 return False
@@ -1336,7 +1480,11 @@ class HeaterPowerGuard:
 
     async def async_acknowledge_emergency(self):
         """Acknowledge manual recovery; never energize an outlet or shared AC."""
+        if (self._recovery_task is not None and not self._recovery_task.done()
+                and getattr(self, "_recovery_operation", None) == "restore"):
+            raise RuntimeError("A restoration approval is already in progress")
         if self._recovery_task is None or self._recovery_task.done():
+            self._recovery_operation = "acknowledge"
             self._recovery_task = self.hass.async_create_task(self._acknowledge_emergency())
         return await asyncio.shield(self._recovery_task)
 
@@ -1362,33 +1510,26 @@ class HeaterPowerGuard:
             raise RuntimeError("Manually restore and verify AC output before acknowledging recovery")
         state, attrs, reported = _state_parts(self._state(self.bindings.heater))
         barrier = self._manual_recovery_wall or self._emergency_ac_request_wall or 0
-        if retained:
+        if retained or (self._shutdown_fault and self._cut_owned):
             if (self._closing or self._restoring or self._cutting or self._restore_intent
                     or self.commissioning_active or self._commissioning_preparing
                     or self._emergency_service_tasks
                     or (self._compensating_task is not None and not self._compensating_task.done())
                     or not self._recovery_controller_stopped()):
-                raise RuntimeError("Stop the comfort controller and wait for all recovery jobs to finish")
+                raise RuntimeError("Stop auxiliary work and wait for all recovery jobs to finish")
             if self._store is None:
                 raise RuntimeError("Durable storage is required to acknowledge a retained heater cutoff")
             if (self._saved_binding_identity != self._binding_identity()
                     or not self._heater_meter_configured):
                 raise RuntimeError("Matching heater wiring and a dedicated meter are required")
-            barrier = max(barrier, self._retained_cut_claim_after)
-            relay, relay_attrs, relay_reported = _state_parts(self._state(self.bindings.heater_switch))
-            try:
-                relay_stamp = _timestamp(relay_reported)
-                relay_fresh = (relay_stamp > barrier
-                    and -5 <= self._wall_clock() - relay_stamp <= TELEMETRY_MAX_AGE_SECONDS)
-            except (ValueError, TypeError, OverflowError):
-                relay_fresh = False
-            if (relay != "on" or not relay_fresh or relay_attrs.get("restored")
-                    or relay_attrs.get("assumed_state")):
-                raise RuntimeError("A fresh dedicated relay On report after restart is required")
+            barrier = max(barrier, self._retained_cut_claim_after or 0)
+            relay, relay_stamp = _device_feedback(self._state(self.bindings.heater_switch), self._wall_clock(), after=barrier)
+            if self.bindings.heater_switch is not None and relay != "on":
+                raise RuntimeError("Source-confirmed dedicated relay On feedback after recovery is required")
             # A subsequent manual relay cycle invalidates pre-restoration Off
             # and low-meter evidence, even if both samples remain recent.
-            changed = self._switch_changed()
-            if changed is None or changed > relay_stamp:
+            changed = self._switch_changed() if self.bindings.heater_switch is not None else barrier
+            if changed is None or (relay_stamp is not None and changed > relay_stamp):
                 raise RuntimeError("Fresh dedicated relay feedback is required") from None
             barrier = max(barrier, changed)
             if not self._commissioning_external_trusted():
@@ -1422,15 +1563,101 @@ class HeaterPowerGuard:
                 self._manual_recovery_required, self._identity_mismatch,
                 self._latched, self._trip_wall, self._cut_owned,
                 self._off_request_wall, self._shutdown_contradicted,
-                self._retained_cut_claim_after, tuple(sorted(self._binding_identity().items())))
+                self._retained_cut_claim_after, self._shutdown_fault, tuple(sorted(self._binding_identity().items())))
+
+    async def _refresh_recovery_feedback(self):
+        if self.async_read_recovery_feedback is None or self.bindings.heater_switch is None:
+            return
+        entity = self.bindings.heater_switch
+        self._recovery_feedback.pop(entity, None)
+        before = self.hass.states.get(entity)
+        if before is None:
+            return
+        changed = before.get("last_changed") if isinstance(before, dict) else before.last_changed
+        started = self._wall_clock()
+        try:
+            value = await self.async_read_recovery_feedback(entity)
+        except Exception:
+            return
+        state = self.hass.states.get(entity)
+        if value not in ("on", "off") or state is None:
+            return
+        current_changed = state.get("last_changed") if isinstance(state, dict) else state.last_changed
+        if (entity != self.bindings.heater_switch or changed != current_changed
+                or _state_parts(state)[0] != value):
+            return
+        # Date evidence conservatively at read dispatch, never at a delayed
+        # callback. A relay transition during the read invalidates the reply.
+        self._recovery_feedback[entity] = {"state": value,
+            "reported_at": datetime.fromtimestamp(started, timezone.utc).isoformat(),
+            "last_changed": changed}
+
+    async def async_approve_restore(self, *, confirm=False):
+        """Approve one bounded dedicated-relay recovery; never shared AC On."""
+        if confirm is not True:
+            raise RuntimeError("Explicit confirmation is required before restoring heater power")
+        if self._recovery_task is not None and not self._recovery_task.done():
+            raise RuntimeError("A heater recovery operation is already in progress")
+        self._recovery_operation = "restore"
+        self._recovery_task = self.hass.async_create_task(self._approve_restore())
+        return await asyncio.shield(self._recovery_task)
+
+    async def _approve_restore(self):
+        if (not self.live or self._closed or self._closing or self.commissioning_active
+                or self._emergency_ac_latched or self._identity_mismatch or not self._cut_owned
+                or self._store is None or self._saved_binding_identity != self._binding_identity()
+                or self._restoring or self._cutting or self._restore_intent
+                or (self._save_task is not None and not self._save_task.done())
+                or not self._heater_meter_configured or not self._recovery_controller_stopped()
+                or self._action_task is not None and not self._action_task.done()
+                or self._service_tasks or self._positive_tasks or self.pending_external_jobs()
+                or self._compensation_pending or self._persistence_error):
+            raise RuntimeError("Dedicated recovery requires matching ownership, storage and no pending auxiliary jobs")
+        if self._tripped_at is None or self._clock() - self._tripped_at < COOLDOWN_SECONDS:
+            raise RuntimeError("Wait for the five-minute cutoff cooldown before approving restoration")
+        await self._refresh_recovery_feedback()
+        def ready():
+            barrier = max(self._retained_cut_claim_after or 0, self._cut_request_wall or 0)
+            value, stamp = _device_feedback(self._state(self.bindings.heater_switch), self._wall_clock(), after=barrier)
+            return (value == "off" and self._external_power().safe_to_rearm
+                    and self._heater_meter_stopped(after=barrier) is not False
+                    and self._recovery_controller_stopped() and not self.pending_external_jobs()
+                    and not self._service_tasks and not self._positive_tasks
+                    and not self._closing and not self._closed and not self._restoring
+                    and not self._cutting and not self._restore_intent
+                    and not self._persistence_error and not self._compensation_pending
+                    and (self._action_task is None or self._action_task.done())
+                    and (self._save_task is None or self._save_task.done()))
+        if not ready():
+            raise RuntimeError("Fresh physical relay Off and verified supply are required before restoring power")
+        generation = self._manual_recovery_generation()
+        # Save the retained obligation; approval itself is never a persisted
+        # permission to turn On following a restart.
+        try:
+            async with self._store_lock:
+                await self._store.async_save(self._saved_state())
+        except Exception as exc:
+            self._persistence_error = "Cannot persist heater restoration approval"
+            self._publish()
+            raise RuntimeError(self._persistence_error) from exc
+        if generation != self._manual_recovery_generation() or not ready():
+            raise RuntimeError("Recovery changed during approval; verify it again")
+        self._restore_approved_until = self._clock() + 120
+        self._manual_recovery_required = False
+        self._safe_since = None
+        self._schedule_check()
+        self._publish()
+        return True
 
     async def _acknowledge_emergency(self):
+        await self._refresh_recovery_feedback()
         barrier, reading = self._manual_recovery_evidence()
         generation = self._manual_recovery_generation()
         # Publish/retain inhibition until the prospective cleared state is
         # durable. A cancelled button caller cannot cancel this actual save.
         prospective = {**self._saved_state(), "emergency_ac_latched": False,
-                       "manual_recovery_required": False, "switch_cut_owned": False,
+                       "manual_recovery_required": False, "switch_cut_owned": False, "shutdown_fault": False,
+                       "legacy_cooldown": self._legacy_cooldown or self._shutdown_fault,
                        "binding_identity": self._binding_identity(),
                        "emergency_ac_request_wall": None, "emergency_ac_attempts": 0,
                        "emergency_ac_reason": None}
@@ -1460,6 +1687,8 @@ class HeaterPowerGuard:
         self._emergency_ac_latched = self._manual_recovery_required = self._identity_mismatch = False
         self._saved_binding_identity = self._binding_identity()
         self._cut_owned = False
+        self._legacy_cooldown |= self._shutdown_fault
+        self._shutdown_fault = False
         self._retained_cut_claim_after = None
         self._shutdown_contradicted = False
         self._persistence_error = None
@@ -1472,6 +1701,7 @@ class HeaterPowerGuard:
         self._manual_off_wall = barrier
         self._safe_since = None
         self._reading = reading
+        self._update_alerts()
         self._schedule_check()
         self._publish()
         return True
@@ -1509,23 +1739,13 @@ class HeaterPowerGuard:
         self._reason = reason
         self._safe_since = None
 
-    def _observe_wall_budget(self, states, reading, now):
-        reports = {}
-        for role, entity, watts in (
-                ("input", self.bindings.input_power, reading.input_w),):
-            _, attrs, reported = _state_parts(states.get(entity))
-            try:
-                reports[role] = (self._wall_report_type(entity, watts, _timestamp(reported))
-                    if watts is not None and not attrs.get("restored")
-                    and not attrs.get("assumed_state") else None)
-            except (ValueError, TypeError, OverflowError):
-                reports[role] = None
-        self._wall_budget_state = self._wall_budget.observe(now, reading.input_budget_w, reports)
-        return self._wall_budget_state
-
     def _observe(self):
         if self._closed:
             return
+        if self._restore_approved_until is not None and self._clock() >= self._restore_approved_until:
+            self._restore_approved_until = None
+            self._manual_recovery_required = True
+            self._save()
         now = self._wall_clock()
         if self.commissioning_active and self._commissioning_expired():
             self._commissioning_failed("Supervised relay test exceeded its time limit", status="interrupted")
@@ -1555,15 +1775,6 @@ class HeaterPowerGuard:
         if self.commissioning_active and (self._external_power().issue
                                          or not self._commissioning_external_trusted()):
             self._commissioning_failed("Authoritative electrical protection interrupted commissioning")
-        wall = self._observe_wall_budget(states, reading, now)
-        if wall.unavailable_sources and (reading.issue is None or reading.wall_load_only):
-            reading = replace(reading, issue="Wall-load power reports are unavailable or not current",
-                              telemetry_missing=True, wall_load_only=False)
-        self._wall_pending = reading.wall_load_only and not wall.qualified_sources
-        if reading.wall_load_only and wall.qualified_sources:
-            reading = replace(reading,
-                issue=f"Sustained {', '.join(wall.qualified_sources)} wall load reached "
-                      f"the {reading.input_budget_w:g} W operating budget")
         self._reading = reading
         self._observe_aggregate_baseline()
         if self._persistence_error and self._clock() >= self._save_retry_at:
@@ -1605,7 +1816,8 @@ class HeaterPowerGuard:
             # Compensation itself keeps power_cut_confirmed false while its
             # job is pending. Requeue only for actual missing relay-Off proof,
             # or our own Off events can recursively request another cut.
-            if self.live and self._cut_owned and not self._switch_cut_observed():
+            if (self.live and self._cut_owned and not self._switch_cut_observed()
+                    and not self._manual_policy_control):
                 self._schedule_compensating_cut()
             self._publish()
             return
@@ -1615,11 +1827,9 @@ class HeaterPowerGuard:
             self._manual_power_seen = True
         if (self._cut_owned and not self._restoring and not self._cutting
                 and self._switch_observed("off") and self._manual_power_seen):
-            # An observed user On→Off after startup relinquishes our power
-            # restoration claim. Recreated Off feedback on reconnect does not.
-            self._cut_owned = False
-            self._cut_changed = None
-            self._manual_power_seen = False
+            # A manual relay cycle does not acknowledge a failed shutdown.
+            # Retain the obligation until explicit, durable recovery.
+            self._manual_recovery_required = True
             self._save()
         r = self._reading
         isolated = None if self._restoring else self._isolated_recovery_reading()
@@ -1627,18 +1837,38 @@ class HeaterPowerGuard:
             # Diagnostics retain the real missing meter value. Only verified
             # isolation supplies the alternative pre-restoration safety path.
             r = isolated
-            self._wall_pending = r.wall_load_only and not wall.qualified_sources
-            if wall.unavailable_sources and (r.issue is None or r.wall_load_only):
-                r = replace(r, issue="Wall-load power reports are unavailable or not current",
-                            telemetry_missing=True, wall_load_only=False)
-        if self._manual_recovery_required and (not r.issue or self._wall_pending):
+        if self._manual_recovery_required:
             self._blocked = True
+            if (self._shutdown_fault and self.live and not self.shutdown_confirmed
+                    and not self._restoring and not self._cutting):
+                self._start_action(self._shed())
             self._reason = ("Heater wiring/ownership changed; explicit manual recovery acknowledgement required"
                             if self._identity_mismatch else
                             "Heater power recovery requires explicit operator acknowledgement")
             self._publish()
             return
-        if r.issue and not self._wall_pending:
+        if self._manual_policy_control:
+            # Manual takeover suppresses policy-driven shutdown, not known
+            # faults, uncertain service cleanup, or persisted ownership.
+            # Keeping these claims intact is essential when control returns.
+            self._blocked = True
+            self._reason = "Dyson is under persistent manual control; automated reserve cutoff is suspended"
+            self._safe_since = None
+            self._restore_approved_until = None
+            self._publish()
+            return
+        if r.issue:
+            if (self._fan_only_authorized
+                    and _state_parts(self._state(self.bindings.heater))[0] == "fan_only"):
+                # This fan was deliberately authorized after a proved stop.
+                # Loss of reserve/supply needs a new native Off, not an
+                # escalation claiming the earlier stop failed.
+                self._off_confirmed = False
+            self._fan_only_authorized = False
+            if self._restore_approved_until is not None:
+                self._restore_approved_until = None
+                self._manual_recovery_required = True
+                self._save()
             self._blocked = True
             self._reason = r.issue
             self._safe_since = None
@@ -1646,7 +1876,7 @@ class HeaterPowerGuard:
             # but does not manufacture a five-minute trip if the heater is Off.
             if not r.telemetry_missing or not self._heater_off() or self._latched:
                 observed_off = None
-                if (r.wall_load_only and self._off_boundary() is None
+                if (self._off_boundary() is None
                         and self._wall_observed_off_wall is None
                         and not self._shutdown_contradicted and not self._service_tasks
                         and not self._positive_tasks and not self.pending_external_jobs()
@@ -1662,11 +1892,6 @@ class HeaterPowerGuard:
                     self._wall_observed_off_wall = observed_off
                     self._off_confirmed = True
                     self._shutdown_confirmation = "state_only"
-                if r.wall_load_only and self.shutdown_confirmed:
-                    # Wall input can remain high while the battery charges or
-                    # other loads run. This is not a failed heater stop and
-                    # shared AC output Off would not stop AC input charging.
-                    self._reason = "Heater Off confirmed; wall load remains above its operating budget; heat inhibited"
                 if self.live and not self._restoring:
                     if self._off_confirmed and (not self._heater_off() or self._heater_meter_stopped() is False):
                         self._off_confirmed = False
@@ -1675,9 +1900,31 @@ class HeaterPowerGuard:
                         self._start_action(self._shed())
         elif self._latched:
             self._blocked = True
+            if (self._fan_only_authorized and self._fan_recovery_ready()
+                    and _state_parts(self._state(self.bindings.heater))[0] == "fan_only"):
+                # The original stop was proved before circulation was admitted.
+                # Low dedicated load must remain current; heat is still blocked
+                # until the ordinary stable-supply interval completes.
+                self._safe_since = self._safe_since if self._safe_since is not None else self._clock()
+                self._reason = "Fan-only circulation; auxiliary heat awaits stable supply"
+                if (self.live and self._clock() - self._safe_since >= SAFE_LOAD_SECONDS
+                        and not self.pending_external_jobs()):
+                    self._clear()
+                self._publish()
+                return
+            if (self._fan_only_authorized and not self._fan_recovery_ready()
+                    and not self._heater_off()):
+                # Withdraw circulation if its current evidence stops
+                # qualifying. A newly requested Off keeps the normal deadline.
+                self._fan_only_authorized = False
+                self._off_confirmed = False
+            if self._retained_cut_claim_after is not None and self._restore_approved_until is None:
+                self._reason = "Retained heater cutoff requires explicit recovery acknowledgement"
+                self._publish()
+                return
             self._reason = ("Heater relay isolated; waiting for stable safe load and recovery cooldown"
                             if isolated is not None else
-                            "Heater held off until battery >40%, stable safe load, and cooldown")
+                            "Heater held off until battery >40% and verified supply is stable for 60 seconds")
             if not self._restoring and not self._off_confirmed and not self.power_cut_confirmed:
                 self._start_action(self._shed())
             if (self._off_confirmed and not self._restoring
@@ -1693,11 +1940,11 @@ class HeaterPowerGuard:
                 # can qualify an owned relay before its guarded restoration.
                 self._safe_since = self._safe_since if self._safe_since is not None else self._clock()
                 ready = (self._clock() - self._safe_since >= SAFE_LOAD_SECONDS
-                         and self._clock() - self._tripped_at >= COOLDOWN_SECONDS)
+                         and (not (self._shutdown_fault or self.commissioning_active or self._legacy_cooldown) or self._clock() - self._tripped_at >= COOLDOWN_SECONDS))
                 if (ready and self.live and not self._restoring and not self._positive_tasks
                         and not self._compensation_pending and not self._persistence_error):
                     switch = _state_parts(self._state(self.bindings.heater_switch))[0]
-                    if self._cut_owned and switch == "off":
+                    if self._cut_owned and switch == "off" and (self.commissioning_active or self._restore_approved_until is not None):
                         if not self._heater_meter_configured:
                             self._reason = "Dedicated outlet recovery requires manual verification without a heater current or power meter"
                         elif self._restore_attempts < MAX_RESTORE_ATTEMPTS:
@@ -1714,11 +1961,6 @@ class HeaterPowerGuard:
                         self._clear()
             else:
                 self._safe_since = None
-        elif self._wall_pending:
-            # The worker interprets blocked as a stop request. Retain running
-            # heat during qualification; check_activation fences new commands.
-            self._blocked = False
-            self._reason = "Wall load above operating budget; qualifying reports; new heat deferred"
         else:
             self._blocked = False
             if self.bindings.heater_switch is None:
@@ -1737,6 +1979,11 @@ class HeaterPowerGuard:
                 reason="Dedicated relay restored with fresh native Off and low heater load",
                 finished_at=self._wall_clock())
         self._latched = self._blocked = self._cut_owned = False
+        self._fan_only_authorized = False
+        self._fan_only_task = None
+        self._shutdown_fault = False
+        self._legacy_cooldown = False
+        self._restore_approved_until = None
         self._retained_cut_claim_after = None
         self._restore_intent = False
         self._reason = None
@@ -1771,12 +2018,14 @@ class HeaterPowerGuard:
             self._publish()
 
     def _saved_state(self):
-        return {"latched": self._latched,
+        return {"supply_policy_version": 1, "latched": self._latched,
+                "legacy_cooldown": self._legacy_cooldown,
                 "switch_cut_owned": self._cut_owned and not self._restore_intent,
                 "restoring": self._restore_intent, "trip_wall": self._trip_wall,
                 "restore_attempts": self._restore_attempts,
                 "binding_identity": self._saved_binding_identity,
                 "manual_recovery_required": self._manual_recovery_required,
+                "shutdown_fault": self._shutdown_fault,
                 "emergency_ac_latched": self._emergency_ac_latched,
                 "emergency_ac_reason": self._emergency_ac_reason,
                 "emergency_ac_request_wall": self._emergency_ac_request_wall,
@@ -1970,6 +2219,11 @@ class HeaterPowerGuard:
     async def _cut_switch(self, *, force=False):
         if not self.live or self.bindings.heater_switch is None:
             return False
+        if not self.commissioning_active:
+            self._restore_approved_until = None
+            self._shutdown_fault = self._manual_recovery_required = True
+            self._manual_recovery_wall = self._wall_clock()
+            self._save()
         self._shutdown_stage = "dedicated_off"
         self._cutting = True
         switch = _state_parts(self._state(self.bindings.heater_switch))[0]
@@ -2005,6 +2259,7 @@ class HeaterPowerGuard:
             return False
         if self._emergency_ac_latched:
             return self._emergency_cut_observed() and not self._emergency_service_tasks
+        self._shutdown_fault = True
         self._emergency_ac_latched = self._manual_recovery_required = self._blocked = True
         self._emergency_ac_status = "requested"
         self._shutdown_stage = "emergency_ac_off"
@@ -2048,7 +2303,13 @@ class HeaterPowerGuard:
         self._compensation_pending = bool(self._positive_tasks) or not self._switch_cut_observed()
         self._publish()
 
+    def _restore_authorized(self):
+        return not self.manual_control and (self.commissioning_active or (
+            self._restore_approved_until is not None and self._clock() < self._restore_approved_until))
+
     async def _restore(self):
+        if not self._restore_authorized():
+            return
         if self._commissioning_expired():
             self._commissioning_failed("Supervised relay test exceeded its time limit", status="interrupted")
         if (self.bindings.heater_switch is None or self._emergency_ac_latched
@@ -2065,8 +2326,8 @@ class HeaterPowerGuard:
         # restored/assumed Off state or missing post-start isolation proof.
         if isolated is None or not isolated.safe_to_rearm:
             return
-        prior_meter_missing = evaluate_power(
-            self._states(), self.bindings, self._wall_clock()).telemetry_missing
+        prior_meter_missing = bool(evaluate_power(
+            self._states(), self.bindings, self._wall_clock()).meter_issue)
         generation = (self._isolation_revision, self._binding_identity(), self._cut_owned)
         commissioning = self.commissioning_active
         staged = commissioning and self._heater_meter()[3] == "power"
@@ -2092,7 +2353,7 @@ class HeaterPowerGuard:
                 self._commissioning_failed("Authoritative electrical reports are not trusted")
             if commissioning and not self._commissioning_controller_stopped():
                 self._commissioning_failed("Comfort controller is no longer stopped", status="interrupted")
-            if (current is None or not current.safe_to_rearm or self._closed or self._closing
+            if (not self._restore_authorized() or current is None or not current.safe_to_rearm or self._closed or self._closing
                     or self._restore_interrupted or self._manual_recovery_required
                     or self._identity_mismatch or self._manual_power_seen
                     or self._service_tasks or self._positive_tasks or self._compensation_pending
@@ -2100,8 +2361,8 @@ class HeaterPowerGuard:
                     or generation != (self._isolation_revision, self._binding_identity(), self._cut_owned)
                     or not self._switch_observed("off")):
                 return
-            prior_meter_missing |= evaluate_power(
-                self._states(), self.bindings, self._wall_clock()).telemetry_missing
+            prior_meter_missing |= bool(evaluate_power(
+                self._states(), self.bindings, self._wall_clock()).meter_issue)
             requested = self._wall_clock()
             # Boot may resume the heater's retained setting. There is one
             # bounded window for On feedback AND native Off/low-meter proof,
@@ -2123,10 +2384,10 @@ class HeaterPowerGuard:
 
             def before_restore_dispatch():
                 # The service task is queued after the persistence recheck.
-                # Revalidate at its actual dispatch, including time-only loss
-                # of the circuit/reserve exception. Its own tracked job means
+                # Revalidate at its actual dispatch, including time-only expiry
+                # of supply evidence and explicit restoration approval. Its own tracked job means
                 # _isolated_recovery_reading cannot be used at this boundary.
-                if (not self.live or self._closing or self._closed
+                if (not self._restore_authorized() or not self.live or self._closing or self._closed
                         or self._restore_interrupted or self._manual_recovery_required
                         or self._identity_mismatch or self._manual_power_seen
                         or self._persistence_error or self.pending_external_jobs()
@@ -2147,7 +2408,7 @@ class HeaterPowerGuard:
                 return
             while (not self._switch_observed("on", after=requested)
                    and not self._closing and time.monotonic() < deadline):
-                if (self._external_power().issue or self._restore_interrupted
+                if (not self._restore_authorized() or self._external_power().issue or self._restore_interrupted
                         or self._manual_recovery_required or not self._supervised_restore_check()):
                     return
                 await asyncio.sleep(min(.1, RESTORE_ACK_SECONDS / 5))
@@ -2174,7 +2435,7 @@ class HeaterPowerGuard:
                         return
                     await asyncio.sleep(min(.1, RESTORE_ACK_SECONDS / 5))
                 reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
-                if (reading.safe_to_rearm and not self._closed and not self._closing
+                if (self._restore_authorized() and reading.safe_to_rearm and not self._closed and not self._closing
                         and (self._supervised_restore_check() if staged else time.monotonic() < deadline)
                         and (not commissioning or (not self._commissioning_expired()
                              and self._commissioning_external_trusted()
@@ -2250,7 +2511,8 @@ class HeaterPowerGuard:
         if self._emergency_ac_latched and self._persistence_error:
             self._save()
             return False
-        if self.live and self._cut_owned and not self._switch_cut_observed():
+        if (self.live and self._cut_owned and not self._switch_cut_observed()
+                and not self._manual_policy_control):
             await self._cut_switch(force=True)
             if not self._switch_cut_observed():
                 return False

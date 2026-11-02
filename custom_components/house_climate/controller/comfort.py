@@ -12,7 +12,7 @@ from .config import Settings, Zone
 
 
 def _period_index(room: Zone, settings: Settings, instant: datetime, zone: ZoneInfo):
-    local = instant.astimezone(zone).time()
+    local = instant.astimezone(zone)
     return next((index for index, period in enumerate(room.schedules)
                  if settings.active(period, local)), None)
 
@@ -35,10 +35,10 @@ def next_schedule_change(room: Zone, settings: Settings, now: datetime,
 
     zone = ZoneInfo(timezone)
     utc_now = now.astimezone(dt_timezone.utc)
-    horizon = utc_now + timedelta(days=3)
+    horizon = utc_now + timedelta(days=8)
     candidates: set[datetime] = set()
     local_date = utc_now.astimezone(zone).date()
-    for day in range(-1, 5):
+    for day in range(-1, 10):
         date = local_date + timedelta(days=day)
         for period in room.schedules:
             for boundary in (settings.clock(period.start), settings.clock(period.end)):

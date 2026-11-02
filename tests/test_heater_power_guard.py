@@ -59,7 +59,7 @@ class HeaterWattPolicyTests(unittest.TestCase):
     def test_no_dedicated_watt_report_is_not_fresh_zero(self):
         self.states.pop(WATTS)
         reading = self.reading()
-        self.assertTrue(reading.telemetry_missing)
+        self.assertTrue(reading.meter_issue)
         self.assertIsNone(reading.heater_w)
         self.assertFalse(reading.safe_to_rearm)
 
@@ -68,8 +68,8 @@ class HeaterWattPolicyTests(unittest.TestCase):
             with self.subTest(watts=value):
                 self.states[WATTS] = report(self.clock, value, age=180.001)
                 reading = self.reading()
-                self.assertTrue(reading.telemetry_missing)
-                self.assertIn(WATTS, reading.issue)
+                self.assertTrue(reading.meter_issue)
+                self.assertIn(WATTS, reading.meter_issue)
                 self.assertFalse(reading.safe_to_rearm)
 
     def test_current_report_not_value_change_defines_freshness(self):
@@ -81,7 +81,7 @@ class HeaterWattPolicyTests(unittest.TestCase):
             self.clock.wall - 181, timezone.utc).isoformat()
         self.states[WATTS]["last_updated"] = datetime.fromtimestamp(
             self.clock.wall, timezone.utc).isoformat()
-        self.assertTrue(self.reading().telemetry_missing)
+        self.assertTrue(self.reading().meter_issue)
 
     def test_last_updated_fallback_keeps_reports_without_last_reported_supported(self):
         state = report(self.clock, 5.5)
@@ -90,13 +90,13 @@ class HeaterWattPolicyTests(unittest.TestCase):
         self.assertTrue(self.reading().safe_to_rearm)
         state["last_updated"] = datetime.fromtimestamp(
             self.clock.wall - 181, timezone.utc).isoformat()
-        self.assertTrue(self.reading().telemetry_missing)
+        self.assertTrue(self.reading().meter_issue)
 
     def test_freshness_boundary_and_future_reports_are_checked(self):
         self.states[WATTS] = report(self.clock, 5.5, age=180)
         self.assertTrue(self.reading().safe_to_rearm)
         self.states[WATTS] = report(self.clock, 5.5, age=-5.001)
-        self.assertTrue(self.reading().telemetry_missing)
+        self.assertTrue(self.reading().meter_issue)
 
     def test_invalid_or_wrong_unit_watts_fail_closed(self):
         for value, unit in ((5, "A"), (5, "VA"), (5, "Wh"),
@@ -104,21 +104,20 @@ class HeaterWattPolicyTests(unittest.TestCase):
                             ("unknown", "W"), ("unavailable", "W")):
             with self.subTest(value=value, unit=unit):
                 self.states[WATTS] = report(self.clock, value, unit)
-                self.assertTrue(self.reading().telemetry_missing)
+                self.assertTrue(self.reading().meter_issue)
                 self.assertFalse(self.reading().safe_to_rearm)
 
     def test_restored_or_assumed_watts_cannot_authorize_rearm(self):
         for flag in ("restored", "assumed_state"):
             with self.subTest(flag=flag):
                 self.states[WATTS] = report(self.clock, 0, **{flag: True})
-                self.assertTrue(self.reading().telemetry_missing)
+                self.assertTrue(self.reading().meter_issue)
                 self.assertFalse(self.reading().safe_to_rearm)
 
     def test_fresh_output_and_battery_trip_are_not_hidden_by_missing_watts(self):
         self.states[WATTS] = report(self.clock, "unavailable")
         self.states[B.circuit_power] = report(self.clock, 0)
-        for entity, value, reason in ((B.output_power, 2000, "output spike"),
-                                      (B.battery, 40, "reserve")):
+        for entity, value, reason in ((B.battery, 40, "reserve"),):
             with self.subTest(entity=entity):
                 original = self.states[entity]
                 self.states[entity] = report(self.clock, value,
@@ -138,7 +137,7 @@ class HeaterWattPolicyTests(unittest.TestCase):
         states[B.heater_current] = report(self.clock, 1, "A")
         self.assertFalse(power.evaluate_power(states, B, self.clock.wall).safe_to_rearm)
         states[B.heater_current] = report(self.clock, 5.5, "W")
-        self.assertTrue(power.evaluate_power(states, B, self.clock.wall).telemetry_missing)
+        self.assertTrue(power.evaluate_power(states, B, self.clock.wall).meter_issue)
         absent = replace(B, heater_current=None)
         self.assertTrue(power.evaluate_power(states, absent, self.clock.wall).safe_to_rearm)
 
@@ -170,9 +169,9 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.guard = power.HeaterPowerGuard(
             self.hass, self.bindings, live=True, entry_id="watts-fixture", notify=lambda: None,
             clock=lambda: self.clock.now, wall_clock=lambda: self.clock.wall)
-        self.patchers = [patch.object(power, "OFF_ACK_SECONDS", .025),
-                         patch.object(power, "RESTORE_ACK_SECONDS", .04),
-                         patch.object(power, "SERVICE_TIMEOUT_SECONDS", .025)]
+        self.patchers = [patch.object(power, "OFF_ACK_SECONDS", fixtures.TEST_OFF_ACK_SECONDS),
+                         patch.object(power, "RESTORE_ACK_SECONDS", fixtures.TEST_RESTORE_ACK_SECONDS),
+                         patch.object(power, "SERVICE_TIMEOUT_SECONDS", fixtures.TEST_SERVICE_TIMEOUT_SECONDS)]
         for patcher in self.patchers:
             patcher.start()
 
@@ -180,12 +179,12 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.hass.release.set()
         self.hass.release_switch_on.set()
         await self.guard.async_close()
-        await asyncio.sleep(.01)
+        await self.hass.settle()
         for patcher in self.patchers:
             patcher.stop()
 
     async def settle(self):
-        await asyncio.sleep(.09)
+        await self.hass.settle()
 
     def fresh_sources(self, *, include_watts=True):
         for entity, state in list(self.hass.data.items()):
@@ -204,25 +203,25 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guard.diagnostics["heater_power_configured"])
         self.assertFalse(self.guard.diagnostics["heater_current_configured"])
 
-    async def test_stale_startup_watts_inhibits_without_manufactured_trip(self):
+    async def test_stale_startup_watts_are_unknown_without_inhibiting_admission(self):
         self.hass.data[WATTS] = report(self.clock, 0, age=181)
         self.guard._observe()
         await self.settle()
-        self.assertTrue(self.guard.blocked)
+        self.assertFalse(self.guard.blocked)
         self.assertFalse(self.guard.diagnostics["latched"])
         self.assertEqual(self.hass.calls, [])
         self.hass.set(WATTS, 5.5)
         self.guard._observe()
         self.assertFalse(self.guard.blocked)
 
-    async def test_stale_meter_during_heat_requests_native_off(self):
+    async def test_stale_meter_during_heat_does_not_invent_a_stop_failure(self):
         self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
         self.hass.data[WATTS] = report(self.clock, 0, age=181)
         self.guard._observe()
         await self.settle()
-        self.assertTrue(self.guard.diagnostics["latched"])
-        self.assertEqual(self.hass.data[B.heater]["state"], "off")
-        self.assertEqual([call[:2] for call in self.hass.calls], [("climate", "set_hvac_mode")])
+        self.assertFalse(self.guard.diagnostics["latched"])
+        self.assertEqual(self.hass.data[B.heater]["state"], "heat")
+        self.assertEqual(self.hass.calls, [])
 
     async def test_fresh_low_meter_before_stop_is_not_post_command_proof(self):
         await self.battery_trip()
@@ -272,6 +271,8 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guard.switch_cut_owned)
         self.hass.set(B.battery, 43)
         self.hass.set(WATTS, 5.5)
+        self.guard._restore_approved_until = self.clock.now + 1000
+        self.guard._manual_recovery_required = False
         self.fresh_sources()
         self.guard._observe()
         # Preserve observation continuity until just before the existing
@@ -283,7 +284,7 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
 
     def refresh_external_power(self):
         """Do not invent idle reports from an isolated heater or its meter."""
-        for entity in (B.battery, B.circuit_power, B.input_power,
+        for entity in (B.ac_output_switch, B.battery, B.circuit_power, B.input_power,
                        B.output_power, B.wall_phase_a_voltage,
                        B.wall_phase_b_voltage):
             state = self.hass.data[entity]
@@ -296,6 +297,8 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guard.power_cut_confirmed)
         self.assertEqual(self.hass.data[B.heater_switch]["state"], "off")
         self.assertEqual(self.hass.data[B.heater]["state"], "unavailable")
+        self.guard._restore_approved_until = self.clock.now + 1000
+        self.guard._manual_recovery_required = False
         self.hass.set(WATTS, 0)
         self.hass.set(B.battery, 43)
         self.refresh_external_power()
@@ -309,7 +312,7 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
             self.clock.advance(interval)
             self.refresh_external_power()
             self.guard._observe()
-            await asyncio.sleep(.005)
+            await asyncio.sleep(0)
             seconds -= interval
 
     async def test_verified_owned_cut_can_restore_after_off_meter_expires(self):
@@ -317,7 +320,7 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         await self.observe_isolated_for(181)
         # Expiry stays unknown; isolation must never manufacture fresh zero.
         raw = power.evaluate_power(self.hass.data, self.bindings, self.clock.wall)
-        self.assertTrue(raw.telemetry_missing)
+        self.assertTrue(raw.meter_issue)
         self.assertIsNone(raw.heater_w)
         self.assertFalse(self.guard.diagnostics["electrical_stop_confirmed"])
         self.assertNotIn("turn_on", [call[1] for call in self.hass.calls])
@@ -351,10 +354,10 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
                 raw = power.evaluate_power(self.hass.data, self.bindings, self.clock.wall)
                 # The isolated meter is still unknown. Advisory circuit data
                 # must not become another restoration interlock.
-                self.assertTrue(raw.telemetry_missing)
+                self.assertTrue(raw.meter_issue)
                 self.assertIsNone(raw.heater_w)
-                self.assertIn(WATTS, raw.issue)
-                self.assertNotIn(B.circuit_power, raw.issue)
+                self.assertIn(WATTS, raw.meter_issue)
+                self.assertIsNone(raw.issue)
                 self.assertEqual(sum(call[1] == "turn_on" for call in self.hass.calls),
                                  previous_on)
 
@@ -431,7 +434,7 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.guard.switch_cut_owned)
         self.assertNotIn("turn_on", [call[1] for call in self.hass.calls])
 
-    async def test_manual_on_then_off_relinquishes_isolated_restore_claim(self):
+    async def test_manual_on_then_off_requires_explicit_recovery(self):
         await self.isolated_cut()
         await self.observe_isolated_for(181)
         self.hass.set(B.heater_switch, "on")
@@ -442,7 +445,8 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.hass.post_off_watts = 5.5
         await self.observe_isolated_for(120)
         await self.settle()
-        self.assertFalse(self.guard.switch_cut_owned)
+        self.assertTrue(self.guard.switch_cut_owned)
+        self.assertTrue(self.guard._manual_recovery_required)
         self.assertNotIn("turn_on", [call[1] for call in self.hass.calls])
 
     async def test_unavailable_relay_cannot_supply_isolation_evidence(self):
@@ -546,33 +550,15 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guard.diagnostics["manual_recovery_required"])
         self.assertTrue(self.guard.diagnostics["binding_identity_mismatch"])
 
-    async def test_isolation_never_masks_external_limits_or_missing_telemetry(self):
+    async def test_isolation_never_masks_reserve_or_supply_loss(self):
         await self.isolated_cut()
-        await self.observe_isolated_for(181)
-        # No successful native shutdown can make these recovery inputs safe.
-        self.hass.ignore_climate = False
-        self.hass.post_off_watts = 5.5
-        unsafe = ((B.input_power, "unavailable", "W"),
-                  (B.battery, 40, "%"),
-                  (B.output_power, 1600, "W"),
-                  (B.wall_phase_b_voltage, "unavailable", "V"))
-        self.hass.set(B.input_power, "unavailable")
-        await self.observe_isolated_for(120)
-        for entity, value, unit in unsafe:
-            with self.subTest(entity=entity):
-                for healthy, (number, suffix) in (
-                    (B.circuit_power, (140, "W")), (B.input_power, (130, "W")),
-                    (B.output_power, (150, "W")), (B.battery, (43, "%")),
-                    (B.wall_phase_a_voltage, (124, "V")),
-                    (B.wall_phase_b_voltage, (123, "V")),
-                ):
-                    self.hass.set(healthy, number, {"unit_of_measurement": suffix})
-                self.hass.set(entity, value, {"unit_of_measurement": unit})
-                self.hass.set(B.circuit_power, 0, {"unit_of_measurement": "W"})
-                self.guard._observe()
-                await self.settle()
-                self.assertNotIn("turn_on", [call[1] for call in self.hass.calls])
-                self.assertTrue(self.guard.blocked)
+        self.hass.set(B.battery, 40)
+        self.guard._observe()
+        await self.settle()
+        self.assertTrue(self.guard.blocked)
+        self.assertTrue(self.guard._manual_recovery_required)
+        self.assertIsNone(self.guard._restore_approved_until)
+        self.assertNotIn("turn_on", [c[1] for c in self.hass.calls])
 
     async def test_fresh_high_watts_contradicting_cutoff_cannot_authorize_on(self):
         await self.isolated_cut()
@@ -610,11 +596,13 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.hass.post_off_watts = 5.5
         self.hass.hang_switch_on = True
         await self.observe_isolated_for(301)
+        await self.hass.wait_until(lambda: bool(self.guard._positive_tasks)
+            and any(task in self.hass.waiting_for_release for task in self.guard._positive_tasks))
         self.assertEqual(sum(call[1] == "turn_on" for call in self.hass.calls), 1)
         action = self.guard._action_task
         self.assertIsNotNone(action)
         action.cancel()
-        await asyncio.sleep(.01)
+        await asyncio.gather(action, return_exceptions=True)
         self.hass.release_switch_on.set()
         await self.settle()
         self.assertEqual(self.hass.data[B.heater_switch]["state"], "off")
@@ -628,11 +616,14 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.hass.post_off_watts = 5.5
         self.hass.hang_switch_on = True
         await self.observe_isolated_for(301)
+        await self.hass.wait_until(lambda: bool(self.guard._positive_tasks)
+            and any(task in self.hass.waiting_for_release for task in self.guard._positive_tasks))
         self.assertEqual(sum(call[1] == "turn_on" for call in self.hass.calls), 1)
         closing = asyncio.create_task(self.guard.async_close())
-        await asyncio.sleep(.01)
+        await asyncio.sleep(0)  # Let close establish its synchronous closing fence.
+        self.assertTrue(self.guard._closing)
         self.hass.release_switch_on.set()
-        await asyncio.wait_for(closing, .3)
+        await asyncio.wait_for(closing, 5)
         await self.settle()
         self.assertEqual(self.hass.data[B.heater_switch]["state"], "off")
         self.assertTrue(self.guard.blocked)
@@ -755,7 +746,7 @@ class HeaterWattAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.hass.set(B.heater, "off", {"hvac_action": "off"})
         self.hass.set(WATTS, 5.5)
         self.assertTrue(await self.guard.async_acknowledge_emergency())
-        await asyncio.sleep(.01)
+        await self.settle()
         self.assertFalse(self.guard.diagnostics["manual_recovery_required"])
         self.assertFalse(self.guard.diagnostics["binding_identity_mismatch"])
         self.assertTrue(self.guard.diagnostics["latched"])

@@ -65,10 +65,15 @@ class OperatingState:
             self.regime = self.candidate = self.candidate_since = None
         warnings = list(outside.warnings)
         deadline = None
-        if outside.status != "known":
+        regional_warm_only = (outside.primary_configured and outside.selected_role == "fallback"
+                              and outside.temperature_f is not None
+                              and outside.temperature_f >= settings.freezing_outdoor_below_f)
+        if outside.status != "known" or regional_warm_only:
             self.regime = self.candidate = self.candidate_since = None
             self._outdoor_coverage_until = None
-            warnings.append("Outdoor temperature is untrusted; conservative heating floor is active")
+            warnings.append("Local outdoor source is unavailable; regional warmth cannot clear local freeze protection"
+                            if regional_warm_only else
+                            "Outdoor temperature is untrusted; conservative heating floor is active")
             regime, tie = "unknown", settings.unknown_outdoor_tie_mode
         else:
             self._outdoor_coverage_until = max(end for _start, end in outside.coverage_intervals)
@@ -117,7 +122,7 @@ class OperatingState:
                 duration = OPEN_DEBOUNCE_SECONDS if saved.candidate == "open" else CLOSE_DEBOUNCE_SECONDS
                 consider(saved.since_tick + duration)
         effects, emergencies = {}, {}
-        local = now.astimezone(ZoneInfo(self.config.timezone)).time()
+        local = now.astimezone(ZoneInfo(self.config.timezone))
         for name, zone in self.config.zones.items():
             profile = profiles[name]
             active_period = ("hold" if name in settings.room_profiles else

@@ -4,18 +4,24 @@
     "step": {
       "user": {
         "title": "Home Climate",
-        "description": "Copy your private home_climate_bindings.json into Home Assistant's configuration directory before saving. Room schedules and comfort priorities follow the house rules. Protection settings are separate from thermostat comfort ranges and apply together when saved. Use room cards for temporary daily adjustments. Live mode permits the heater power guard even when comfort control is stopped. Comfort control also requires Controller enabled after startup.\n\n{detail}",
+        "description": "Copy your private home_climate_bindings.json into Home Assistant’s configuration directory before saving. Edit room profiles, weekly schedules, peak hours and recovery settings below; all settings are validated and saved together. Protection thresholds remain separate from comfort bands. Room cards create temporary holds. Live permission and Controller enabled are both required for automated comfort.\n\n{detail}",
         "data": {
           "live": "Allow live equipment commands",
-          "normal_heating_floor_f": "Normal heating protection floor (\u00b0F)",
-          "freezing_heating_floor_f": "Heating floor in freezing weather (\u00b0F)",
-          "freezing_outdoor_below_f": "Outdoor reference temperature (\u00b0F)",
-          "emergency_cooling_at_f": "Cooling emergency threshold (\u00b0F)",
-          "release_hysteresis_f": "Protection release margin (\u00b0F)",
-          "transition_deadband_f": "Outdoor transition band (\u00b0F)",
+          "normal_heating_floor_f": "Normal heating protection floor (°F)",
+          "freezing_heating_floor_f": "Heating floor in freezing weather (°F)",
+          "freezing_outdoor_below_f": "Outdoor reference temperature (°F)",
+          "emergency_cooling_at_f": "Cooling emergency threshold (°F)",
+          "release_hysteresis_f": "Protection release margin (°F)",
+          "transition_deadband_f": "Outdoor transition band (°F)",
           "qualification_seconds": "Outdoor regime qualification (seconds)",
           "boundary_tie_mode": "Boundary-regime emergency tie preference",
-          "unknown_outdoor_tie_mode": "Unknown-outdoor emergency tie preference"
+          "unknown_outdoor_tie_mode": "Unknown-outdoor emergency tie preference",
+          "rooms": "Room profiles and weekly schedules",
+          "auxiliary_policy": "Auxiliary comfort and peak hours",
+          "seasonal_policy": "Seasonal comfort selection",
+          "fallback": "Recovery state after active control",
+          "heartbeat_timeout_seconds": "Controller health lease (seconds)",
+          "auxiliary_heartbeat_timeout_seconds": "Auxiliary heat authorization lease (seconds)"
         },
         "data_description": {
           "live": "Off previews plans. On activates the heater power guard and permits comfort control when Controller enabled is on.",
@@ -27,12 +33,18 @@
           "transition_deadband_f": "The outdoor band used when qualifying regime changes. It does not add a delay to indoor emergency checks.",
           "qualification_seconds": "How long outdoor conditions must persist before a regime change. Indoor protection checks add no qualification delay.",
           "boundary_tie_mode": "Preference for equally severe heating and cooling violations in the qualified boundary regime. Larger measured violations always win.",
-          "unknown_outdoor_tie_mode": "Preference for equally severe violations when no valid outdoor reading is available. Larger measured violations always win."
+          "unknown_outdoor_tie_mode": "Preference for equally severe violations when no valid outdoor reading is available. Larger measured violations always win.",
+          "rooms": "Editable room rules in °F. Weekdays use Monday=0 through Sunday=6; overnight periods belong to their starting day. Limits-only profiles enforce their lower and upper bounds without seeking a target. Device bindings remain separate.",
+          "auxiliary_policy": "Peak hours and assistance thresholds. These rules apply only during automated Dyson ownership; genuine shutdown faults remain separate.",
+          "seasonal_policy": "Averaging window, warm/cool hysteresis thresholds and first-start profile. Local outdoor observations are preferred; source degradation is reported separately from freeze protection.",
+          "fallback": "Dual-setpoint heat-pump range and circulation fan speed when active control ends, including restart or fault. Auxiliary heat is stopped unless the Dyson is under explicit manual takeover.",
+          "heartbeat_timeout_seconds": "Maximum interval without a confirmed controller health renewal. Independent auxiliary heat authorization has its own shorter deadline.",
+          "auxiliary_heartbeat_timeout_seconds": "Maximum interval without a renewed authorization for automated auxiliary heat. This is separate from ordinary command acknowledgement and the controller health heartbeat."
         }
       }
     },
     "error": {
-      "invalid_config": "The fixed house policy could not be loaded."
+      "invalid_config": "The Home Climate configuration could not be validated."
     },
     "abort": {
       "single_instance_allowed": "Only one shared-system controller may be configured."
@@ -42,18 +54,24 @@
     "step": {
       "init": {
         "title": "Home Climate",
-        "description": "Copy your private home_climate_bindings.json into Home Assistant's configuration directory before saving. Room schedules and comfort priorities follow the house rules. Protection settings are separate from thermostat comfort ranges and apply together when saved. Use room cards for temporary daily adjustments. Live mode permits the heater power guard even when comfort control is stopped. Comfort control also requires Controller enabled after startup.\n\n{detail}",
+        "description": "Copy your private home_climate_bindings.json into Home Assistant’s configuration directory before saving. Edit room profiles, weekly schedules, peak hours and recovery settings below; all settings are validated and saved together. Protection thresholds remain separate from comfort bands. Room cards create temporary holds. Live permission and Controller enabled are both required for automated comfort.\n\n{detail}",
         "data": {
           "live": "Allow live equipment commands",
-          "normal_heating_floor_f": "Normal heating protection floor (\u00b0F)",
-          "freezing_heating_floor_f": "Heating floor in freezing weather (\u00b0F)",
-          "freezing_outdoor_below_f": "Outdoor reference temperature (\u00b0F)",
-          "emergency_cooling_at_f": "Cooling emergency threshold (\u00b0F)",
-          "release_hysteresis_f": "Protection release margin (\u00b0F)",
-          "transition_deadband_f": "Outdoor transition band (\u00b0F)",
+          "normal_heating_floor_f": "Normal heating protection floor (°F)",
+          "freezing_heating_floor_f": "Heating floor in freezing weather (°F)",
+          "freezing_outdoor_below_f": "Outdoor reference temperature (°F)",
+          "emergency_cooling_at_f": "Cooling emergency threshold (°F)",
+          "release_hysteresis_f": "Protection release margin (°F)",
+          "transition_deadband_f": "Outdoor transition band (°F)",
           "qualification_seconds": "Outdoor regime qualification (seconds)",
           "boundary_tie_mode": "Boundary-regime emergency tie preference",
-          "unknown_outdoor_tie_mode": "Unknown-outdoor emergency tie preference"
+          "unknown_outdoor_tie_mode": "Unknown-outdoor emergency tie preference",
+          "rooms": "Room profiles and weekly schedules",
+          "auxiliary_policy": "Auxiliary comfort and peak hours",
+          "seasonal_policy": "Seasonal comfort selection",
+          "fallback": "Recovery state after active control",
+          "heartbeat_timeout_seconds": "Controller health lease (seconds)",
+          "auxiliary_heartbeat_timeout_seconds": "Auxiliary heat authorization lease (seconds)"
         },
         "data_description": {
           "live": "Off previews plans. On activates the heater power guard and permits comfort control when Controller enabled is on.",
@@ -65,12 +83,18 @@
           "transition_deadband_f": "The outdoor band used when qualifying regime changes. It does not add a delay to indoor emergency checks.",
           "qualification_seconds": "How long outdoor conditions must persist before a regime change. Indoor protection checks add no qualification delay.",
           "boundary_tie_mode": "Preference for equally severe heating and cooling violations in the qualified boundary regime. Larger measured violations always win.",
-          "unknown_outdoor_tie_mode": "Preference for equally severe violations when no valid outdoor reading is available. Larger measured violations always win."
+          "unknown_outdoor_tie_mode": "Preference for equally severe violations when no valid outdoor reading is available. Larger measured violations always win.",
+          "rooms": "Editable room rules in °F. Weekdays use Monday=0 through Sunday=6; overnight periods belong to their starting day. Limits-only profiles enforce their lower and upper bounds without seeking a target. Device bindings remain separate.",
+          "auxiliary_policy": "Peak hours and assistance thresholds. These rules apply only during automated Dyson ownership; genuine shutdown faults remain separate.",
+          "seasonal_policy": "Averaging window, warm/cool hysteresis thresholds and first-start profile. Local outdoor observations are preferred; source degradation is reported separately from freeze protection.",
+          "fallback": "Dual-setpoint heat-pump range and circulation fan speed when active control ends, including restart or fault. Auxiliary heat is stopped unless the Dyson is under explicit manual takeover.",
+          "heartbeat_timeout_seconds": "Maximum interval without a confirmed controller health renewal. Independent auxiliary heat authorization has its own shorter deadline.",
+          "auxiliary_heartbeat_timeout_seconds": "Maximum interval without a renewed authorization for automated auxiliary heat. This is separate from ordinary command acknowledgement and the controller health heartbeat."
         }
       }
     },
     "error": {
-      "invalid_config": "The fixed house policy could not be loaded."
+      "invalid_config": "The Home Climate configuration could not be validated."
     }
   }
 }

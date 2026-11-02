@@ -57,7 +57,7 @@ class HousePolicyTests(unittest.TestCase):
             with self.subTest(clock=clock):
                 p = self.profile(*clock)
                 self.assertTrue(p.comfort_enabled)
-                self.assertEqual((p.high_f, p.target_f, p.fan_percentage), (70, 69, 0))
+                self.assertEqual((p.high_f, p.target_f, p.fan_percentage), (70, 69, 60))
         for clock in ((9, 0, 0), (12, 0, 0), (21, 59, 59)):
             with self.subTest(clock=clock):
                 p = self.profile(*clock)
@@ -65,11 +65,13 @@ class HousePolicyTests(unittest.TestCase):
                 self.assertEqual(p.fan_percentage, 0)
 
     def test_everyday_targets_priorities_and_cooling_floor(self):
-        for key in ("office", "entertainment", "guest"):
+        for key, expected in (("office", (71, 69, 73, 1)),
+                              ("entertainment", (70, 68, 73, 1)),
+                              ("guest", (70, 68, 74, 1))):
             p = self.cfg.zones[key].profile
-            self.assertEqual((p.target_f, p.low_f, p.high_f, p.priority), (72, 71, 73, 1))
+            self.assertEqual((p.target_f, p.low_f, p.high_f, p.priority), expected)
         p = self.cfg.zones["living"].profile
-        self.assertEqual((p.target_f, p.priority), (68, .1))
+        self.assertEqual((p.target_f, p.priority), (69, 1))
         self.assertEqual(self.cfg.head_cool_min_f, {entity: 65 for entity in self.bindings.heads.values()})
         self.assertEqual((self.cfg.poll_seconds, self.cfg.decision_interval_seconds), (15, 90))
 
@@ -122,7 +124,7 @@ class HousePolicyTests(unittest.TestCase):
         old["head_cool_min_f"] = {}
         fixed = house_configuration(old, self.bindings)
         self.assertEqual(set(fixed.zones), set(aliases.values()))
-        self.assertEqual(fixed.zones[aliases["office"]].profile.target_f, 72)
+        self.assertEqual(fixed.zones[aliases["office"]].profile.target_f, 71)
         self.assertEqual(fixed.zones[aliases["office"]].area_id, "bonus_floor")
         self.assertEqual(fixed.auxiliary_room, aliases["living"])
         self.assertEqual(fixed.fan_controls[self.bindings.fans["office"]].source_room,

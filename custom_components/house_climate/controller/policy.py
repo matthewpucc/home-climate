@@ -11,6 +11,7 @@ from .temperature_guard import heating_cutoff_reached
 from .head_guard import HeadGuard
 from .airflow import TransferAirflow
 from .operating_state import OperatingState, WINDOW_COMFORT_FACTOR
+from .auxiliary_dispatch import AuxiliaryDispatch, manual_auxiliary
 from .protection_context import emergency, emergency_magnitudes, initial_context, limits, window_affected
 
 
@@ -88,6 +89,8 @@ class Plan:
     recovery_inputs: str | None = None
     heater_on: bool = False
     auxiliary_fan_only: bool = False
+    auxiliary_policy: dict = field(default_factory=dict)
+    seasonal: dict = field(default_factory=dict)
     fans: dict[str, int] = field(default_factory=dict)
     fan_head_assists: dict[str, str] = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
@@ -119,11 +122,74 @@ class Policy:
         self.mode_since: datetime | None = None
         self.candidate: tuple[str, datetime] | None = None
         self.heater_on = False
+        self.auxiliary_dispatch = AuxiliaryDispatch(config)
+        self._auxiliary_fan_enabled = False
+        self.seasonal_evaluator = None
+        self.seasonal_status = None
         self.transfer_on: dict[str, bool] = {}
         self.transfer_airflow = TransferAirflow(config)
         self.operating = OperatingState(config, clock=clock)
         self.context = initial_context(config)
         self._profiles = {name: zone.profile for name, zone in config.zones.items()}
+
+    def seasonal_settings(self, states, now, settings):
+        policy = getattr(self.config, "seasonal_policy", None)
+        if policy is None or not policy.enabled:
+            return settings
+        from .outdoor import read_outdoor
+        from .seasonal import SeasonalEvaluator
+        if self.seasonal_evaluator is None:
+            self.seasonal_evaluator = SeasonalEvaluator(policy)
+            self.seasonal_evaluator.restore({"profile": settings.seasonal_profile})
+        self.seasonal_status = self.seasonal_evaluator.update(read_outdoor(self.config, states, now), now)
+        return replace(settings, seasonal_profile=self.seasonal_status.profile)
+
+    def update_auxiliary(self, plan, states, rooms, now, *, allow_start=True):
+        """Use the same bounds and evidence for decisions and maintenance."""
+        name = self.config.auxiliary_room
+        reading = rooms.get(name)
+        target = plan.room_targets.get(name)
+        if not self.config.heater_entity or target is None:
+            plan.heater_on = plan.auxiliary_fan_only = self.heater_on = False
+            return
+        native = states.get(self.config.heater_entity, {})
+        attrs = native.get("attributes", {})
+        modes = attrs.get("hvac_modes") or ()
+        present = native.get("state") not in (None, "unknown", "unavailable")
+        manual = manual_auxiliary(self.config, states)
+        available = bool(present and (not modes or {"off", "heat"} <= set(modes))
+                         and not attrs.get("home_climate_auxiliary_blocked"))
+        band = target["low_f"], target["high_f"], target["target_f"]
+        low, high = limits(self.config, self.context)
+        protective = bool(emergency(self.context, name, "heat").get("active")
+                          or (reading and reading.confirmed_low < low + 1))
+        head = self.config.zones[name].head
+        cooling_waiting = any(key != name and detail.get("cool_requested")
+                              for key, detail in plan.room_targets.items())
+        decision = self.auxiliary_dispatch.decide(reading, now, band,
+            available=available, manual=manual,
+            heat_pump_selected=plan.mode == "heat" and head in plan.head_targets_f,
+            cooling_waiting=cooling_waiting, emergency=protective,
+            comfort_enabled=target["comfort_enabled"], allow_start=allow_start)
+        plan.auxiliary_policy = decision.as_dict()
+        plan.auxiliary_policy["context"] = [*band, not target["comfort_enabled"], decision.peak]
+        plan.auxiliary_policy["stop_revision"] = attrs.get("home_climate_auxiliary_stop_revision", 0)
+        if attrs.get("home_climate_auxiliary_blocked"):
+            plan.auxiliary_policy["reason"] = attrs.get("home_climate_auxiliary_reason") or decision.reason
+        requested = decision.requested
+        if reading and heating_cutoff_reached(reading, decision.stop_target_f, high):
+            requested = False
+            self.auxiliary_dispatch.active = False
+            plan.auxiliary_policy.update(requested=False, reason="Fresh room temperature/forecast reaches the auxiliary stop boundary")
+        plan.heater_on = self.heater_on = requested
+        if (manual or not present or reading is None or reading.low <= low + .25
+                or attrs.get("home_climate_auxiliary_fan_blocked")):
+            plan.auxiliary_fan_only = False
+        elif plan.heater_on:
+            plan.auxiliary_fan_only = False
+        elif allow_start:
+            plan.auxiliary_fan_only = bool(
+                self._auxiliary_fan_enabled and target.get("cool_requested") and "fan_only" in modes)
 
     def trim_transfer_fans(self, plan, states, rooms, now):
         """An ambient gradient cannot override possible conditioned discharge."""
@@ -151,11 +217,7 @@ class Policy:
 
     def band(self, name: str, settings: Settings, now: datetime) -> tuple[float, float, float]:
         profile = settings.profile(self.config.zones[name], now, self.config.timezone, name)
-        low, high = self.config.low_f, self.config.high_f
-        if not profile.comfort_enabled:
-            if self.context.enabled:
-                low, high = limits(self.config, self.context)
-            return low, high, (low + high) / 2
+        low, high = limits(self.config, self.context)
         target = settings.value(profile.target_f) + profile.target_offset_f
         half = settings.value(profile.half_band_f)
         return (max(low, settings.value(profile.low_f) if profile.low_f is not None else target - half),
@@ -219,6 +281,12 @@ class Policy:
 
     def stop_targets(self, band, *, comfort_enabled=True):
         low, high, target = band
+        if not comfort_enabled:
+            # Limits-only periods defend this room's scheduled bounds without
+            # driving it to the ordinary comfort target. A small inward margin
+            # avoids toggling at an exact boundary, including narrow bands.
+            margin = min(.5, max(0.0, (high - low) / 2))
+            return {"heat": low + margin, "cool": high - margin}
         if self.context.enabled:
             minimum, maximum = limits(self.config, self.context)
             margin = self.context.release_hysteresis_f
@@ -251,17 +319,10 @@ class Policy:
                 return None
             except (KeyError, TypeError, OverflowError):
                 pass
-        heater = states.get(self.config.heater_entity, {}) if self.config.heater_entity else {}
-        heater_modes = heater.get("attributes", {}).get("hvac_modes") or ()
-        auxiliary_available = (self.config.heater_entity and heater.get("state") not in
-                               (None, "unknown", "unavailable")
-                               and (not heater_modes or {"off", "heat"} <= set(heater_modes)))
         requests = []
         protection = self.head_guard.protection(head, mode, rooms, targets)
         for name, zone in self.config.zones.items():
             if zone.head != head or name not in rooms or name not in targets:
-                continue
-            if name == self.config.auxiliary_room and mode == "heat" and auxiliary_available:
                 continue
             target = targets[name]
             band = (target["low_f"], target["high_f"], target["target_f"])
@@ -282,6 +343,7 @@ class Policy:
 
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F", *, context=None,
                monotonic_now=None) -> Plan:
+        settings = self.seasonal_settings(states, now, settings)
         self.context = context if context is not None else self.operating.environment(states, now)
         LOW, HIGH = limits(self.config, self.context)
         profiles = {key: settings.profile(room, now, self.config.timezone, key) for key, room in self.config.zones.items()}
@@ -300,6 +362,8 @@ class Policy:
                     self.context = replace(self.context, valid_until_monotonic=deadline if current is None else min(current, deadline))
         self.head_guard.context = self.context
         plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings)
+        if self.seasonal_status is not None:
+            plan.seasonal = self.seasonal_status.as_dict()
         plan.window_states = self.context.window_states
         plan.protection_context = self.context.as_dict()
         plan.decision_valid_until_monotonic = self.context.valid_until_monotonic
@@ -344,7 +408,7 @@ class Policy:
                 self.calls.pop(key)
                 self.forecast_pending.discard(key)
 
-        # The auxiliary thermostat uses external room probes, never its own sensor.
+        # Auxiliary capabilities do not remove this room's heat-pump demand.
         auxiliary = rooms.get(self.config.auxiliary_room)
         heater_available = bool(self.config.heater_entity) and states.get(
             self.config.heater_entity, {}).get("state") not in (None, "unknown", "unavailable")
@@ -353,22 +417,11 @@ class Policy:
         if auxiliary and heater_available and not heater_can_heat and demands[self.config.auxiliary_room]["heat"]["active"]:
             plan.warnings.append(
                 "Auxiliary heat requested but unavailable (HA modes: " + ", ".join(heater_modes) + ")")
-        if auxiliary and heater_can_heat:
-            low, high, target = self.band(self.config.auxiliary_room, settings, now)
-            if heating_cutoff_reached(auxiliary, min(high, self.config.heater_cutoff_f), HIGH):
-                self.heater_on = False
-            elif auxiliary.temperature < low:
-                self.heater_on = True
-        else:
-            self.heater_on = False
-        plan.heater_on = self.heater_on
         fan_enabled = settings.toggles["auxiliary_fan_enabled"]
-        if (auxiliary and heater_available and not plan.heater_on and fan_enabled
-                and auxiliary.low > LOW + .25 and demands[self.config.auxiliary_room]["cool"]["active"]):
-            if "fan_only" in states[self.config.heater_entity].get("attributes", {}).get("hvac_modes", []):
-                plan.auxiliary_fan_only = True
-            else:
-                plan.warnings.append("Auxiliary heater does not expose fan_only; circulation skipped")
+        self._auxiliary_fan_enabled = fan_enabled
+        if (auxiliary and heater_available and fan_enabled
+                and demands[self.config.auxiliary_room]["cool"]["active"] and "fan_only" not in heater_modes):
+            plan.warnings.append("Auxiliary heater does not expose fan_only; circulation skipped")
 
         for key, fan in self.config.fan_controls.items():
             room = rooms.get(fan.room)
@@ -407,8 +460,6 @@ class Policy:
                 requests = []
                 protection = self.head_guard.protection(head, mode, rooms, plan.room_targets)
                 for name in names:
-                    if name == self.config.auxiliary_room and mode == "heat" and heater_can_heat:
-                        continue
                     if demands[name][mode]["active"]:
                         requests.append(demands[name][mode])
                 if not requests:
@@ -521,6 +572,7 @@ class Policy:
             key: call_target_f(self.config, self.config.heads[key], winner, target, states, climate_unit)
             for key, target in plan.head_targets_f.items()
         }
+        self.update_auxiliary(plan, states, rooms, now)
         # A transfer fan can distribute conditioned air before the source
         # area's ambient probe reflects the head's output. Only assist a head
         # that survived the complete shared-mode arbitration and safety checks.

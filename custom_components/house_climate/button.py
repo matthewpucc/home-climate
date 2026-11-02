@@ -11,6 +11,9 @@ from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 
 async def async_setup_entry(hass, entry, async_add_entities):
     entities = [ReloadHeadIntegration(entry, key) for key in entry.runtime_data.config.heads]
+    if (getattr(entry.runtime_data, "controls", None) is not None
+            and getattr(entry.runtime_data.config, "fallback", None) is not None):
+        entities.append(RetryRecoverySettings(entry))
     guard = getattr(entry.runtime_data, "power_guard", None)
     if guard is not None and (getattr(guard.bindings, "emergency_ac_switch", None)
                               or getattr(guard.bindings, "heater_switch", None)
@@ -103,4 +106,30 @@ class AcknowledgeHeaterRecovery(ReloadHeadIntegration):
         try:
             await self.runtime.power_guard.async_acknowledge_emergency()
         except RuntimeError as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
+
+class RetryRecoverySettings(ReloadHeadIntegration):
+    """Explicit approval to retry a durable, incomplete terminal preset."""
+    _attr_icon = "mdi:restore-alert"
+
+    def __init__(self, entry):
+        self.runtime = entry.runtime_data
+        self._attr_name = "Retry recovery settings"
+        self._attr_unique_id = f"{entry.entry_id}_retry_recovery_settings"
+        self._attr_device_info = {"identifiers": {(DOMAIN, entry.entry_id)},
+            "name": DEVICE_NAME, "manufacturer": NAME, "model": "Shared heat-pump controller"}
+
+    @property
+    def available(self):
+        return self.runtime.controls is not None and self.runtime.controls.handoff is not None
+
+    @property
+    def extra_state_attributes(self):
+        return {"action": "Retry saved head/fan recovery settings after fresh head Off; auxiliary faults remain protected"}
+
+    async def async_press(self):
+        try:
+            await self.runtime.controls.async_retry_handoff()
+        except (RuntimeError, ValueError, OSError) as exc:
             raise HomeAssistantError(str(exc)) from exc

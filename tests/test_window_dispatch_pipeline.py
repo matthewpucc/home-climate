@@ -1,4 +1,4 @@
-"""A cooling decision's window proof survives the entire dispatch pipeline."""
+"""Heat and Cool window proofs survive the entire dispatch pipeline."""
 from copy import deepcopy
 from dataclasses import replace
 from datetime import timedelta
@@ -125,6 +125,30 @@ class WindowDispatchPipelineTests(unittest.TestCase):
         self.assertIs(self.ha.guarded_calls[0][2], ticket)
         self.assertEqual(self.ha.data[self.entity]["state"], "cool")
         self.assertFalse(self.positives(self.ha.ordinary_calls))
+
+    def test_heating_window_relief_uses_guarded_route_and_rechecks_queued_evidence(self):
+        for change in (None, "closed", "expired"):
+            with self.subTest(change=change):
+                self.setUp()
+                for seconds in (0, 120, 210):
+                    plan = self.tick(seconds, alpha=73.4, beta=69.5)
+                self.assertEqual(plan.mode, "heat")
+                ticket = plan.window_authorizations["shared"]
+                self.assertEqual(ticket.mode, "heat")
+                executor = self.executor()
+                executor.direction = "heat"
+                if change == "closed":
+                    self.ha.data[CONTACT]["state"] = "off"
+                elif change == "expired":
+                    self.seconds = ticket.expires_at_monotonic
+                self.step(executor, plan)
+                self.assertFalse(self.positives(self.ha.ordinary_calls))
+                if change is None:
+                    self.assertEqual(len(self.ha.guarded_calls), 1)
+                    self.assertEqual(self.ha.data[self.entity]["state"], "heat")
+                else:
+                    self.assertFalse(self.ha.guarded_calls)
+                    self.assertNotIn(self.entity, executor.pending)
 
     def test_missing_adapter_defers_without_starting_an_acknowledgement_budget(self):
         plan = self.open_cooling()

@@ -1,5 +1,6 @@
 """Adopting the house policy keeps genuine holds without renewing expired intent."""
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import unittest
@@ -58,6 +59,12 @@ class HouseHoldMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value["expires_at"], expiry.isoformat())
 
     async def test_a_room_without_schedule_retains_its_nonexpiring_manual_hold(self):
+        self.previous = replace(self.previous, zones={**self.previous.zones,
+            "guest": replace(self.previous.zones["guest"], schedules=())})
+        self.fixed = replace(self.fixed, zones={**self.fixed.zones,
+            "guest": replace(self.fixed.zones["guest"], schedules=())})
+        self.old = RoomComfort(self.hass, self.previous, "existing_entry", lambda: None)
+        self.new = RoomComfort(self.hass, self.fixed, "existing_entry", lambda: None)
         self.seed(room="guest", low=70, high=73, target=72)
         saved = await self.migrate()
         self.assertIsNone(saved["rooms"]["guest"]["expires_at"])

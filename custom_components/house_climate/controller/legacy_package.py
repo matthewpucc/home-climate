@@ -10,31 +10,54 @@ from .config import Config, NUMBERS, TIMES, TOGGLES, helper
 
 
 def watchdog_signature(config: Config) -> str:
-    mapping = {"watchdog_version": 2, "probes": [{key: value for key, value in asdict(p).items() if key != "report_on_change" or value}
+    mapping = {"watchdog_version": 4, "probes": [{key: value for key, value in asdict(p).items()
+                if (key != "report_on_change" or value) and (value is not None or key not in
+                    {"observation_time_entity", "require_active_entity"})}
                 for p in config.zones["living"].probes],
                "stale": config.sensor_stale_seconds, "cutoff": config.heater_cutoff_f,
-               "heater": config.heater_entity}
+               "heater": config.heater_entity,
+               "controller_timeout": config.heartbeat_timeout_seconds,
+               "auxiliary_timeout": config.auxiliary_heartbeat_timeout_seconds}
     return hashlib.sha256(json.dumps(mapping, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def package(config: Config) -> dict:
     probes = [{"entity": p.entity_id, "attribute": p.attribute or "", "unit": p.unit or "",
-               "offset": p.offset_f, "report_on_change": p.report_on_change} for p in config.zones["living"].probes]
+               "offset": p.offset_f, "report_on_change": p.report_on_change,
+               "observed": p.observation_time_entity or "", "active": p.require_active_entity or ""} for p in config.zones["living"].probes]
     # Independently recomputed by HA, not a Python-reported temperature/health flag.
     safe = """{% set probes = PROBES %}
 {% set ns = namespace(values=[]) %}
 {% for p in probes %}
   {% set s = states[p.entity] %}
-  {% if s is defined and s is not none and s.state not in [none, 'unavailable', 'unknown'] %}
+  {% if s is defined and s is not none and s.state not in [none, 'unavailable', 'unknown']
+       and not state_attr(p.entity, 'restored') and not state_attr(p.entity, 'assumed_state') %}
     {% set reported = s.last_reported | default(s.last_updated, true) %}
     {% set stamp = as_timestamp(reported, none) %}
     {% set aware = reported is not none and ((reported.tzinfo is defined and reported.tzinfo is not none)
          or (reported is string and ('+' in reported[10:] or '-' in reported[10:] or reported.endswith('Z')))) %}
     {% set age = as_timestamp(now()) - stamp if stamp is not none else none %}
+    {% set acquisition = states(p.observed) if p.observed else none %}
+    {% set acquisition_stamp = as_timestamp(acquisition, none) %}
+    {% set acquisition_aware = acquisition is not none and
+         ((acquisition.tzinfo is defined and acquisition.tzinfo is not none)
+          or (acquisition is string and ('+' in acquisition[10:] or '-' in acquisition[10:] or acquisition.endswith('Z')))) %}
+    {% set acquisition_age = as_timestamp(now()) - acquisition_stamp if acquisition_stamp is not none else none %}
     {% set raw = state_attr(p.entity, p.attribute) if p.attribute else s.state %}
     {% set unit = p.unit or state_attr(p.entity, 'unit_of_measurement') %}
     {% if aware and age is not none and -60 <= age and (p.report_on_change or age <= STALE)
-          and is_number(raw) and unit in ['°F', 'F', '°C', 'C'] %}
+          and (not p.observed or (acquisition_aware and acquisition_age is not none
+               and 0 <= acquisition_age <= STALE and not state_attr(p.observed, 'restored')
+               and not state_attr(p.observed, 'assumed_state')))
+          and raw is not boolean and is_number(raw)
+          and (not p.active or (is_state(p.active, 'on') and not state_attr(p.active, 'restored')
+               and not state_attr(p.active, 'assumed_state')
+               and (state_attr(p.active, 'percentage') is none
+                    or (state_attr(p.active, 'percentage') is number
+                        and state_attr(p.active, 'percentage') is not boolean
+                        and is_number(state_attr(p.active, 'percentage'))
+                        and state_attr(p.active, 'percentage') | float > 0))))
+          and unit in ['°F', 'F', '°C', 'C'] %}
       {% set f = (raw | float * 9 / 5 + 32) if unit in ['°C', 'C'] else raw | float %}
       {% set f = f + p.offset %}
       {% if -40 <= f <= 140 %}{% set ns.values = ns.values + [f] %}{% endif %}
@@ -60,16 +83,22 @@ def package(config: Config) -> dict:
     for name, value in TOGGLES.items():
         defaults.append({"action": "input_boolean.turn_on" if value else "input_boolean.turn_off",
                          "target": {"entity_id": helper(name, "input_boolean")}})
+    times["hp_auxiliary_authorization"] = {"name": "HP auxiliary authorization", "has_date": True, "has_time": True}
     unsafe = """{% set age = as_timestamp(now()) - as_timestamp(states('input_datetime.hp_heartbeat'), 0) %}
+{% set auxiliary_age = as_timestamp(now()) - as_timestamp(states('input_datetime.hp_auxiliary_authorization'), 0) %}
 {% set could_heat = states(HEATER) not in ['off', 'fan_only'] or state_attr(HEATER, 'hvac_action') == 'heating' %}
 {{ not is_state('input_boolean.hp_enabled', 'on')
-   or age < -60 or age > 120
+   or age < -60 or age > CONTROLLER_TIMEOUT
+   or auxiliary_age < -60 or auxiliary_age > AUXILIARY_TIMEOUT
    or (could_heat and not is_state('binary_sensor.hp_living_probe_safe', 'on')) }}"""
     unsafe = unsafe.replace("HEATER", json.dumps(config.heater_entity))
+    unsafe = unsafe.replace("CONTROLLER_TIMEOUT", str(config.heartbeat_timeout_seconds)).replace(
+        "AUXILIARY_TIMEOUT", str(config.auxiliary_heartbeat_timeout_seconds))
     return {
         "input_boolean": {
             "hp_enabled": {"name": "HP controller enabled", "initial": False},
             "hp_heater_owned": {"name": "HP auxiliary heater ownership"},
+            "hp_auxiliary_manual": {"name": "HP auxiliary manual control"},
             **{f"hp_{name}": {"name": "HP " + name.replace("_", " ")} for name in TOGGLES},
         },
         "input_number": numbers,
@@ -90,7 +119,8 @@ def package(config: Config) -> dict:
                 {"trigger": "state", "entity_id": ["input_boolean.hp_enabled", "binary_sensor.hp_living_probe_safe", config.heater_entity]},
             ],
             "conditions": [{"condition": "state", "entity_id": "input_boolean.hp_heater_owned", "state": "on"},
-                           {"condition": "template", "value_template": unsafe}],
+                           {"condition": "template", "value_template": unsafe},
+                           {"condition": "state", "entity_id": "input_boolean.hp_auxiliary_manual", "state": "off"}],
             "actions": [
                 {"action": "climate.set_hvac_mode", "target": {"entity_id": config.heater_entity}, "data": {"hvac_mode": "off"}},
                 {"action": "persistent_notification.create", "data": {"notification_id": "hp_heater_watchdog",

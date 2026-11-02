@@ -3,13 +3,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import math
 from pathlib import Path
 import re
 from types import MappingProxyType
 from typing import Mapping
 
 from .aggregate_stop import AggregateStopConfig
-from .config import OutdoorProbe, outdoor_probe_dict, parse_outdoor_probes
+from .config import Probe, OutdoorProbe, outdoor_probe_dict, parse_outdoor_probes
+from .notifications import NotificationSettings
 
 BINDINGS_FILENAME = "home_climate_bindings.json"
 LEGACY_BINDINGS_FILENAME = "house_climate_bindings.json"
@@ -55,6 +57,7 @@ class PowerBindings:
     aggregate_stop_confirmation: AggregateStopConfig | None = None
     emergency_notify_service: str | None = None
     heater_power: str | None = None
+    ac_output_switch: str | None = None
 
     def __post_init__(self):
         if type(self.emergency_ac_fallback_enabled) is not bool:
@@ -74,16 +77,17 @@ class PowerBindings:
         values.pop("emergency_notify_service")
         for role, value in values.items():
             if value is None and role in {
-                    "heater_switch", "heater_current", "heater_power", "emergency_ac_switch"}:
+                    "heater_switch", "heater_current", "heater_power", "emergency_ac_switch", "ac_output_switch"}:
                 continue
             domain = ("climate" if role == "heater" else "switch"
-                      if role in {"heater_switch", "emergency_ac_switch"} else "sensor")
+                      if role in {"heater_switch", "emergency_ac_switch", "ac_output_switch"} else "sensor")
             _entity(value, domain, f"power.{role}")
         if self.heater_current is not None and self.heater_power is not None:
             raise BindingsError(
                 "Choose one heater load meter: power.heater_power or power.heater_current; "
                 "set the unused binding to null")
-        entities = [value for value in values.values() if value is not None]
+        entities = [value for role, value in values.items() if value is not None
+                    and not (role == "ac_output_switch" and value == self.emergency_ac_switch)]
         if len(set(entities)) != len(entities):
             raise BindingsError("Power roles must use distinct device entities")
         if self.heater_switch is None and self.emergency_ac_switch is None:
@@ -107,6 +111,8 @@ class PowerBindings:
             result.pop("emergency_ac_fallback_enabled")
         if self.emergency_notify_service is None:
             result.pop("emergency_notify_service")
+        if self.ac_output_switch is None:
+            result.pop("ac_output_switch")
         if self.heater_power is None:
             result.pop("heater_power")
         if self.aggregate_stop_confirmation is not None:
@@ -117,12 +123,13 @@ class PowerBindings:
 @dataclass(frozen=True)
 class HouseBindings:
     heads: Mapping[str, str]
-    rooms: Mapping[str, tuple[str, ...]]
+    rooms: Mapping[str, tuple[str | Probe, ...]]
     fans: Mapping[str, str]
     heater: str
     power: PowerBindings
     windows: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     outdoor: tuple[OutdoorProbe, ...] = ()
+    notifications: NotificationSettings = field(default_factory=NotificationSettings)
 
     def __post_init__(self):
         if not all(isinstance(value, Mapping) for value in (self.heads, self.rooms, self.fans, self.windows)):
@@ -138,15 +145,52 @@ class HouseBindings:
         fans = {role: _entity(value, "fan", f"fans.{role}") for role, value in fans.items()}
         if len(set(fans.values())) != len(fans):
             raise BindingsError("Fan roles must use distinct devices")
-        rooms, probes = {}, set()
+        rooms, probes, physical_sources = {}, set(), {}
         for role, selected in selected_rooms.items():
             if not isinstance(selected, (list, tuple)) or not selected:
-                raise BindingsError(f"rooms.{role} must list one or more ambient sensor entity IDs")
-            values = tuple(_entity(entity, "sensor", f"rooms.{role}") for entity in selected)
-            if len(set(values)) != len(values) or probes.intersection(values):
-                raise BindingsError("Each room must use its own distinct ambient probes")
-            rooms[role] = values
-            probes.update(values)
+                raise BindingsError(f"rooms.{role} must list ambient sensor IDs or explicit probe descriptors")
+            values, room_entities = [], set()
+            for item in selected:
+                if isinstance(item, str):
+                    value = _entity(item, "sensor", f"rooms.{role}")
+                    probe = Probe(value, value)
+                else:
+                    try:
+                        probe = item if isinstance(item, Probe) else Probe(**item)
+                    except (TypeError, ValueError):
+                        raise BindingsError(f"rooms.{role} contains an invalid explicit probe") from None
+                    if (not isinstance(probe.source, str) or not probe.source.strip()
+                            or not isinstance(probe.entity_id, str)
+                            or not re.fullmatch(r"(?:sensor|climate)\.[a-z0-9_]+", probe.entity_id)):
+                        raise BindingsError("Explicit room probes require an entity and physical source identity")
+                    if (probe.unit not in (None, "°F", "F", "°C", "C")
+                            or type(probe.report_on_change) is not bool
+                            or isinstance(probe.offset_f, bool)
+                            or not isinstance(probe.offset_f, (int, float)) or not math.isfinite(probe.offset_f)
+                            or (probe.attribute is not None and (not isinstance(probe.attribute, str)
+                                or not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", probe.attribute)))):
+                        raise BindingsError("Explicit room probe units, offset, attribute or reporting policy are invalid")
+                    for field_name, pattern in (("observation_time_entity", r"sensor\.[a-z0-9_]+"),
+                                                ("require_active_entity", r"(?:fan|switch)\.[a-z0-9_]+")):
+                        extra = getattr(probe, field_name, None)
+                        if extra is not None and (not isinstance(extra, str) or not re.fullmatch(pattern, extra)):
+                            raise BindingsError(f"Invalid room probe {field_name}")
+                    if probe.entity_id.startswith("climate.") and probe.attribute != "current_temperature":
+                        raise BindingsError("Heat-pump room probes must explicitly select current_temperature")
+                    data = asdict(probe)
+                    data["source"] = probe.source.strip()
+                    probe = Probe(**data)
+                    value = probe
+                key = (probe.entity_id, probe.attribute)
+                if key in room_entities or key in probes:
+                    raise BindingsError("Each room must use its own distinct ambient probes")
+                if physical_sources.get(probe.source, role) != role:
+                    raise BindingsError("A physical room probe cannot be assigned to multiple rooms")
+                physical_sources[probe.source] = role
+                room_entities.add(key)
+                values.append(value)
+            rooms[role] = tuple(values)
+            probes.update(room_entities)
         if set(self.windows) - ROOM_ROLES:
             raise BindingsError("windows must use configured room roles")
         windows = {}
@@ -166,18 +210,20 @@ class HouseBindings:
         object.__setattr__(self, "windows", MappingProxyType(windows))
         try:
             object.__setattr__(self, "outdoor", parse_outdoor_probes(self.outdoor))
+            if not isinstance(self.notifications, NotificationSettings):
+                object.__setattr__(self, "notifications", NotificationSettings.from_dict(self.notifications))
         except (TypeError, ValueError) as exc:
             raise BindingsError(str(exc)) from None
 
     @classmethod
     def from_dict(cls, raw):
-        _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings", optional={"windows", "outdoor"})
+        _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings", optional={"windows", "outdoor", "notifications"})
         _keys(raw["heads"], HEAD_ROLES, "heads")
         _keys(raw["rooms"], ROOM_ROLES, "rooms")
         _keys(raw["fans"], FAN_ROLES, "fans")
         _keys(raw["power"], POWER_ROLES, "power",
               optional={"emergency_ac_switch", "emergency_ac_fallback_enabled",
-                        "aggregate_stop_confirmation", "emergency_notify_service", "heater_power"})
+                        "aggregate_stop_confirmation", "emergency_notify_service", "heater_power", "ac_output_switch"})
         for role, selected in raw["rooms"].items():
             if not isinstance(selected, list):
                 raise BindingsError(f"rooms.{role} must list ambient sensor entity IDs")
@@ -198,17 +244,28 @@ class HouseBindings:
         outdoor = raw.get("outdoor", [])
         if not isinstance(outdoor, list) or any(not isinstance(item, dict) for item in outdoor):
             raise BindingsError("outdoor must list explicit current-temperature source objects")
-        return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power, windows, outdoor)
+        return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power, windows, outdoor,
+                   NotificationSettings.from_dict(raw.get("notifications")))
+
+    def room_probes(self, room):
+        """Resolve legacy IDs and explicit physical-source mappings uniformly."""
+        return tuple(item if isinstance(item, Probe) else Probe(item, item)
+                     for item in self.rooms[room])
 
     def to_dict(self):
         power = self.power.to_dict()
         result = {"heads": dict(self.heads),
-                "rooms": {role: list(probes) for role, probes in self.rooms.items()},
+                "rooms": {role: [({key: value for key, value in asdict(probe).items() if value is not None}
+                                  if isinstance(probe, Probe) else probe) for probe in probes]
+                          for role, probes in self.rooms.items()},
                 "fans": dict(self.fans), "heater": self.heater, "power": power}
         if self.windows:
             result["windows"] = {role: list(entities) for role, entities in self.windows.items()}
         if self.outdoor:
             result["outdoor"] = [outdoor_probe_dict(probe) for probe in self.outdoor]
+        notifications = self.notifications.to_dict()
+        if any(notifications.values()):
+            result["notifications"] = notifications
         return result
 
 
@@ -264,6 +321,7 @@ def example_bindings():
                  "office": "fan.office_transfer", "entertainment": "fan.shared_transfer"},
         "heater": "climate.auxiliary_heater",
         "power": {"heater_switch": "switch.auxiliary_heater_power", "battery": "sensor.reserve_battery",
+                  "ac_output_switch": "switch.reserve_ac_output",
                   "circuit_power": "sensor.shared_circuit_power", "input_power": "sensor.reserve_input_power",
                   "output_power": "sensor.reserve_output_power", "heater_current": "sensor.heater_plug_current",
                   "wall_phase_a_voltage": "sensor.supply_a_voltage", "wall_phase_b_voltage": "sensor.supply_b_voltage"},

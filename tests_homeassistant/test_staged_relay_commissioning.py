@@ -73,10 +73,13 @@ class StagedRelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
         if timestamp is None:
             self.source_wall = datetime.fromtimestamp(self.source_wall + .001, timezone.utc).timestamp()
             timestamp = self.source_wall
+        if entity in (self.bindings.ac_output_switch, self.bindings.heater_switch):
+            attrs = {**attrs, "device_report": {"state": value,
+                "reported_at": datetime.fromtimestamp(timestamp, timezone.utc).isoformat()}}
         self.hass.states.async_set(entity, value, attrs, force_update=True, timestamp=timestamp)
 
     async def external_reports(self):
-        for entity in (self.bindings.input_power, self.bindings.output_power, self.bindings.battery,
+        for entity in (self.bindings.ac_output_switch, self.bindings.input_power, self.bindings.output_power, self.bindings.battery,
                        self.bindings.wall_phase_a_voltage, self.bindings.wall_phase_b_voltage):
             old = self.hass.states.get(entity)
             self.report(entity, old.state, old.attributes)

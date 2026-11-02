@@ -30,10 +30,26 @@ class NativeControls:
         self.active = False
         self.owned = ()
         self.pending_fans = ()
+        self.pending_auxiliaries = ()
+        self.pending_device_jobs = lambda entities: ()
         self._fan_problems = {}
         self.recovering = False
         self.heartbeat = 0.0
         self.heartbeat_monotonic = 0.0
+        self.auxiliary_authorized_at = 0.0
+        self.auxiliary_authorized_wall = 0.0
+        self.auxiliary_manual = False
+        self.auxiliary_manual_entity = None
+        self.auxiliary_generation = 0
+        self.auxiliary_stop_revision = 0
+        self._auxiliary_probe_stop_pending = False
+        self._manual_transition = False
+        self.handoff = None
+        self._handoff_jobs = {}
+        self.auxiliary_limit_provider = None
+        self.auxiliary_context_provider = None
+        self._auxiliary_context = None
+        self._auxiliary_stop_limit_f = None
         self.inflight = 0
         self.service_inflight = 0
         self._stop_jobs = {}
@@ -72,6 +88,15 @@ class NativeControls:
     async def async_load(self):
         data = await self.store.async_load()
         if data:
+            manual = data.get("manual_auxiliary")
+            if manual is not None and (not isinstance(manual, str) or not manual.startswith("climate.")):
+                raise HAError("Invalid saved auxiliary manual ownership")
+            self.auxiliary_manual = manual is not None
+            self.auxiliary_manual_entity = manual
+            self.handoff = data.get("handoff")
+            if self.handoff is not None:
+                from .handoff import restored
+                self.handoff = restored(self.handoff)
             devices = data.get("devices", [])
             if not isinstance(devices, list) or any(
                 not isinstance(entity, str) or not entity.startswith(("climate.", "fan."))
@@ -84,13 +109,22 @@ class NativeControls:
                 for entity in pending
             ):
                 raise HAError("Invalid saved pending circulation fans")
+            auxiliary = data.get("pending_auxiliaries", [])
+            if not isinstance(auxiliary, list) or any(not isinstance(entity, str)
+                    or not entity.startswith("climate.") for entity in auxiliary):
+                raise HAError("Invalid saved auxiliary cleanup ownership")
+            self.pending_auxiliaries = tuple(dict.fromkeys(auxiliary))
             self.owned = tuple(dict.fromkeys(devices))
+            if self.auxiliary_manual:
+                self.owned = tuple(entity for entity in self.owned if entity != manual)
             self.pending_fans = tuple(entity for entity in dict.fromkeys(pending)
                                       if entity not in self.owned)
             self.recovering = bool(self.owned)
+            if self.handoff is not None:
+                self._head_possible.update(entity for entity in self.owned if entity in self.config.heads.values())
             # A prior process may have dispatched heat while HA still cached Off.
             # Restored auxiliary ownership needs a fresh superseding stop.
-            self._auxiliary_heat_possible = bool(self.config.heater_entity in self.owned)
+            self._auxiliary_heat_possible = bool(self.config.heater_entity in (*self.owned, *self.pending_auxiliaries))
             if self.owned:
                 self._log_stop(logging.INFO, "Recovering previously owned devices after integration load")
         self._publish()
@@ -100,8 +134,10 @@ class NativeControls:
         if self.active or self._closing:
             return
         self.active = True
-        entities = {*self.config.climate_entities, *self.config.fans.values(), *self.owned, *self.pending_fans,
-                    *(probe.entity_id for room in self.config.zones.values() for probe in room.probes)}
+        entities = {*self.config.climate_entities, *self.config.fans.values(), *self.owned, *self.pending_fans, *self.pending_auxiliaries,
+                    *(entity for room in self.config.zones.values() for probe in room.probes
+                      for entity in (probe.entity_id, getattr(probe, "observation_time_entity", None),
+                                     getattr(probe, "require_active_entity", None)) if entity)}
         self._unsubscribers = [
             async_track_time_interval(self.hass, self._schedule_check, timedelta(seconds=15)),
             async_track_state_change_event(self.hass, entities, self._schedule_check),
@@ -116,9 +152,17 @@ class NativeControls:
             "owned": bool(self.owned) and not self.recovering, "active": self.active,
             "heartbeat": self.heartbeat,
             "heartbeat_monotonic": self.heartbeat_monotonic,
+            "auxiliary_authorized_at": self.auxiliary_authorized_at,
+            "auxiliary_authorized_wall": self.auxiliary_authorized_wall,
+            "auxiliary_manual": self.auxiliary_manual,
+            "auxiliary_manual_entity": self.auxiliary_manual_entity,
+            "auxiliary_generation": self.auxiliary_generation,
+            "auxiliary_stop_revision": self.auxiliary_stop_revision,
+            "handoff": self.handoff,
             "generation": self.ownership_generation,
             "auxiliary_heartbeat_blocked": self.auxiliary_heartbeat_blocked,
             "auxiliary_heartbeat_reason": self.auxiliary_heartbeat_reason,
+            "auxiliary_cleanup_pending": list(self.pending_auxiliaries),
         }
         self.notify()
 
@@ -131,15 +175,23 @@ class NativeControls:
             (entity("heater_owned"), "on" if snapshot["owned"] else "off", {}),
             (entity("heartbeat", "input_datetime"), str(snapshot["heartbeat"]),
              {"timestamp": snapshot["heartbeat"]}),
+            (entity("auxiliary_authorization", "input_datetime"), str(snapshot["auxiliary_authorized_wall"]),
+             {"timestamp": snapshot["auxiliary_authorized_wall"]}),
+            (entity("auxiliary_manual"), "on" if snapshot["auxiliary_manual"] else "off", {}),
             (entity("status", "input_text"), "", {}),
             (entity("auxiliary_watchdog", "automation"), "on" if snapshot["active"] else "off", {}),
-            (entity("auxiliary_probe_safe", "binary_sensor"), "on" if self.probes_safe(states) else "off",
+            (entity("auxiliary_probe_safe", "binary_sensor"), "on" if self.probes_safe(states, authorization=False) else "off",
              {"configuration_signature": watchdog_signature(self.config)}),
         ):
             result[key] = {"state": state, "attributes": attrs}
+        if self.config.heater_entity in result:
+            original = result[self.config.heater_entity]
+            result[self.config.heater_entity] = {**original, "attributes": {
+                **original.get("attributes", {}), "home_climate_manual": snapshot["auxiliary_manual"],
+                "home_climate_auxiliary_stop_revision": snapshot["auxiliary_stop_revision"]}}
         return result
 
-    def probes_safe(self, states):
+    def probes_safe(self, states, *, authorization=True):
         if not self.config.heater_entity:
             return True
         values = []
@@ -150,16 +202,27 @@ class NativeControls:
                                           self.hass.config.units.temperature_unit))
             except (ValueError, TypeError, OverflowError):
                 continue
-        return bool(values) and max(values) < self.config.heater_cutoff_f
+        limit = self.config.heater_cutoff_f
+        if self.auxiliary_limit_provider is not None:
+            try:
+                limit = self.auxiliary_limit_provider()
+            except (ValueError, TypeError, KeyError):
+                return False
+        if authorization and self._auxiliary_stop_limit_f is not None:
+            limit = min(limit, self._auxiliary_stop_limit_f)
+        return bool(values) and max(values) < limit
 
     def _probe_states(self):
         if not self.config.heater_entity:
             return {}
         result = {}
-        for probe in self.config.zones[self.config.auxiliary_room].probes:
-            state = self.hass.states.get(probe.entity_id)
+        entities = {entity for probe in self.config.zones[self.config.auxiliary_room].probes
+                    for entity in (probe.entity_id, getattr(probe, "observation_time_entity", None),
+                                   getattr(probe, "require_active_entity", None)) if entity}
+        for entity in entities:
+            state = self.hass.states.get(entity)
             if state:
-                result[probe.entity_id] = {
+                result[entity] = {
                     "state": state.state, "attributes": dict(state.attributes),
                     "last_reported": state.last_reported.isoformat(),
                 }
@@ -231,7 +294,7 @@ class NativeControls:
                 raise HAError("Enable live commands in Configure → System settings first")
             self.config.validate(live=True)
             if (self.recovering or (self.owned and not self.enabled)
-                    or (not self.enabled and self.service_inflight)):
+                    or (not self.enabled and self._comfort_jobs_pending())):
                 raise HAError("Waiting for previously owned devices to acknowledge off")
             self.problem = None
             self._stop_log_reason = None
@@ -251,13 +314,171 @@ class NativeControls:
             ("input_boolean", "turn_on", self.config.entity("heater_owned")),
             ("input_boolean", "turn_off", self.config.entity("heater_owned")),
             ("input_datetime", "set_datetime", self.config.entity("heartbeat", "input_datetime")),
+            ("input_datetime", "set_datetime", self.config.entity("auxiliary_authorization", "input_datetime")),
             ("input_text", "set_value", self.config.entity("status", "input_text")),
         }
 
-    async def _save(self, devices, pending):
+    def _comfort_jobs_pending(self):
+        devices = set(self.config.climate_entities) | set(self.config.fans.values()) | set(self.owned)
+        devices.discard(self.config.heater_entity)
+        return (self.inflight > self.auxiliary_inflight or self.stop_jobs(devices)
+                or self.pending_device_jobs(devices) or bool(self._uncertain_device_jobs & devices))
+
+    def command_generation(self, entity):
+        """Manual auxiliary ownership fences its queued commands independently."""
+        return ((self.ownership_generation, self.auxiliary_generation)
+                if entity == self.config.heater_entity else self.ownership_generation)
+
+    async def async_retry_handoff(self):
+        """Explicitly review a failed preset; never clear auxiliary obligations."""
+        from copy import deepcopy
+        async with self._check_lock:
+            async with self._lock:
+                plan = self.handoff
+                if plan is None or self.enabled or not plan.get("authorized"):
+                    raise HAError("A stopped controller with saved recovery authority is required")
+                entities = set(plan["heads"]) | set(plan["fans"])
+                if (self.stop_jobs(entities) or self.pending_device_jobs(entities)
+                        or any(not task.done() for entity, task in self._handoff_jobs.items() if entity in entities)
+                        or self.inflight > self.auxiliary_inflight):
+                    raise HAError("Actual recovery device jobs must finish before retry")
+                instant = datetime.now(timezone.utc).timestamp()
+                for entity in plan["heads"]:
+                    state = self.hass.states.get(entity)
+                    after = max(plan.get("resume_after", 0), plan["requests"].get(entity, {}).get("at", 0))
+                    if (state is None or state.state != "off"
+                            or state.attributes.get("hvac_action") in ("heating", "cooling")
+                            or state.attributes.get("restored") or state.attributes.get("assumed_state")
+                            or not 0 <= instant - state.last_reported.timestamp() <= 180
+                            or state.last_reported.timestamp() <= after):
+                        raise HAError("Fresh head Off reports after the failed recovery are required before retry")
+                previous = deepcopy(plan)
+                self.handoff = {**plan, "stage": "stopping", "requests": {}, "completed": [],
+                                "problems": {}, "stop_started": None, "settle_until": None}
+                self.handoff.pop("interrupted", None)
+                self.handoff.pop("resume_after", None)
+                try:
+                    await self._save(self.owned, self.pending_fans)
+                except BaseException:
+                    self.handoff = previous
+                    raise
+                self._uncertain_device_jobs.difference_update(entities)
+                self._head_possible.update(plan["heads"])
+                self.ownership_generation += 1
+                self.recovering = True
+                self.problem = None
+                self._publish()
+                self._schedule_check()
+
+    async def async_set_auxiliary_manual(self, manual):
+        """Transfer the configured auxiliary only; never command a takeover preset."""
+        heater = self.config.heater_entity
+        if not heater or type(manual) is not bool:
+            raise HAError("A configured auxiliary and a boolean ownership choice are required")
+        if manual == self.auxiliary_manual:
+            return
+        if self._closing or self._manual_transition:
+            raise HAError("Auxiliary ownership is already changing or stopping")
+        self._manual_transition = True
+        self.auxiliary_generation += 1
+        self._publish()
+        try:
+            async with self._check_lock:
+                async with self._lock:
+                    guard = self.power_guard
+                    guard_busy = bool(guard is not None and (
+                        getattr(guard, "_restoring", False) or getattr(guard, "_cutting", False)
+                        or getattr(guard, "_restore_intent", False) or getattr(guard, "_positive_tasks", ())
+                        or getattr(guard, "_compensation_pending", False) or getattr(guard, "_service_tasks", ())
+                        or any(task is not None and not task.done() for task in (
+                            getattr(guard, "_action_task", None), getattr(guard, "_save_task", None),
+                            getattr(guard, "_compensating_task", None)))))
+                    if (self.auxiliary_inflight or self.stop_jobs({heater})
+                            or self.pending_device_jobs({heater}) or heater in self._uncertain_device_jobs or guard_busy):
+                        raise HAError("Wait for actual auxiliary commands to finish before transferring control")
+                    if not manual:
+                        state = self.hass.states.get(heater)
+                        fresh_off = bool(state and state.state == "off"
+                            and state.attributes.get("hvac_action") not in ("heating", "cooling")
+                            and not state.attributes.get("restored")
+                            and not state.attributes.get("assumed_state")
+                            and 0 <= (datetime.now(timezone.utc) - state.last_reported).total_seconds() <= 180)
+                        if (self.auxiliary_manual_entity != heater or not fresh_off
+                                or heater in self.pending_auxiliaries
+                                or (self.power_guard is not None and self.power_guard.manual_return_issue)):
+                            raise HAError("Verify fresh auxiliary Off and complete its recovery before returning control")
+                    previous = (self.auxiliary_manual, self.auxiliary_manual_entity, self.owned)
+                    self.auxiliary_manual = manual
+                    self.auxiliary_manual_entity = heater if manual else None
+                    owned = tuple(entity for entity in self.owned if entity != heater)
+                    if not manual and self.owned and self.enabled and not self.recovering:
+                        owned = (*owned, heater)
+                    try:
+                        await self._save(owned, self.pending_fans)
+                    except BaseException:
+                        self.auxiliary_manual, self.auxiliary_manual_entity, self.owned = previous
+                        raise
+                    self.owned = owned
+                    self.auxiliary_authorized_at = self.auxiliary_authorized_wall = 0.0
+                    if manual:
+                        # Separate cutoff/fault obligations remain in the guard.
+                        self._reset_auxiliary_heartbeat()
+        finally:
+            self._manual_transition = False
+            self._publish()
+            if self.power_guard is not None:
+                self.power_guard._schedule_check()
+            self._schedule_check()
+
+    def confirm_auxiliary_authorization(self, mode="heat", stop_limit_f=None, context=None, stop_revision=None):
+        """Renew after current auxiliary supervision, never from a general pulse."""
+        heater = self.config.heater_entity
+        if (not heater or self.auxiliary_manual or self._manual_transition
+                or not self.active or not self.live or not self.enabled or self.recovering
+                or self._closing or heater not in self.owned):
+            raise HAActivationDeferred("Auxiliary automation does not currently own this heater")
+        if stop_revision is not None and stop_revision != self.auxiliary_stop_revision:
+            raise HAActivationDeferred("Independent auxiliary stop requires a new comfort decision")
+        self._check_auxiliary_heartbeat_deadline(time.monotonic())
+        if self.auxiliary_heartbeat_blocked and not self._ack_auxiliary_heartbeat_off():
+            raise HAActivationDeferred("Fresh auxiliary Off is required after authorization expiry")
+        if mode not in ("heat", "fan_only"):
+            raise HAActivationDeferred("Only a current Heat or fan-only plan can renew auxiliary permission")
+        if stop_limit_f is not None:
+            import math
+            if (isinstance(stop_limit_f, bool) or not isinstance(stop_limit_f, (int, float))
+                    or not math.isfinite(stop_limit_f) or not 40 <= stop_limit_f <= 100):
+                raise HAActivationDeferred("Auxiliary stopping bound is invalid")
+        if self.auxiliary_context_provider is not None:
+            if context is None or list(context) != list(self.auxiliary_context_provider()):
+                raise HAActivationDeferred("Auxiliary schedule or peak context changed; a current decision is required")
+            if self._auxiliary_context != list(context):
+                self.auxiliary_generation += 1
+            self._auxiliary_context = list(context)
+        self._auxiliary_stop_limit_f = stop_limit_f if mode == "heat" else None
+        if mode == "heat" and not self.probes_safe(self._probe_states()):
+            raise HAActivationDeferred("Current room evidence does not authorize auxiliary heat")
+        if self.power_guard is not None:
+            self.power_guard.check_activation(heater, {"hvac_mode": mode})
+        if self.auxiliary_heartbeat_blocked:
+            self._reset_auxiliary_heartbeat()
+        self._auxiliary_probe_stop_pending = False
+        self.auxiliary_authorized_at = time.monotonic()
+        self.auxiliary_authorized_wall = datetime.now(timezone.utc).timestamp()
+        self._publish()
+
+    async def _save(self, devices, pending, *, auxiliary=None):
         data = {"devices": list(devices)}
+        if self.auxiliary_manual:
+            data["manual_auxiliary"] = self.auxiliary_manual_entity
+        if self.handoff is not None:
+            from copy import deepcopy
+            data["handoff"] = deepcopy(self.handoff)
         if pending:
             data["pending_fans"] = list(pending)
+        auxiliary = self.pending_auxiliaries if auxiliary is None else auxiliary
+        if auxiliary:
+            data["pending_auxiliaries"] = list(auxiliary)
         await self.store.async_save(data)
 
     async def async_service(self, domain, service, data):
@@ -276,17 +497,23 @@ class NativeControls:
                                     or self.recovering or self._closing):
                                 raise HAError("Control is disabled or still stopping")
                             if not self.owned:
-                                if self.service_inflight:
+                                if self._comfort_jobs_pending():
                                     raise HAError("Previous device services are still running; ownership claim deferred")
-                                devices = tuple([*self.config.climate_entities,
-                                                 *self.config.fans.values()])
+                                devices = tuple(entity for entity in [*self.config.climate_entities,
+                                                 *self.config.fans.values()]
+                                                if entity not in self.pending_auxiliaries
+                                                and not (self.auxiliary_manual and entity == self.config.heater_entity))
                                 pending = tuple(entity for entity in self.pending_fans
                                                 if entity not in devices)
                                 try:
+                                    from .handoff import arm
+                                    prior_handoff = self.handoff
+                                    self.handoff = arm(self, devices)
                                     # Reclaim current fans and preserve old mapped
                                     # fans atomically before permitting activation.
                                     await self._save(devices, pending)
                                 except BaseException:
+                                    self.handoff = prior_handoff
                                     self.enabled = False
                                     self._publish()
                                     raise
@@ -301,12 +528,21 @@ class NativeControls:
                     self._publish()
                     self._schedule_check()
             else:
+                # Repeated release requests must not invalidate an Off receipt
+                # that is already completing for this same ownership exit.
+                if self.enabled or (self.owned and not self.recovering):
+                    self.ownership_generation += 1
+                self.enabled = False
                 self.recovering = bool(self.owned)
                 self._publish()
-                await self._clear_if_off()
+                if self.handoff is None:
+                    await self._clear_if_off()
                 self._schedule_check()
         elif domain == "input_datetime":
-            self.confirm_heartbeat()
+            if data.get("entity_id") == self.config.entity("auxiliary_authorization", "input_datetime"):
+                self.confirm_auxiliary_authorization(data.get("hvac_mode", "heat"), data.get("stop_limit_f"), data.get("context"), data.get("stop_revision"))
+            else:
+                self.confirm_heartbeat()
         # The old input_text is only a CLI diagnostic sink; native sensors expose it.
 
     @property
@@ -420,9 +656,9 @@ class NativeControls:
 
     def _check_auxiliary_heartbeat_deadline(self, instant):
         if (not self.config.heater_entity or self.config.heater_entity not in self.owned
-                or not self.enabled or self.recovering or not self.live):
+                or not self.enabled or self.recovering or not self.live or self.auxiliary_manual):
             return
-        age = instant - self.heartbeat_monotonic
+        age = instant - self.auxiliary_authorized_at
         if (not self.auxiliary_heartbeat_blocked
                 and not 0 <= age <= self.config.auxiliary_heartbeat_timeout_seconds
                 and (self.auxiliary_inflight or self._auxiliary_heat_possible
@@ -528,19 +764,21 @@ class NativeControls:
             raise HAActivationDeferred("Controller heartbeat lease expired")
         # Observe the shorter heater deadline before the shared lease is renewed.
         self._check_auxiliary_heartbeat_deadline(instant)
-        if self._ack_auxiliary_heartbeat_off():
-            self._reset_auxiliary_heartbeat()
         self.heartbeat = datetime.now(timezone.utc).timestamp()
         self.heartbeat_monotonic = instant
         self._publish()
 
     def check_activation(self, entity, data, *, generation=None):
-        if generation is not None and generation != self.ownership_generation:
+        if generation is not None and generation != self.command_generation(entity):
             raise HAActivationDeferred("Command belongs to an earlier controller lease")
+        if entity == self.config.heater_entity and (self.auxiliary_manual or self._manual_transition):
+            raise HAActivationDeferred("Auxiliary heater is under explicit manual control")
         if (not self.active or not self.live or not self.enabled or self.recovering
                 or self._claiming or self._closing
                 or entity not in self.owned):
             raise HAError("Controller is disabled or stopping; activation blocked")
+        if entity in self.pending_auxiliaries:
+            raise HAActivationDeferred("Auxiliary recovery is pending; other comfort remains available")
         if entity in self._uncertain_device_jobs:
             raise HAError("A prior device service has uncertain completion; activation blocked")
         instant = time.monotonic()
@@ -550,15 +788,20 @@ class NativeControls:
         self._check_auxiliary_heartbeat_deadline(instant)
         if entity == self.config.heater_entity and (
                 self.auxiliary_heartbeat_blocked
-                or not 0 <= age <= self.config.auxiliary_heartbeat_timeout_seconds):
+                or not 0 <= instant - self.auxiliary_authorized_at <= self.config.auxiliary_heartbeat_timeout_seconds):
             raise HAActivationDeferred(self.auxiliary_heartbeat_reason
                                       or "Waiting for a fresh auxiliary heater heartbeat")
+        if (entity == self.config.heater_entity and self.auxiliary_context_provider is not None
+                and self._auxiliary_context != list(self.auxiliary_context_provider())):
+            raise HAActivationDeferred("Auxiliary schedule or peak context changed before dispatch")
         if (entity == self.config.heater_entity and data.get("hvac_mode") == "heat"
                 and not self.probes_safe(self._probe_states())):
             raise HAError("External room probes block auxiliary heat")
 
     def check_stop(self, entity):
-        if entity not in self.owned and entity not in self.pending_fans:
+        if entity == self.config.heater_entity and (self.auxiliary_manual or self._manual_transition):
+            raise HAActivationDeferred("Routine auxiliary stop is excluded by manual ownership")
+        if entity not in self.owned and entity not in self.pending_fans and entity not in self.pending_auxiliaries:
             raise HAActivationDeferred("Stop belongs to a device no longer owned by this controller")
 
     def _is_off(self, entity):
@@ -579,7 +822,29 @@ class NativeControls:
                     and state.attributes.get("hvac_action") not in ("heating", "cooling"))
 
     async def _clear_if_off(self):
+        if self.handoff is not None:
+            return
         async with self._lock:
+            heater = self.config.heater_entity
+            other = tuple(entity for entity in self.owned if entity != heater)
+            auxiliary_safe = (not (self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked)
+                              or self._ack_auxiliary_heartbeat_off())
+            # Preserve the unresolved heater obligation in a separate durable
+            # bucket. It cannot hold unrelated heads/fans in global recovery.
+            if (heater in self.owned and self.power_guard is not None and self.power_guard.blocked
+                    and (not auxiliary_safe or not self._is_off(heater) or self.auxiliary_inflight
+                         or self.stop_jobs({heater}) or self.pending_device_jobs({heater}))
+                    and not self._comfort_jobs_pending()
+                    and all(self._is_off(entity) for entity in other if entity.startswith("climate."))):
+                pending = tuple(dict.fromkeys([*self.pending_fans,
+                    *(entity for entity in other if entity.startswith("fan.") and not self._is_off(entity))]))
+                auxiliary = tuple(dict.fromkeys([*self.pending_auxiliaries, heater]))
+                await self._save((), pending, auxiliary=auxiliary)
+                self.owned, self.pending_fans, self.pending_auxiliaries = (), pending, auxiliary
+                self.ownership_generation += 1
+                self.recovering = False
+                self._publish()
+                return
             critical = tuple(entity for entity in self.owned if entity.startswith("climate."))
             auxiliary_safe = (not (self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked)
                               or self._ack_auxiliary_heartbeat_off())
@@ -625,7 +890,7 @@ class NativeControls:
     async def _off(self, entity):
         # Watchdog stops have the same actual handler lifetime as worker stops.
         # A reported Off before the handler returns cannot release ownership.
-        generation = self.ownership_generation
+        generation = self.command_generation(entity)
         repair_epoch = self.repair_gate.capture(entity, activation=False) if self.repair_gate else None
         self.service_inflight += 1
         task = self.hass.async_create_background_task(
@@ -651,7 +916,7 @@ class NativeControls:
                      if entity in entities and not task.done())
 
     async def _off_job(self, entity, generation, repair_epoch):
-        if generation != self.ownership_generation:
+        if generation != self.command_generation(entity):
             return False
         try:
             self.check_stop(entity)
@@ -709,7 +974,16 @@ class NativeControls:
                     self._publish()
                 self._auxiliary_off_error = None
             attempted = set()
-            if self.owned:
+            if self.owned and self.handoff is not None and (self.recovering or not self.enabled):
+                from .handoff import step
+                try:
+                    await step(self)
+                except Exception as exc:
+                    self.problem = f"Could not complete recovery handoff: {exc}"
+                    if self.handoff is not None:
+                        self.handoff["problems"]["persistence_or_execution"] = self.problem
+                    self._publish()
+            elif self.owned:
                 instant = time.monotonic()
                 heartbeat_age = instant - self.heartbeat_monotonic
                 expired = not 0 <= heartbeat_age <= self.config.heartbeat_timeout_seconds
@@ -745,7 +1019,36 @@ class NativeControls:
                             await self._off(self.config.heater_entity)
                             self._ack_auxiliary_heartbeat_off()
                     elif self._auxiliary_could_heat() and not self.probes_safe(self._probe_states()):
+                        if not self._auxiliary_probe_stop_pending:
+                            self._auxiliary_probe_stop_pending = True
+                            self.auxiliary_stop_revision += 1
+                            self.auxiliary_generation += 1
+                            self._publish()
                         await self._off(self.config.heater_entity)
+            if self.pending_auxiliaries and self.live:
+                for entity in self.pending_auxiliaries:
+                    if (entity not in attempted and not self.stop_jobs({entity})
+                            and (not self._is_off(entity) or (entity == self.config.heater_entity
+                                and (self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked)
+                                and not self._ack_auxiliary_heartbeat_off()))):
+                        await self._off(entity)
+                async with self._lock:
+                    pending = tuple(entity for entity in self.pending_auxiliaries
+                        if (self.stop_jobs({entity}) or self.pending_device_jobs({entity})
+                            or entity in self._uncertain_device_jobs or not self._is_off(entity)
+                            or (entity == self.config.heater_entity
+                                and (self.auxiliary_inflight or ((self._auxiliary_heat_possible
+                                      or self.auxiliary_heartbeat_blocked)
+                                      and not self._ack_auxiliary_heartbeat_off())))))
+                    if pending != self.pending_auxiliaries:
+                        reclaimed = tuple(entity for entity in self.pending_auxiliaries
+                            if entity not in pending and entity == self.config.heater_entity
+                            and self.owned and self.enabled and not self.auxiliary_manual)
+                        owned = tuple(dict.fromkeys([*self.owned, *reclaimed]))
+                        await self._save(owned, self.pending_fans, auxiliary=pending)
+                        self.owned, self.pending_auxiliaries = owned, pending
+                        self.ownership_generation += 1
+                        self._publish()
             # Cleanup from previous mappings is independent of the live lease.
             # Current fans are removed from this bucket by the saved claim above.
             if self.pending_fans:
@@ -761,7 +1064,7 @@ class NativeControls:
                     self._publish()
 
     async def async_close(self):
-        if (not self.active and self._closing and not self.owned
+        if (not self.active and self._closing and not self.owned and not self.pending_auxiliaries
                 and not self.inflight and not self.service_inflight):
             return True
         self._closing = True
@@ -774,7 +1077,7 @@ class NativeControls:
                 await asyncio.shield(self._task)
             # The check lock also waits for a claim already saving ownership.
             await self.async_check()
-            if self.owned or self.inflight or self.service_inflight:
+            if self.owned or self.pending_auxiliaries or self.inflight or self.service_inflight:
                 # Keep subscriptions alive for unresolved critical ownership.
                 return False
             # Fan-only cleanup survives in storage and resumes on next load.

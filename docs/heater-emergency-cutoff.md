@@ -26,47 +26,11 @@ output control is distinct from whole-station power, DC output and charging.
 If the cut removes the command or feedback network, status remains **requested,
 unconfirmed**; losing contact does not prove either success or failure.
 
-### Sustained grid-input evidence
+### Supply evidence
 
-The grid-input budget remains `12 × min(fresh phase A voltage, fresh phase B
-voltage)` watts. It is a real-power operating budget, not measured RMS current
-or a physical 12 A guarantee, and it applies to grid input rather than
-battery-assisted AC output. Whole-circuit power is now advisory and is not
-enforced. Other branch loads are outside this input policy.
+The [auxiliary supply policy](auxiliary-supply-policy.md) replaces software input/output watt ceilings and the circuit exception with battery above 40% and verified AC supply. Input, circuit and phase voltage are diagnostic. Genuine stop failure, native-Off timing, optional physical cutoffs and aggregate-stop corroboration remain independent. Unsupported AC provenance safely inhibits auxiliary heat.
 
-Grid input needs at least 30 seconds and three distinct fresh reports at or
-above the budget to shed a running heater. Cached duplicates, circuit reports
-and voltage-only updates cannot complete qualification. Invalid input reports
-or reporting gaps invalidate it; missing input or voltage has no circuit or
-nominal-voltage fallback. Pending qualification
-defers new starts while retaining an existing call unless another protection
-requires shutdown. Battery at/below 40%, AC output at/above 2000 W, temperature
-protections and existing telemetry checks remain independent.
-
-After confirmed native heater Off, continued charging may keep input high.
-That remains a diagnostic and heating
-inhibition, not proof of a failed heater stop or a new shared-AC escalation.
-If the heater was already Off, fresh trusted feedback can provide passive
-state-only evidence without a no-op command when no command, cleanup or meter
-evidence conflicts. This is not a sent-command acknowledgement or physical
-isolation proof. It expires and is not retained across restart; its first
-evidence boundary cannot move backwards on a later report. A configured heater
-meter must remain fresh, trusted and consistent with Off through recovery;
-missing, restored, assumed or pre-boundary current cannot clear inhibition.
-Passive evidence grants no power-restoration ownership and cannot acknowledge
-manual or emergency recovery. An ordinary wall-load latch can clear only after
-the existing safe-load and cooldown requirements are satisfied.
-Switching AC output Off does not switch charging Off. Rearming retains the 85%
-input-budget threshold, 60-second safe-load qualification and five-minute trip
-cooldown. Existing JSON bindings work without new thresholds or mappings;
-upgrading does not clear persisted recovery latches.
-
-Circuit telemetry never triggers shedding or blocks activation, acknowledgement
-or recovery, including when stale or unavailable. The guard retains its source
-and bounded advisory diagnostics with `circuit_enforced: false` and circuit
-status `advisory`. Keep the existing circuit binding for visibility; no JSON
-migration is required. Native heater/cutoff feedback still confirms shutdown;
-the advisory policy does not change that evidence or shared-AC ownership.
+All dedicated restoration outside explicit commissioning now requires `house_climate.approve_heater_restore` approval. Existing verification deadlines below still apply. Explicit recovery reads physical Matter relay feedback without operating the relay or refreshing the HA cache. Other heads/fans can continue while the auxiliary obligation remains persisted separately.
 
 ## Private wiring
 
@@ -140,7 +104,7 @@ idle is not mode Off. A valid native Off report can remain state-only while
 asynchronous watt evidence arrives; this does not extend the five-second
 native acknowledgement deadline or turn old high watts into a new sample.
 
-Watt-based automatic outlet restoration needs fresh low watts after the actual
+Explicitly approved watt-based outlet restoration needs fresh low watts after the actual
 Off request made during restoration. A stale zero is never electrical proof.
 Switch-only wiring still requires manual verification instead of automatic
 outlet restoration.
@@ -150,8 +114,8 @@ outlet restoration.
 From 0.8.8, an observed, guard-owned relay cutoff is separate from energized
 meter supervision. Some dedicated meters stop reporting while the relay is Off;
 their readings expire before the five-minute cooldown ends. For a matching,
-trusted cutoff whose relay remains Off and available, fresh external input,
-output, voltage and battery readings can qualify the existing 60-second
+trusted cutoff whose relay remains Off and available, explicit restoration
+approval and fresh battery/verified supply can qualify the existing 60-second
 safe interval and five-minute cooldown. The meter stays unknown, rather than
 being replaced with zero. Advisory circuit telemetry cannot block this path;
 fresh post-cut heater load still contradicts isolation.
@@ -194,8 +158,8 @@ permitted, the heater guard **Ready**, and no retained equipment ownership,
 recovery, uncertain commands or pending service work. The native heater must
 already report trusted, fresh **Off** with fresh dedicated low-load evidence:
 strictly below 100 W on the watt path or below 1 A on the current path. The
-dedicated relay must report trusted On, and external input/output, voltage and
-battery readings must satisfy normal recovery limits. Switch-only/direct wiring
+dedicated relay must report trusted On, and battery and verified AC supply must satisfy normal recovery eligibility.
+Input/output totals and phase voltages impose no software ceiling. Switch-only/direct wiring
 cannot run this test. Shared AC fallback must already be disabled; the action
 does not change that setting and never commands shared AC output.
 
@@ -240,7 +204,7 @@ low-meter evidence; it is not extended for device boot or HA reconnection.
 
 Available in 0.8.10, the staged path applies only to this explicitly invoked,
 supervised test when a dedicated **watt** meter is selected.
-It does not change normal unattended recovery, its ten-second verification
+It does not change explicitly approved recovery, its ten-second verification
 window and maximum of three attempts, or the existing amp-meter path. There is
 no new JSON threshold or command parameter to enable the stages.
 
@@ -302,7 +266,7 @@ unload or restart cannot silently start another attempt. Interrupted tests
 require manual recovery. Ten minutes is the overall supervision bound; an
 observation interruption longer than the 180-second freshness limit or a clock
 reversal also ends the test without licensing an automatic restart. These bounds
-do not extend normal unattended recovery or the amp path. Never clear storage,
+do not extend explicitly approved recovery or the amp path. Never clear storage,
 fabricate sensor states, raise limits or repeatedly power-cycle the heater to
 obtain a pass. The staged implementation still requires supervised hardware
 validation; software tests do not establish physical reconnect timing, actual
@@ -310,7 +274,7 @@ meter measurement age or failure-free recutting. An explicit
 `passed` result establishes only the observed recovery attempt under those
 conditions; it is not electrical/fire safety certification or proof of future
 connectivity. A normal manual thermostat Off test remains a separate check and
-does not establish guard-owned automatic restoration.
+does not establish unapproved guard-owned restoration.
 
 ## Optional household alerts
 
@@ -507,13 +471,16 @@ For this already-On retained claim:
 1. Keep **Controller enabled** and **Allow live commands** Off. Leave the
    already-On relay as it is and verify the native heater is in mode Off.
 2. Wait for trusted reports received after the integration restart/reload:
-   relay On, native Off, and dedicated power below 100 W (or the configured
-   legacy current meter below 1 A). Native Off and low-load reports must also
+   native Off and dedicated power below 100 W (or the configured
+   legacy current meter below 1 A). The acknowledgement obtains physical relay-On
+   evidence from a supported source snapshot or read-only Matter attribute read. Native Off and low-load reports must also
    follow the relay's latest state change. These reports must be at most
    180 seconds old. Battery must be above 40%, and the existing electrical
-   recovery requirements must pass, including the conditional output exception.
+   recovery requirements must pass, including AC output enabled with current
+   supply corroboration. This ordinary supply check is separate from the
+   stronger physical relay evidence used to release the saved cutoff claim.
 3. Press **Acknowledge heater power recovery**. It requires matching saved
-   heater/relay/meter bindings, the stopped comfort controller, no pending
+   heater/relay/meter bindings, stopped auxiliary work, no pending
    commands or cleanup, and working durable storage. It sends no equipment
    commands. A successful acknowledgement writes the released claim before
    relinquishing ownership in memory and survives another Preview reload.
@@ -534,9 +501,9 @@ clear shared emergencies or bypass a latch. A failed storage write keeps the
 running guard inhibited; changed evidence during a write restores the held
 claim in storage before reporting refusal.
 
-Dedicated-outlet automatic recovery remains separate: it requires a valid heater
-meter, battery above 40%, stable safe load and cooldown, and can restore only
-guard-owned power. Shared AC is never included in that automatic restoration.
+Dedicated-outlet restoration requires explicit `house_climate.approve_heater_restore`
+approval, verified supply, a dedicated meter, stable safe load and cooldown. It
+can restore only matching guard-owned power. See the [approval procedure](auxiliary-supply-policy.md#shutdown-and-explicit-recovery); shared AC is never restored.
 
 Stored cutoff claims are tied to heater/cutoff/meter identities. An old claim
 without matching identity is quarantined for manual acknowledgement rather than

@@ -6,7 +6,7 @@ import math
 import re
 import tomllib
 from dataclasses import asdict, dataclass, field
-from datetime import time
+from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -35,6 +35,8 @@ class Probe:
     unit: str | None = None
     offset_f: float = 0
     report_on_change: bool = False
+    observation_time_entity: str | None = None
+    require_active_entity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +124,9 @@ class Period:
     end: str
     profile: Profile
     name: str = ""
+    weekdays: tuple[int, ...] = tuple(range(7))
+    all_day: bool = False
+    seasonal_profiles: dict[str, Profile] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,7 @@ class Zone:
     profile: Profile = field(default_factory=Profile)
     schedules: tuple[Period, ...] = ()
     windows: tuple[str, ...] = ()
+    seasonal_profiles: dict[str, Profile] = field(default_factory=dict)
 
     def __post_init__(self):
         if not isinstance(self.windows, (list, tuple)):
@@ -150,6 +156,40 @@ class FanControl:
 
 
 @dataclass(frozen=True)
+class AuxiliaryPolicy:
+    peak_start: str = "17:00"
+    peak_end: str = "21:00"
+    peak_deficit_f: float = 1
+    urgent_deficit_f: float = 2
+    peak_wait_seconds: float = 900
+    progress_f: float = .5
+    progress_window_seconds: float = 600
+    stop_inside_band_f: float = .5
+
+
+@dataclass(frozen=True)
+class FallbackPolicy:
+    heat_low_f: float = 68
+    cool_high_f: float = 73
+    fan_percentage: float = 40
+
+
+@dataclass(frozen=True)
+class SeasonalPolicy:
+    enabled: bool = False
+    average_seconds: float = 1800
+    cool_below_f: float = 59
+    warm_above_f: float = 61
+    initial_profile: str = "cool"
+
+
+def _seasonal_profiles(value):
+    if not isinstance(value, dict):
+        raise ValueError("Seasonal profiles must be an object")
+    return {name: Profile(**selected) for name, selected in value.items()}
+
+
+@dataclass(frozen=True)
 class Config:
     timezone: str
     heads: dict[str, str]
@@ -158,6 +198,7 @@ class Config:
     heater_entity: str | None = None
     auxiliary_room: str | None = None
     auxiliary_fan_enabled: bool = True
+    auxiliary_dynamic_stop: bool = False
     fan_controls: dict[str, FanControl] = field(default_factory=dict)
     low_f: float = 66
     high_f: float = 75
@@ -187,11 +228,23 @@ class Config:
     heater_cutoff_f: float = 70
     protection: ProtectionTemperatures | None = None
     outdoor_probes: tuple[OutdoorProbe, ...] = ()
+    auxiliary_policy: AuxiliaryPolicy = field(default_factory=AuxiliaryPolicy)
+    fallback: FallbackPolicy | None = None
+    seasonal_policy: SeasonalPolicy = field(default_factory=SeasonalPolicy)
 
     def __post_init__(self):
         object.__setattr__(self, "outdoor_probes", parse_outdoor_probes(self.outdoor_probes))
         if self.protection is not None and not isinstance(self.protection, ProtectionTemperatures):
             raise ValueError("Protection must be a ProtectionTemperatures object or absent")
+        for name, kind in (("auxiliary_policy", AuxiliaryPolicy), ("fallback", FallbackPolicy),
+                           ("seasonal_policy", SeasonalPolicy)):
+            value = getattr(self, name)
+            if name == "fallback" and value is None:
+                continue
+            if isinstance(value, dict):
+                object.__setattr__(self, name, kind(**value))
+            elif not isinstance(value, kind):
+                raise ValueError(f"{name} must be a settings object")
 
     def entity(self, name, domain="input_boolean"):
         if self.legacy:
@@ -226,18 +279,26 @@ class Config:
             value = dict(value)
             probes = tuple(Probe(**{"source": p["entity_id"], **p}) for p in value.pop("sensors", []))
             profile = Profile(**value.pop("profile", {}))
+            seasonal_profiles = _seasonal_profiles(value.pop("seasonal_profiles", {}))
             periods = []
             for period in value.pop("schedules", []):
                 period = dict(period)
                 start, end, name = period.pop("start"), period.pop("end"), period.pop("name", "")
-                periods.append(Period(start, end, Profile(**period), name))
+                weekdays = period.pop("weekdays", tuple(range(7)))
+                if not isinstance(weekdays, (list, tuple)):
+                    raise ValueError("Schedule weekdays must be a list of Monday=0 through Sunday=6")
+                all_day = period.pop("all_day", False)
+                alternatives = _seasonal_profiles(period.pop("seasonal_profiles", {}))
+                periods.append(Period(start, end, Profile(**period), name, tuple(weekdays),
+                                      all_day, alternatives))
             for fan in value.pop("fans", []):
                 fan = FanControl(room=key, **fan)
                 if fan.entity_id in fans:
                     raise ValueError("A fan can belong to only one room")
                 fans[fan.entity_id] = fan.entity_id
                 controls[fan.entity_id] = fan
-            zones[key] = Zone(probes=probes, profile=profile, schedules=tuple(periods), **value)
+            zones[key] = Zone(probes=probes, profile=profile, schedules=tuple(periods),
+                              seasonal_profiles=seasonal_profiles, **value)
         result = cls(zones=zones, fans=fans, fan_controls=controls,
                      protection=protection, outdoor_probes=outdoor, **raw)
         result.validate()
@@ -264,15 +325,27 @@ class Config:
             return data
         for key, room in self.zones.items():
             data = {"name": room.name or key, "head": room.head,
-                    "sensors": [asdict(probe) for probe in room.probes],
+                    "sensors": [{name: value for name, value in asdict(probe).items() if value is not None}
+                                for probe in room.probes],
                     "profile": profile_data(room.profile), "schedules": [], "fans": []}
             if room.area_id:
                 data["area_id"] = room.area_id
             if room.windows:
                 data["windows"] = list(room.windows)
+            if room.seasonal_profiles:
+                data["seasonal_profiles"] = {name: profile_data(profile)
+                                              for name, profile in room.seasonal_profiles.items()}
             for period in room.schedules:
-                data["schedules"].append({"start": settings.clock(period.start).isoformat(),
-                    "end": settings.clock(period.end).isoformat(), "name": period.name, **profile_data(period.profile)})
+                selected = {"start": settings.clock(period.start).isoformat(),
+                    "end": settings.clock(period.end).isoformat(), "name": period.name, **profile_data(period.profile)}
+                if period.weekdays != tuple(range(7)):
+                    selected["weekdays"] = list(period.weekdays)
+                if period.all_day:
+                    selected["all_day"] = True
+                if period.seasonal_profiles:
+                    selected["seasonal_profiles"] = {name: profile_data(profile)
+                        for name, profile in period.seasonal_profiles.items()}
+                data["schedules"].append(selected)
             for fan in self.fan_controls.values():
                 if fan.room == key:
                     value = asdict(fan)
@@ -294,6 +367,8 @@ class Config:
             raise ValueError("Temperature limits must be finite and at least 3°F apart")
         if type(self.equipment_timing_confirmed) is not bool or type(self.heater_setpoint_confirmed) is not bool:
             raise ValueError("Commissioning flags must be booleans")
+        if type(self.auxiliary_dynamic_stop) is not bool:
+            raise ValueError("Auxiliary dynamic stop must be a boolean")
         if len(set(self.heads.values())) != len(self.heads) or self.heater_entity in self.heads.values():
             raise ValueError("Heads and auxiliary heater must be distinct")
         if len(set(self.fans.values())) != len(self.fans):
@@ -304,6 +379,8 @@ class Config:
         if bool(self.heater_entity) != bool(self.auxiliary_room) or (self.auxiliary_room and self.auxiliary_room not in self.zones):
             raise ValueError("Assign the optional auxiliary heater to a configured room")
         settings = Settings.read({}, self)
+        source_rooms = {}
+        entity_rooms = {}
         for key, room in self.zones.items():
             if not isinstance(room.name, str):
                 raise ValueError("Room names must be text")
@@ -325,7 +402,23 @@ class Config:
                     raise ValueError("Invalid probe entity or physical source")
                 if probe.entity_id == self.heater_entity or not math.isfinite(probe.offset_f):
                     raise ValueError("Use calibrated independent room probes for the auxiliary thermostat")
-            for profile in (room.profile, *(period.profile for period in room.schedules)):
+                if not isinstance(probe.source, str) or not probe.source.strip():
+                    raise ValueError("Temperature probes require a physical source identity")
+                for identity, known in ((probe.source.strip(), source_rooms),
+                                        ((probe.entity_id, probe.attribute), entity_rooms)):
+                    if identity in known and known[identity] != key:
+                        raise ValueError("One physical temperature probe cannot represent different rooms")
+                    known[identity] = key
+                for name, pattern in (("observation_time_entity", r"sensor\.[a-z0-9_]+"),
+                                      ("require_active_entity", r"(?:fan|switch)\.[a-z0-9_]+")):
+                    selected = getattr(probe, name)
+                    if selected is not None and (not isinstance(selected, str) or not re.fullmatch(pattern, selected)):
+                        raise ValueError(f"Invalid probe {name}")
+            alternatives = (room.seasonal_profiles, *(period.seasonal_profiles for period in room.schedules))
+            if any(set(selected) - {"cool", "warm"} for selected in alternatives):
+                raise ValueError("Seasonal profiles must be named cool or warm")
+            for profile in (room.profile, *(period.profile for period in room.schedules),
+                            *(profile for selected in alternatives for profile in selected.values())):
                 target, half = settings.value(profile.target_f) + profile.target_offset_f, settings.value(profile.half_band_f)
                 values = (target, half, profile.priority, settings.value(profile.fan_percentage))
                 if not all(math.isfinite(v) for v in values) or not self.low_f <= target <= self.high_f or not 0 < half <= 5:
@@ -338,18 +431,32 @@ class Config:
                 high = settings.value(profile.high_f) if profile.high_f is not None else min(self.high_f, target+half)
                 if not self.low_f <= low < high <= self.high_f or not low <= target <= high:
                     raise ValueError("Room comfort bands must stay inside the system limits")
-                if key == self.auxiliary_room and profile.comfort_enabled and high > self.heater_cutoff_f:
-                    raise ValueError("Auxiliary room target/deadband exceeds the independent heater cutoff")
             intervals = []
             for period in room.schedules:
                 start, end = settings.clock(period.start), settings.clock(period.end)
                 a, b = seconds(start), seconds(end)
-                if a == b:
+                if (not period.weekdays or len(set(period.weekdays)) != len(period.weekdays)
+                        or any(type(day) is not int or not 0 <= day <= 6 for day in period.weekdays)):
+                    raise ValueError("Schedule weekdays must be unique integers Monday=0 through Sunday=6")
+                if type(period.all_day) is not bool:
+                    raise ValueError("Schedule all_day must be a boolean")
+                if period.all_day and (a != 0 or b != 0):
+                    raise ValueError("All-day schedules use start and end at midnight")
+                if a == b and not period.all_day:
                     raise ValueError("Schedule start and end must differ; use the base profile for all-day settings")
-                parts = [(a,b)] if a < b else [(a,86400),(0,b)]
-                if any(max(x,a2) < min(y,b2) for x,y in parts for a2,b2 in intervals):
-                    raise ValueError("Schedules within a room must not overlap")
-                intervals.extend(parts)
+                duration = 86400 if period.all_day else (b-a) % 86400
+                for day in period.weekdays:
+                    lower, upper = day*86400+a, day*86400+a+duration
+                    parts = [(lower, min(upper, 604800))]
+                    if upper > 604800:
+                        parts.append((0, upper-604800))
+                    for x, y in parts:
+                        for a2, b2, previous in intervals:
+                            if max(x, a2) < min(y, b2) and (
+                                    previous.profile != period.profile or
+                                    previous.seasonal_profiles != period.seasonal_profiles):
+                                raise ValueError("Schedules within a room must not overlap with conflicting profiles")
+                        intervals.append((x, y, period))
         for fan in self.fan_controls.values():
             if fan.room not in self.zones or fan.entity_id not in self.fans.values():
                 raise ValueError("Invalid fan room/entity")
@@ -405,12 +512,42 @@ class Config:
                 raise ValueError(f"{name} must be a finite temperature difference from 0 to 20°F")
         if not 0 <= self.forecast_minutes <= 30:
             raise ValueError("Invalid forecast horizon")
+        self._validate_policy_settings(settings)
         if self.heater_entity and (not self.low_f < self.heater_cutoff_f < self.high_f or not math.isfinite(self.heater_high_setpoint_f)):
             raise ValueError("Invalid auxiliary heater setpoint or cutoff")
         if live and (not self.equipment_timing_confirmed or (self.heater_entity and not self.heater_setpoint_confirmed)):
             raise ValueError("Confirm equipment timing and any auxiliary heater setpoint before live control")
         if live and (self.poll_seconds > 30 or self.command_timeout_seconds > 60):
             raise ValueError("Live watchdog checks require poll_seconds <= 30 seconds and command_timeout_seconds <= 60 seconds")
+
+    def _validate_policy_settings(self, settings):
+        def finite(value, name, minimum, maximum):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not minimum <= value <= maximum:
+                raise ValueError(f"{name} must be a finite number from {minimum} to {maximum}")
+        auxiliary = self.auxiliary_policy
+        if settings.clock(auxiliary.peak_start) == settings.clock(auxiliary.peak_end):
+            raise ValueError("Peak hours must have distinct start and end times")
+        for name in ("peak_deficit_f", "urgent_deficit_f", "progress_f", "stop_inside_band_f"):
+            finite(getattr(auxiliary, name), name, .01, 10)
+        if auxiliary.urgent_deficit_f < auxiliary.peak_deficit_f:
+            raise ValueError("Urgent auxiliary deficit cannot be below the ordinary peak deficit")
+        for name in ("peak_wait_seconds", "progress_window_seconds"):
+            finite(getattr(auxiliary, name), name, 60, 3600)
+        fallback = self.fallback
+        if fallback is not None:
+            finite(fallback.heat_low_f, "Recovery heating setpoint", 40, 90)
+            finite(fallback.cool_high_f, "Recovery cooling setpoint", 40, 90)
+            if fallback.heat_low_f >= fallback.cool_high_f:
+                raise ValueError("Recovery heating setpoint must be below cooling setpoint")
+            finite(fallback.fan_percentage, "Recovery fan percentage", 0, 100)
+        seasonal = self.seasonal_policy
+        if type(seasonal.enabled) is not bool or seasonal.initial_profile not in ("cool", "warm"):
+            raise ValueError("Invalid seasonal enablement or initial profile")
+        finite(seasonal.average_seconds, "Seasonal averaging window", 60, 86400)
+        finite(seasonal.cool_below_f, "Cool-season threshold", -100, 150)
+        finite(seasonal.warm_above_f, "Warm-season threshold", -100, 150)
+        if seasonal.cool_below_f >= seasonal.warm_above_f:
+            raise ValueError("Seasonal thresholds require a hysteresis band")
 
 
 def seconds(value):
@@ -423,12 +560,14 @@ class Settings:
     times: dict[str, time]
     toggles: dict[str, bool]
     room_profiles: dict[str, Profile] = field(default_factory=dict)
+    seasonal_profile: str = "cool"
 
     @classmethod
     def read(cls, states, config, strict=False):
         if not config.legacy:
             return cls({"mode_hold_minutes": config.mode_hold_seconds / 60}, {},
-                       {"auxiliary_fan_enabled": config.auxiliary_fan_enabled})
+                       {"auxiliary_fan_enabled": config.auxiliary_fan_enabled},
+                       seasonal_profile=config.seasonal_policy.initial_profile)
         from .legacy_settings import read
         result = read(cls, states, config, strict)
         result.toggles["auxiliary_fan_enabled"] = result.toggles["living_fan_enabled"]
@@ -441,17 +580,34 @@ class Settings:
         return float(self.numbers[value[1:]]) if isinstance(value, str) and value.startswith("@") else float(value)
 
     def clock(self, value):
-        return self.times[value[1:]] if value.startswith("@") else time.fromisoformat(value)
+        if not isinstance(value, str):
+            raise ValueError("Schedule clocks must be local time strings")
+        clock = self.times[value[1:]] if value.startswith("@") else time.fromisoformat(value)
+        if clock.utcoffset() is not None or clock.microsecond:
+            raise ValueError("Schedule clocks must use local whole-second times without offsets")
+        return clock
 
     def active(self, period, local):
         start, end = self.clock(period.start), self.clock(period.end)
-        return start <= local < end if start < end else local >= start or local < end
+        clock = local.time() if isinstance(local, datetime) else local
+        if isinstance(local, datetime):
+            owner = local.weekday()
+            if not period.all_day and start > end and clock < end:
+                owner = (owner-1) % 7
+            if owner not in period.weekdays:
+                return False
+        elif period.weekdays != tuple(range(7)):
+            raise ValueError("Weekly schedules require a local date as well as a time")
+        if period.all_day:
+            return True
+        return start <= clock < end if start < end else clock >= start or clock < end
 
     def profile(self, room, now, timezone, room_id=None):
         if room_id is not None and room_id in self.room_profiles:
             return self.room_profiles[room_id]
-        local = now.astimezone(ZoneInfo(timezone)).time()
-        return next((p.profile for p in room.schedules if self.active(p, local)), room.profile)
+        local = now.astimezone(ZoneInfo(timezone))
+        selected = next((p for p in room.schedules if self.active(p, local)), room)
+        return selected.seasonal_profiles.get(self.seasonal_profile, selected.profile)
 
     def night(self, local):
         return local >= self.times["night_start"] or local < self.times["night_end"]

@@ -122,12 +122,14 @@ class RoomConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config.from_dict(raw)
 
-    def test_configured_system_limits_drive_protection(self):
+    def test_limits_only_uses_room_bounds_with_inward_stop_margin(self):
         raw = configuration()
         raw.update(low_f=64, high_f=77)
         cfg = Config.from_dict(raw)
-        # Limits-only area follows configured bounds, not the former 66–75 constants.
-        self.assertEqual(Policy(cfg).band("beta", Settings.read({}, cfg), NOW)[:2], (64, 77))
+        policy = Policy(cfg)
+        band = policy.band("beta", Settings.read({}, cfg), NOW)
+        self.assertEqual(band[:2], (69.5, 70.5))
+        self.assertEqual(policy.stop_targets(band, comfort_enabled=False), {"heat": 70, "cool": 70})
 
     def test_auxiliary_can_belong_to_any_room(self):
         raw = configuration()

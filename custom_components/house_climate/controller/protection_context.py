@@ -25,10 +25,10 @@ def window_affected(context, room, mode):
 
 
 def soft_yield(context, room, mode):
-    # A deliberately open room can yield its normal cooling veto immediately
+    # A deliberately open room can yield its normal comfort veto immediately
     # after contact confirmation. Raw/forecast hard limits are checked first by
     # every head guard; measured-effect qualification still owns demand weights.
-    if mode == "cool" and room in value(context, "confirmed_open_rooms", ()):
+    if mode in ("heat", "cool") and room in value(context, "confirmed_open_rooms", ()):
         return True
     opposing = "heat" if mode == "cool" else "cool"
     return window_affected(context, room, opposing)

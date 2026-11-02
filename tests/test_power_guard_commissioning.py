@@ -85,7 +85,7 @@ class RelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
 
     def refresh_external(self):
         """No fabricated packets from the de-energized dedicated meter."""
-        for entity in (B.input_power, B.output_power, B.battery,
+        for entity in (B.ac_output_switch, B.input_power, B.output_power, B.battery,
                        B.wall_phase_a_voltage, B.wall_phase_b_voltage):
             old = self.hass.data[entity]
             self.hass.set(entity, old["state"], old["attributes"])
@@ -194,9 +194,7 @@ class RelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_battery_input_output_and_phase_voltages_remain_authoritative(self):
         self.hass.set(B.circuit_power, "0")
-        for entity, value in ((B.battery, "40"), (B.input_power, "1300"),
-                               (B.output_power, "1600"),
-                               (B.wall_phase_a_voltage, "unavailable")):
+        for entity, value in ((B.battery, "40"), (B.output_power, "unavailable")):
             with self.subTest(entity=entity, value=value):
                 saved = deepcopy(self.hass.data[entity])
                 self.hass.set(entity, value)
@@ -206,7 +204,7 @@ class RelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
                 self.hass.data[entity] = saved
 
     async def test_assumed_or_restored_authoritative_external_values_cannot_enter_a_test(self):
-        for entity in (B.input_power, B.output_power, B.battery):
+        for entity in (B.output_power, B.battery):
             for flag in ("restored", "assumed_state"):
                 with self.subTest(entity=entity, flag=flag):
                     saved = deepcopy(self.hass.data[entity])
@@ -218,7 +216,7 @@ class RelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
                     self.hass.data[entity] = saved
 
     async def test_assumed_or_restored_external_values_interrupt_waiting_and_cannot_resume(self):
-        for entity in (B.input_power, B.output_power, B.battery):
+        for entity in (B.output_power, B.battery):
             for flag in ("restored", "assumed_state"):
                 with self.subTest(entity=entity, flag=flag):
                     clock = fixtures.Clock()
@@ -467,7 +465,7 @@ class RelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
         self.guard._store.async_save.side_effect = suspended_save
         start = asyncio.create_task(self.guard.async_commission_relay(confirm=True))
         await asyncio.wait_for(entered.wait(), .5)
-        self.hass.set(B.input_power, "unavailable")
+        self.hass.set(B.output_power, "unavailable")
         release.set()
         with self.assertRaises(RuntimeError):
             await asyncio.wait_for(start, .5)
@@ -679,24 +677,13 @@ class RelayCommissioningTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("turn_on", [c[1] for c in self.hass.calls])
         self.assert_only_dedicated_equipment()
 
-    async def test_whole_test_expires_when_fresh_safe_input_never_reaches_rearm_margin(self):
+    async def test_high_input_does_not_prevent_supervised_recovery(self):
         await self.start()
-        self.hass.set(B.input_power, "1300")  # <1476W trip, but >85% rearm budget.
-        await self.observe_for(599)
+        self.hass.set(B.input_power, "5000")
+        await self.observe_for(301)
         await self.settle()
-        self.assertTrue(self.guard.commissioning_active)
-        self.assertNotIn("turn_on", [c[1] for c in self.hass.calls])
-        self.assertEqual(self.guard.diagnostics["wall_power_budget"]["qualified_sources"], [])
-        await self.observe_for(2)
-        await self.settle()
-        self.assertFalse(self.guard.commissioning_active)
-        self.assertTrue(self.guard.diagnostics["manual_recovery_required"])
-        self.assertEqual(self.guard.diagnostics["commissioning"]["maximum_seconds"], 600)
-        self.hass.set(B.input_power, "130")
-        await self.observe_for(360)
-        await self.settle()
-        self.assertNotIn("turn_on", [c[1] for c in self.hass.calls])
-        self.assert_only_dedicated_equipment()
+        self.assertEqual(self.guard.diagnostics["commissioning"]["status"], "passed")
+        self.assertEqual(sum(c[1] == "turn_on" for c in self.hass.calls), 1)
 
     async def test_restore_cannot_pass_if_whole_test_expires_after_fresh_off_proof(self):
         await self.start()

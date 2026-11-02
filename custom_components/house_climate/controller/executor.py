@@ -11,6 +11,7 @@ from .head_guard import head_constraint
 from .protection_context import limits
 from .policy import Plan, call_target_f, native_target
 from .sensors import from_f, to_f
+from .auxiliary_dispatch import manual_auxiliary
 
 
 class ControlFault(RuntimeError):
@@ -39,6 +40,17 @@ class ClimateRecovery:
     off_receipt: bool = False
     last_attempt: float | None = None
     command: tuple | None = None
+
+
+@dataclass
+class SharedStop:
+    since: float
+    baseline: tuple
+    attempts: int = 0
+    receipt: bool = False
+    failed: bool = False
+    confirmed: bool = False
+    last_attempt: float | None = None
 
 
 @dataclass
@@ -102,6 +114,7 @@ class Executor:
         self._off_requested_since_activation: set[str] = set()
         self._diagnostic_plan: Plan | None = None
         self._shared_stop_context: tuple[str, str] | None = None
+        self.shared_stops: dict[str, SharedStop] = {}
         self.head_transitions = HeadTransitions(config.heads.values())
         self._head_repair_epochs = {}
         self._auxiliary_startup: AuxiliaryStartup | None = None
@@ -194,14 +207,14 @@ class Executor:
             plan = self._diagnostic_plan
             head = next((key for key, value in self.config.heads.items() if value == entity), None)
             from .window_authorization import window_relief_required
-            guarded = (head_activation and data.get("hvac_mode") == "cool" and plan is not None
+            guarded = (head_activation and data.get("hvac_mode") in ("heat", "cool") and plan is not None
                        and (head in plan.window_authorization_heads
                             or window_relief_required(self.config, head, plan, states)))
             if guarded:
                 ticket = plan.window_authorizations.get(head)
                 guarded_service = getattr(self.ha, "service_guarded", None)
                 if ticket is None or guarded_service is None:
-                    raise HAActivationDeferred("Window-relieved cooling requires a current guarded adapter authorization")
+                    raise HAActivationDeferred("Window-relieved conditioning requires a current guarded adapter authorization")
                 guarded_service(entity.split(".")[0], service, ticket=ticket,
                                 entity_id=entity, **data)
             else:
@@ -318,6 +331,7 @@ class Executor:
         remaining = (max(0, self.config.off_settle_seconds - (now - self.all_off_since))
                      if self.phase == "settling" and self.all_off_since is not None else None)
         return {"phase": self.phase, "waiting_devices": self.waiting_devices,
+                "shared_stop": self.shared_stop_status(now),
                 "settle_remaining_seconds": remaining, "devices": devices,
                 "pending_head_commands": pending_heads,
                 "cycle_holds": {entity: dict(hold) for entity, hold in self.cycle_holds.items()},
@@ -348,8 +362,13 @@ class Executor:
                     and self.marker(observed) != recovery.baseline):
                 self._clear_recovery(entity)
                 return True
+        except HAActivationDeferred:
+            # The adapter rejected dispatch. ensure() restores/removes its
+            # tentative Pending, so no new receipt or acknowledgement exists.
+            return False
         except HAError as exc:
-            self.pending[entity].baseline = recovery.baseline
+            if pending := self.pending.get(entity):
+                pending.baseline = recovery.baseline
             self._issue(entity, f"{exc}; off acknowledgement required", states)
         return False
 
@@ -392,6 +411,8 @@ class Executor:
         return True
 
     def off(self, entity, states, now, *, preserve_capability=False):
+        if entity == self.config.heater_entity and manual_auxiliary(self.config, states):
+            return False  # Manual ownership is not an Off acknowledgement.
         if entity == self.config.heater_entity:
             if self._auxiliary_startup is not None:
                 if self._auxiliary_startup.since is not None:
@@ -731,6 +752,8 @@ class Executor:
         return True
 
     def climate(self, entity, mode, target_f, states, now, heater=False, *, comfort_target_f=None):
+        if entity == self.config.heater_entity and manual_auxiliary(self.config, states):
+            return
         state = states.get(entity, {})
         if heater and mode == "heat" and self._auxiliary_failure is not None:
             self.off(entity, states, now, preserve_capability=True)
@@ -798,13 +821,92 @@ class Executor:
         self.cycle_holds.clear()
         self.phase, self.direction, self.all_off_since = "stopping", None, None
         self.stop_started = now
+        self.shared_stops = {}
         for entity in self.config.heads.values():
-            self.off(entity, states, now)
+            self._shared_off(entity, states, now)
+
+    def shared_stop_status(self, now):
+        return {entity: {
+            "attempts": stop.attempts, "maximum_initial_attempts": 3,
+            "failed": stop.failed, "confirmed": stop.confirmed,
+            "remaining_seconds": max(0, 45 - (now - stop.since)) if not stop.confirmed else 0,
+            "next_attempt_in_seconds": (max(0, (stop.last_attempt if stop.last_attempt is not None else stop.since - 15) + 15 - now)
+                                         if stop.attempts < 3 and not stop.failed and not stop.confirmed else None),
+            "reason": (f"Off unconfirmed after {stop.attempts} attempts within 45 seconds; changeover blocked; cleanup continues"
+                       if stop.failed and not stop.confirmed else
+                       "Off confirmed" if stop.confirmed else "Waiting for shared-head Off confirmation"),
+        } for entity, stop in self.shared_stops.items()}
+
+    def _shared_off(self, entity, states, now):
+        """Three initial Off attempts at 0/15/30, failure at 45 seconds.
+
+        The failure deadline does not abandon an unsafe outstanding device.
+        Subsequent cleanup remains separate and starts after the failure alert.
+        """
+        observed = states.get(entity, {})
+        stop = self.shared_stops.get(entity)
+        if stop is not None and stop.confirmed:
+            if (self.ready(observed) and self.reports_off(observed)
+                    and entity not in self.pending and entity not in self.recoveries):
+                return True
+            stop = self.shared_stops[entity] = SharedStop(now, self.marker(observed))
+        if stop is None:
+            if (self.ready(observed) and self.reports_off(observed)
+                    and entity not in self.pending and entity not in self.recoveries):
+                return True
+            pending = self.pending.get(entity)
+            recovery = self.recoveries.get(entity)
+            baseline = recovery.baseline if recovery else pending.baseline if pending else self.marker(observed)
+            stop = self.shared_stops[entity] = SharedStop(now, baseline)
+        if (stop.receipt and self.ready(observed) and self.reports_off(observed)
+                and self.marker(observed) != stop.baseline):
+            stop.confirmed = True
+            self._clear_recovery(entity)
+            return True
+        if not self.ready(observed) and not stop.failed:
+            reason = ("Entity unavailable; shared-head Off acknowledgement required"
+                      if not self.available(observed) else
+                      "Climate metadata incomplete; shared-head Off acknowledgement required")
+            self._issue(entity, reason, states, baseline=stop.baseline, receipt=stop.receipt)
+        if now - stop.since >= 45:
+            if not stop.failed:
+                stop.failed = True
+                self._issue(entity, f"Off unconfirmed after {stop.attempts} attempts within 45 seconds; changeover blocked", states,
+                            baseline=stop.baseline, receipt=stop.receipt)
+                self.recoveries[entity].last_attempt = now
+                self.head_transitions.record(entity, "off_confirmation_failed", observed,
+                    reason=f"Off was not confirmed within 45 seconds ({stop.attempts} attempts)")
+            else:
+                recovered = self._recovery_off(entity, states, now)
+                stop.confirmed = recovered
+                return recovered
+            return False
+        if (stop.attempts >= 3 or now < stop.since
+                or (stop.last_attempt is not None and now - stop.last_attempt < 15)):
+            return False
+        stop.attempts += 1
+        stop.last_attempt = now
+        try:
+            self.ensure(entity, "set_hvac_mode", {"hvac_mode": "off"}, self.reports_off,
+                        states, now, force=True, fresh=True)
+            stop.receipt = True
+            self.pending[entity].baseline = stop.baseline
+            self._refresh_needed = True
+        except HAActivationDeferred:
+            # A deferred request did not reach the device. Retain the bounded
+            # initial window rather than silently extending it.
+            return False
+        except HAError as exc:
+            self._issue(entity, f"{exc}; shared-head Off confirmation required", states,
+                        baseline=stop.baseline, receipt=stop.receipt)
+        return False
 
     def auxiliary(self, plan: Plan, states: dict, now: float):
         """One owner selects heat, fan-only, or off for the same physical heater."""
         entity = self.config.heater_entity
         if entity is None:
+            return
+        if manual_auxiliary(self.config, states):
             return
         if plan.heater_on and plan.auxiliary_fan_only:
             raise ControlFault("The auxiliary heater cannot request heat and fan-only together")
@@ -1194,13 +1296,13 @@ class Executor:
                 return
         if self.phase == "stopping":
             for entity in self.config.heads.values():
-                self.off(entity, states, now)
+                self._shared_off(entity, states, now)
             all_off = all(self.ready(states.get(entity, {})) and self.reports_off(states.get(entity, {}))
                           and entity not in self.pending and entity not in self.recoveries
                           for entity in self.config.heads.values())
             if not all_off:
-                if now - self.stop_started >= self.config.command_timeout_seconds:
-                    plan.warnings.append("Waiting for shared-system heads to acknowledge off; activation blocked")
+                if any(stop.failed for stop in self.shared_stops.values()):
+                    plan.warnings.append("Shared-head Off unconfirmed after 45 seconds; activation blocked; safety cleanup continues")
                 return
             self.phase, self.all_off_since = "settling", now
         if self.phase == "settling":
@@ -1247,6 +1349,8 @@ class Executor:
                     else self.marker(snapshot.get(entity, {}))))
             self._auxiliary_startup = None
         for entity in [*([self.config.heater_entity] if self.config.heater_entity else []), *self.config.heads.values(), *self.config.fans.values()]:
+            if entity == self.config.heater_entity and manual_auxiliary(self.config, snapshot):
+                continue
             request_id = None
             try:
                 if entity.startswith("climate."):

@@ -74,14 +74,14 @@ class HeartbeatConfigurationTests(unittest.TestCase):
         self.assertEqual(caught.exception.field, "auxiliary_heartbeat_timeout_seconds")
         self.assertEqual(caught.exception.code, "auxiliary_heartbeat_exceeds_controller")
 
-    def test_native_watchdog_settings_do_not_change_generated_packages_or_signatures(self):
+    def test_watchdog_settings_change_generated_packages_and_signatures(self):
         legacy = Config.load(ROOT / "tests/fixtures/legacy.toml")
         modern = Config.from_dict(legacy.to_dict())
         for cfg in (legacy, modern):
             adjusted = replace(cfg, heartbeat_timeout_seconds=900,
                                auxiliary_heartbeat_timeout_seconds=30)
-            self.assertEqual(package(cfg), package(adjusted))
-            self.assertEqual(watchdog_signature(cfg), watchdog_signature(adjusted))
+            self.assertNotEqual(package(cfg), package(adjusted))
+            self.assertNotEqual(watchdog_signature(cfg), watchdog_signature(adjusted))
             self.assertEqual(cfg.sensor_stale_seconds, adjusted.sensor_stale_seconds)
             self.assertEqual(cfg.heater_cutoff_f, adjusted.heater_cutoff_f)
 

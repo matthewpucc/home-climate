@@ -42,6 +42,7 @@
     "output_power": "sensor.reserve_output_power",
     "heater_current": "sensor.heater_plug_current",
     "wall_phase_a_voltage": "sensor.supply_a_voltage",
-    "wall_phase_b_voltage": "sensor.supply_b_voltage"
+    "wall_phase_b_voltage": "sensor.supply_b_voltage",
+    "ac_output_switch": "switch.reserve_ac_output"
   }
 }

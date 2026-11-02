@@ -1,4 +1,4 @@
-"""Native timeout rules are fixed and cannot be changed by stale options."""
+"""Explicit lease settings are editable; obsolete options do not override defaults."""
 import json
 from pathlib import Path
 import unittest
@@ -39,12 +39,15 @@ class FixedHeartbeatTests(unittest.TestCase):
         strings = json.loads((root / "strings.json").read_text())
         self.assertEqual(strings, json.loads((root / "translations/en.json").read_text()))
         actual = {field["name"] for field in probatio.to_field_list(_schema(), custom_serializer=cv.custom_serializer)}
-        self.assertEqual(actual, {"live", *ProtectionTemperatures().to_dict()})
+        self.assertEqual(actual, {"live", *ProtectionTemperatures().to_dict(),
+                                 "rooms", "auxiliary_policy", "seasonal_policy", "fallback",
+                                 "heartbeat_timeout_seconds", "auxiliary_heartbeat_timeout_seconds"})
         for section, step in (("config", "user"), ("options", "init")):
             self.assertEqual(set(strings[section]["step"]), {step})
             self.assertEqual(set(strings[section]["step"][step]["data"]), actual)
-            self.assertIn("room cards", strings[section]["step"][step]["description"])
-            self.assertIn("Protection settings are separate", strings[section]["step"][step]["description"])
+            self.assertIn("Room cards create temporary holds", strings[section]["step"][step]["description"])
+            self.assertIn("Protection thresholds remain separate from comfort bands",
+                          strings[section]["step"][step]["description"])
 
 
 if __name__ == "__main__":

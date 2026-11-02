@@ -79,7 +79,11 @@ class SharedHeadTransferTests(unittest.TestCase):
                 (71.8, 71.9, 74, "cool"), (72.2, 72.1, 70, "heat"),
                 (72, 72, 74, "cool"), (72, 72, 70, "heat")):
             with self.subTest(mode=mode, destination=destination):
-                self.setup_policy(self.with_third_shared_room())
+                raw = self.with_third_shared_room()
+                # The source's limits-only schedule must allow this ongoing
+                # shared call; its default narrow bounds now remain enforced.
+                raw["rooms"]["beta"]["profile"].update(low_f=67, high_f=74)
+                self.setup_policy(raw)
                 plan = self.decide({"alpha": destination, "beta": source,
                                     "gamma": 68, "delta": requester},
                                    # Exercise fan assistance during an existing

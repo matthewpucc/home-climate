@@ -59,12 +59,17 @@ def controller_entity_ids(config):
     """The complete input set, including legacy helpers and safety interlocks."""
     entities = {
         *config.climate_entities, *config.fans.values(),
-        *(probe.entity_id for room in config.zones.values() for probe in room.probes),
+        *(entity for room in config.zones.values() for probe in room.probes
+          for entity in (probe.entity_id, getattr(probe, "observation_time_entity", None),
+                         getattr(probe, "require_active_entity", None)) if entity),
         *(entity for room in config.zones.values() for entity in room.windows),
         *(probe.entity_id for probe in config.outdoor_probes),
         *(probe.observation_time_entity for probe in config.outdoor_probes if probe.observation_time_entity),
         config.entity("enabled"), config.entity("heater_owned"),
         config.entity("heartbeat", "input_datetime"),
+        config.entity("auxiliary_authorization", "input_datetime"),
+        config.entity("auxiliary_manual"),
+        config.entity("auxiliary_stop_limit_f", "input_number"),
         config.entity("status", "input_text"),
         config.entity("auxiliary_watchdog", "automation"),
         config.entity("auxiliary_probe_safe", "binary_sensor"),
@@ -155,12 +160,12 @@ class NativeAPI:
         actuator = bool(body is not None and path.startswith(("services/climate/", "services/fan/")))
         repair_epoch = (self.repair_gate.capture(body.get("entity_id"), activation=activation)
                         if actuator else None)
-        generation = self.controls._snapshot["generation"] if self.controls is not None and actuator else None
+        generation = self.controls.command_generation(body.get("entity_id")) if self.controls is not None and actuator else None
         if self.controls is not None and activation:
             issue = self.heartbeat_issue
             if issue:
                 raise HAActivationDeferred(issue)
-            generation = self.controls._snapshot["generation"]
+            generation = self.controls.command_generation(body.get("entity_id"))
         timeout = 2 if self.stop_event.is_set() else 10
         deadline = time.monotonic() + timeout
         bounded_activation = activation and activation_deadline is not None
@@ -214,8 +219,9 @@ class NativeAPI:
         controls = self.controls
         snapshot = controls._snapshot if controls else {}
         lease = snapshot.get("heartbeat_monotonic", 0)
+        auxiliary_lease = snapshot.get("auxiliary_authorized_at", 0)
         remaining = max(0.0, controls.config.heartbeat_timeout_seconds - (instant - lease)) if snapshot.get("owned") else None
-        auxiliary_remaining = (max(0.0, controls.config.auxiliary_heartbeat_timeout_seconds - (instant - lease))
+        auxiliary_remaining = (max(0.0, controls.config.auxiliary_heartbeat_timeout_seconds - (instant - auxiliary_lease))
                                if snapshot.get("owned") and controls.config.heater_entity else None)
         return {
             "state": state.state, "blocked": state.blocked, "reason": state.reason,
@@ -223,6 +229,12 @@ class NativeAPI:
             "lease_remaining_seconds": remaining,
             "auxiliary_lease_remaining_seconds": auxiliary_remaining,
             "auxiliary_blocked": snapshot.get("auxiliary_heartbeat_blocked", False),
+            "auxiliary_authorized_at": snapshot.get("auxiliary_authorized_wall", 0),
+            "independent_auxiliary_authorization": True,
+            "controller_timeout_seconds": self.config.heartbeat_timeout_seconds,
+            "auxiliary_timeout_seconds": self.config.auxiliary_heartbeat_timeout_seconds,
+            "auxiliary_authorization_state": ("manual" if snapshot.get("auxiliary_manual") else
+                "valid" if auxiliary_remaining and not snapshot.get("auxiliary_heartbeat_blocked") else "expired"),
             "auxiliary_reason": snapshot.get("auxiliary_heartbeat_reason"),
         }
 
@@ -230,6 +242,36 @@ class NativeAPI:
     def heartbeat_issue(self):
         state = self.heartbeat_diagnostics
         return state["reason"] if state["blocked"] else None
+
+    def authorize_auxiliary(self, plan, states):
+        """Issue a separate authorization only for a currently eligible plan."""
+        heater = self.config.heater_entity
+        if not heater or not (plan.heater_on or plan.auxiliary_fan_only):
+            return False
+        if states.get(heater, {}).get("attributes", {}).get("home_climate_manual"):
+            return False
+        mode = "heat" if plan.heater_on else "fan_only"
+        try:
+            self.request("services/input_datetime/set_datetime", {
+                "entity_id": self.config.entity("auxiliary_authorization", "input_datetime"),
+                "timestamp": datetime.now(timezone.utc).timestamp(),
+                **({"hvac_mode": mode, "stop_limit_f": getattr(plan, "auxiliary_policy", {}).get("stop_target_f"),
+                    "context": getattr(plan, "auxiliary_policy", {}).get("context"),
+                    "stop_revision": states.get(heater, {}).get("attributes", {}).get("home_climate_auxiliary_stop_revision", 0)}
+                   if self.controls else {})})
+        except (HAError, RuntimeError, ValueError) as exc:
+            plan.warnings.append(f"Auxiliary authorization withheld: {exc}")
+            return False
+        return True
+
+    def release_control(self, *, reason, cause, forced=False):
+        """The native owner performs its durable terminal handoff on HA's loop."""
+        if self.controls is None:
+            return False
+        self.request("services/input_boolean/turn_off", {
+            "entity_id": self.ownership_entity, "reason": reason, "cause": cause,
+            "forced": forced})
+        return True
 
     def _queue_heartbeat(self):
         """Coalesce worker pulses without granting or extending a lease here."""
@@ -292,7 +334,7 @@ class NativeAPI:
             except Exception:
                 _LOGGER.debug("Native heartbeat status notification failed", exc_info=True)
 
-    def _read_states(self):
+    def _read_states_without_controls(self):
         # StateMachine.get is HA's synchronous, direct cached-state accessor.
         # Do not call async_all from this worker or queue a whole-house copy on
         # HA's loop. Keep original report times so an unresponsive HA cannot
@@ -309,8 +351,19 @@ class NativeAPI:
                     "last_reported": state.last_reported.isoformat(),
                     **({"integration_repair": repair} if (repair := self.repair_gate.overlay(entity_id)) else {}),
                 })
+        return result
+
+    def _read_states(self):
+        result = self._read_states_without_controls()
         if self.controls is not None:
             states = self.controls.overlay({state["entity_id"]: state for state in result})
+            heater = self.config.heater_entity
+            if self.power_guard is not None and heater in states:
+                states[heater] = {**states[heater], "attributes": {
+                    **states[heater].get("attributes", {}),
+                    "home_climate_auxiliary_blocked": self.power_guard.blocked,
+                    "home_climate_auxiliary_fan_blocked": getattr(self.power_guard, "fan_blocked", self.power_guard.blocked),
+                    "home_climate_auxiliary_reason": getattr(self.power_guard, "diagnostics", {}).get("reason")}}
             if self.power_guard is not None and self.power_guard.blocked:
                 key = self.controls.config.entity("auxiliary_probe_safe", "binary_sensor")
                 states[key] = {**states[key], "state": "off"}
@@ -418,7 +471,7 @@ class NativeAPI:
         if domain in ("climate", "fan"):
             self.repair_gate.check(body.get("entity_id"), repair_epoch, activation=activation)
             if (controls is not None and generation is not None
-                    and generation != controls.ownership_generation):
+                    and generation != controls.command_generation(body.get("entity_id"))):
                 raise HAActivationDeferred("Device service belongs to an earlier controller lease (ownership changed)")
             if controls is not None and not activation:
                 controls.check_stop(body.get("entity_id"))
@@ -528,7 +581,8 @@ class NativeAPI:
 
 
 class ControllerRuntime:
-    def __init__(self, hass, config, live, *, house_policy=False, power_bindings=None):
+    def __init__(self, hass, config, live, *, house_policy=False, power_bindings=None,
+                 notification_settings=None):
         self.hass = hass
         self.config = config
         self.live = live
@@ -543,6 +597,9 @@ class ControllerRuntime:
         self.house_policy = house_policy
         self.power_bindings = power_bindings
         self.power_guard = None
+        self.notifications = None
+        self.notification_settings = notification_settings
+        self.seasonal_state = None
         self.api = NativeAPI(hass, live, self.stop_event, config)
         self.api.heartbeat_notify = self._async_heartbeat_changed
         self.thread = None
@@ -574,7 +631,16 @@ class ControllerRuntime:
         self.comfort = RoomComfort(self.hass, self.config, entry_id,
                                    self._async_comfort_changed, self.wake_event)
         try:
+            from .seasonal_state import SeasonalState
+            self.seasonal_state = SeasonalState(self.hass, entry_id)
+            await self.seasonal_state.async_load()
             await self.comfort.async_load()
+            if hasattr(self.comfort, "set_seasonal_profile"):
+                self.comfort.set_seasonal_profile(self.seasonal_state.profile)
+            if self.notification_settings is not None:
+                from .notifications import AlertManager
+                self.notifications = AlertManager(self.hass, entry_id, self.notification_settings,
+                                                  self._notification_changed)
             self.api.settings_provider = self.comfort.settings
             await self.recovery.capabilities.async_load(entry_id)
             if not self.config.legacy:
@@ -582,7 +648,12 @@ class ControllerRuntime:
                 self.controls = NativeControls(self.hass, self.config, self.live, entry_id,
                                                self._async_controls_changed)
                 self.api.controls = self.controls
+                self.controls.pending_device_jobs = lambda entities: (
+                    self.api.service_jobs(entities) or self.api.uncertain_service_jobs(entities))
                 self.controls.repair_gate = self.api.repair_gate
+                if self.house_policy or getattr(self.config, "auxiliary_dynamic_stop", False):
+                    self.controls.auxiliary_limit_provider = self._auxiliary_room_limit
+                    self.controls.auxiliary_context_provider = self._auxiliary_room_context
                 await self.controls.async_load()
             if self.house_policy:
                 from .power_guard import HeaterPowerGuard
@@ -590,10 +661,16 @@ class ControllerRuntime:
                     self.hass, bindings=self.power_bindings, live=self.live, entry_id=entry_id,
                     notify=self._async_power_guard_changed)
                 self.api.power_guard = self.power_guard
-                self.power_guard.pending_external_jobs = lambda: self.api.service_jobs(
-                    {self.config.heater_entity})
+                self.power_guard.pending_external_jobs = lambda: (
+                    self.api.service_jobs({self.config.heater_entity})
+                    or self.api.uncertain_service_jobs({self.config.heater_entity})
+                    or (self.controls and self.controls.stop_jobs({self.config.heater_entity})))
+                from .device_feedback import async_read_matter_switch
+                self.power_guard.async_read_recovery_feedback = lambda entity: async_read_matter_switch(self.hass, entity)
                 self.power_guard.commissioning_controller_off = self._commissioning_controller_off
                 self.power_guard.recovery_controller_off = self._recovery_controller_off
+                self.power_guard.manual_override = lambda: bool(self.controls and self.controls.auxiliary_manual)
+                self.power_guard.alerts = self.notifications
                 if self.controls is not None:
                     self.controls.power_guard = self.power_guard
                 await self.power_guard.async_load()
@@ -603,12 +680,46 @@ class ControllerRuntime:
             await self.comfort.async_close()
             raise
 
+    @callback
+    def _notification_changed(self):
+        if self.notifications is not None:
+            self.status["notifications"] = self.notifications.diagnostics
+        async_dispatcher_send(self.hass, SIGNAL_STATUS)
+
+    def _auxiliary_room_limit(self):
+        """Re-evaluate the active room bound without trusting an old worker plan."""
+        instant = datetime.now(timezone.utc)
+        states = {state["entity_id"]: state for state in self.api._read_states_without_controls()}
+        settings = self.comfort.settings(states, self.config, instant)
+        room_id = self.config.auxiliary_room
+        profile = settings.profile(self.config.zones[room_id], instant, self.hass.config.time_zone, room_id)
+        target = settings.value(profile.target_f) + profile.target_offset_f
+        high = settings.value(profile.high_f) if profile.high_f is not None else target + settings.value(profile.half_band_f)
+        protection = self.config.protection
+        return min(high, protection.emergency_cooling_at_f - 1 if protection is not None else self.config.high_f - 1)
+
+    def _auxiliary_room_context(self):
+        """Compare the current profile/peak at dispatch without inventing trend evidence."""
+        from .controller.auxiliary_dispatch import AuxiliaryDispatch
+        from .controller.protection_context import limits
+        instant = datetime.now(timezone.utc)
+        states = {state["entity_id"]: state for state in self.api._read_states_without_controls()}
+        settings = self.comfort.settings(states, self.config, instant)
+        room_id = self.config.auxiliary_room
+        profile = settings.profile(self.config.zones[room_id], instant, self.config.timezone, room_id)
+        target = settings.value(profile.target_f) + profile.target_offset_f
+        half = settings.value(profile.half_band_f)
+        low, high = limits(self.config, self.status.get("protection_context"))
+        return [max(low, settings.value(profile.low_f) if profile.low_f is not None else target - half),
+                min(high, settings.value(profile.high_f) if profile.high_f is not None else target + half),
+                target, not profile.comfort_enabled, AuxiliaryDispatch(self.config).peak(instant)]
+
     def _commissioning_controller_off(self):
         """A maintenance cut cannot overlap comfort ownership or device work."""
         return (self.live and self.controls is not None and self.controls.live
-                and self._recovery_controller_off())
+                and self._all_controllers_stopped())
 
-    def _recovery_controller_off(self):
+    def _all_controllers_stopped(self):
         """Verify stopped ownership/jobs without granting command permission."""
         controls = self.controls
         if (self.stop_event.is_set() or self._configuration_reload_pending
@@ -619,6 +730,17 @@ class ControllerRuntime:
             return False
         devices = {*self.config.climate_entities, *self.config.fans.values()}
         return not (self.api.service_jobs(devices) or self.api.uncertain_service_jobs(devices))
+
+    def _recovery_controller_off(self):
+        """Only auxiliary work must be stopped for its explicit recovery."""
+        controls = self.controls
+        if (self.stop_event.is_set() or self._configuration_reload_pending
+                or controls is None or not controls.active or controls._closing or controls._claiming
+                or controls.auxiliary_inflight or self.power_guard is None or not self.power_guard.blocked):
+            return False
+        devices = {self.config.heater_entity}
+        return not (self.api.service_jobs(devices) or self.api.uncertain_service_jobs(devices)
+                    or controls.stop_jobs(devices))
 
     def _update_power_guard_status(self):
         if self.power_guard is not None:
@@ -666,12 +788,17 @@ class ControllerRuntime:
             self.status = {"event": "stopping", **self.last_fault}
         self.status.update(control_enabled=self.controls.enabled,
                            control_block_reason=self.controls.hint,
-                           pending_fans=list(self.controls.pending_fans))
+                           pending_fans=list(self.controls.pending_fans),
+                           auxiliary_manual=self.controls.auxiliary_manual,
+                           auxiliary_manual_entity=self.controls.auxiliary_manual_entity,
+                           handoff=self.controls.handoff)
         ready = self.controls._snapshot.get("enabled", False)
         if previous != self.controls.enabled or ready != self._controls_ready:
             self.wake_event.set()
         self._controls_ready = ready
         self._update_heartbeat_status()
+        if self.notifications is not None:
+            self.notifications.observe_status(self.status)
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
 
     @callback
@@ -748,15 +875,27 @@ class ControllerRuntime:
         if self.controls and event == "live" and not self.controls.enabled:
             event = "stopping" if self.controls.owned else "shadow"
         self.status = {"event": event, **data, **self.last_fault}
+        if self.seasonal_state is not None:
+            seasonal = data.get("seasonal")
+            self.seasonal_state.observe(seasonal)
+            if isinstance(seasonal, dict) and hasattr(self.comfort, "set_seasonal_profile"):
+                self.comfort.set_seasonal_profile(seasonal.get("profile"))
+            self.status["seasonal_persistence_error"] = self.seasonal_state.error
         self._update_power_guard_status()
         if self.controls:
             self.status.update(control_enabled=self.controls.enabled,
                                control_block_reason=self.controls.hint,
-                               pending_fans=list(self.controls.pending_fans))
+                               pending_fans=list(self.controls.pending_fans),
+                               auxiliary_manual=self.controls.auxiliary_manual,
+                               auxiliary_manual_entity=self.controls.auxiliary_manual_entity,
+                               handoff=self.controls.handoff)
         self._update_reload_status()
         self._update_heartbeat_status()
         self.recovery.observe(self.status)
         self.status["integration_recovery"] = self.recovery.diagnostics
+        if self.notifications is not None:
+            self.notifications.observe_status(self.status)
+            self.status["notifications"] = self.notifications.diagnostics
         if event in ("fault", "worker_failed"):
             incident = (event, data.get("error"))
             if incident != self._logged_fault:
@@ -957,6 +1096,10 @@ class ControllerRuntime:
                     self._update_power_guard_status()
             if closed:
                 self._logged_unload_blockers = None
+                if self.seasonal_state is not None:
+                    await self.seasonal_state.async_close()
+                if self.notifications is not None:
+                    await self.notifications.async_close()
         else:
             self._warn_unload_deferred(recovery_pending=not recovery_closed)
             if not jobs_closed:

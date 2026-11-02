@@ -2,7 +2,7 @@
 import json
 import logging
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from types import SimpleNamespace
 import unittest
@@ -27,7 +27,9 @@ ORIGINAL_GUARD_KEYS = {
     "shutdown_stage", "shutdown_confirmation", "aggregate_stop", "wall_power_budget",
     "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status", "emergency_ac_attempts",
     "emergency_ac_inflight", "emergency_notification_error", "manual_recovery_required",
-    "binding_identity_mismatch",
+    "binding_identity_mismatch", "watt_limits_enforced", "ac_output_enabled",
+    "supply_reported_at", "supplying_loads", "heater_draw_status", "heater_meter_issue",
+    "diagnostic_issues", "shutdown_fault", "restore_approval_pending",
 }
 COMMISSIONING_KEYS = {
     "active", "status", "reason", "started_at", "finished_at", "restore_window_seconds",
@@ -183,6 +185,8 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.async_set(entity, value, {"unit_of_measurement": unit})
         self.hass.states.async_set(bindings.heater, "off", {"hvac_action": "off"})
         self.hass.states.async_set(bindings.heater_switch, "on")
+        self.hass.states.async_set(bindings.ac_output_switch, "on", {"device_report": {
+            "state": "on", "reported_at": datetime.now(timezone.utc).isoformat()}})
         self.guard._observe()
 
     async def test_inactive_shutdown_projection_leaves_stored_evidence_untouched(self):
@@ -223,7 +227,8 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
         state = await self.publish()
         attrs = self.sensor.extra_state_attributes
         self.assertEqual(set(attrs), ORIGINAL_GUARD_KEYS | {
-            "shutdown_active", "commissioning", "retained_cut_recovery_pending"})
+            "shutdown_active", "commissioning", "retained_cut_recovery_pending",
+            "supply_evidence", "shutdown_evidence", "shutdown_contradicted", "manual_override"})
         result = state.attributes["commissioning"]
         self.assertTrue(set(result) <= COMMISSIONING_KEYS)
         self.assertLessEqual(len(result["reason"]), 240)

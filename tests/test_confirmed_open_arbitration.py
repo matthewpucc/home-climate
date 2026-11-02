@@ -162,14 +162,16 @@ class ConfirmedOpenArbitrationTests(unittest.TestCase):
         self.assertEqual(selected.mode, "cool")
         self.assertIn("shared", selected.head_targets_f)
 
-    def test_confirmed_open_alone_does_not_add_symmetric_heating_relief(self):
+    def test_confirmed_open_yields_heating_comfort_veto_with_scoped_authorization(self):
         self.tick(0, alpha=73.4, beta=69.5, gamma=72)
         self.tick(120, alpha=73.4, beta=69.5, gamma=72)
         plan = self.tick(420, alpha=73.4, beta=69.5, gamma=72)
         self.assertEqual(plan.window_states["alpha"]["state"], "open")
         self.assertEqual(plan.protection_context["window_effects"], {})
-        self.assertEqual(plan.head_constraints["shared"]["heat"]["kind"], "comfort_limit")
-        self.assertFalse(plan.mode == "heat" and "shared" in plan.head_targets_f)
+        self.assertNotIn("heat", plan.head_constraints.get("shared", {}))
+        self.assertEqual(plan.mode, "heat")
+        self.assertIn("shared", plan.head_targets_f)
+        self.assertEqual(plan.window_authorizations["shared"].mode, "heat")
 
     def test_assumed_contact_withdraws_active_cooling_relief_immediately(self):
         self.assertIn("shared", self.start_open_cooling().head_targets_f)

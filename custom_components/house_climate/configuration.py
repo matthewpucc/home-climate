@@ -29,7 +29,7 @@ def generate_configuration(config, config_dir):
 
 
 def entry_configuration(config_dir, values, bindings=None):
-    """Native house policy is fixed; legacy files remain a standalone path."""
+    """Apply explicit policy edits while private bindings retain device identity."""
     live = values.get("live", False)
     if type(live) is not bool:
         raise ValueError("Live control must be a boolean")
@@ -40,7 +40,7 @@ def entry_configuration(config_dir, values, bindings=None):
         protection = ProtectionTemperatures.from_dict(values["protection"]) if "protection" in values else ProtectionTemperatures()
         config = house_configuration(values.get("configuration"),
                                      bindings if bindings is not None else load_bindings(config_dir),
-                                     protection)
+                                     protection, values.get("policy_settings"))
         config.validate(live=live)
         return config
     if "configuration" not in values:
@@ -60,3 +60,12 @@ def validate_actuators(hass, config):
     if any((entry := registry.async_get(entity)) and entry.platform == DOMAIN
            for entity in config.climate_entities):
         raise ValueError("Select physical heat-pump and auxiliary heater entities")
+
+
+def entry_policy_settings(config_dir, values):
+    """Resolve form defaults without exposing device mappings or sending commands."""
+    from .house_policy import load_bindings, HOUSE_POLICY
+    from .controller.house_policy import editable_policy_settings
+    bindings = load_bindings(config_dir)
+    config = entry_configuration(config_dir, {**values, "policy": HOUSE_POLICY}, bindings)
+    return editable_policy_settings(config, bindings)

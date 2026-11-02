@@ -1,81 +1,70 @@
 # Home Climate
 
-A Home Assistant integration with a fixed operating policy for four heat-pump heads, room fans, and a battery-backed auxiliary heater. Operating rules live in source; actual device bindings stay in a private Home Assistant file. Setup has an atomic form for live-command permission and independent protection settings. Room climate cards still provide temporary comfort-temperature and range adjustments.
+A Home Assistant integration for a shared heat-pump system, room fans and a battery-backed auxiliary heater. Room profiles, weekly schedules, priorities, peak hours, seasonal selection and the recovery state are configurable. Physical device bindings stay in a private Home Assistant file; room climate cards provide temporary comfort adjustments.
 
-## Install
+These changes target 0.9.0. Check the published release and installed version separately; this guide does not establish release availability or passed live acceptance.
+
+## Install and inspect
 
 Use the [installation guide](docs/hacs.md) to add this repository to HACS as an **Integration**, or install the release ZIP.
 
-1. Place your private device map at `/config/home_climate_bindings.json` before installing or upgrading. [bindings.example.json](bindings.example.json) shows the schema with synthetic IDs.
-2. Install the integration and restart Home Assistant.
-3. Add **Home Climate** under Settings → Devices & services, or let the existing entry migrate.
-4. Leave live commands disabled to inspect plans, or opt in when ready; then turn on **Controller enabled**.
+1. Place the private device map at `/config/home_climate_bindings.json`. [bindings.example.json](bindings.example.json) contains synthetic IDs only.
+2. Install the integration, restart Home Assistant, and add **Home Climate** under Settings → Devices & services, or let the existing entry migrate.
+3. Open **Configure** to review live permission, protection settings and the prepopulated policy objects. Inspect plans and source/ownership diagnostics before allowing active control.
+4. Resolve any retained shutdown or recovery obligation through its supported procedure. When ready, permit live commands and turn on **Controller enabled**.
 
-Existing installs update in place. The old private filename `house_climate_bindings.json` still works; no file rename or entity reconfiguration is required.
+Existing installs update in place. The old private filename `house_climate_bindings.json` remains supported when the current filename is absent. An upgrade does not clear saved cut ownership or shutdown faults. A successful installation or passed historical commissioning test does not prove current equipment readiness.
 
-The controller starts disabled after an HA restart. When live commands are permitted, the living-room heater power guard remains active even while comfort control is disabled.
+See the [configuration guide](docs/configuration.md) for the editor, default schedules, source descriptors, manual takeover and notification routing.
 
-## Fixed house policy
+## Configurable comfort
 
-| Area | Normal target / range | Shared head |
-| --- | --- | --- |
-| Office | 72°F / 71–73°F | Bonus |
-| Entertainment | 72°F / 71–73°F | Bonus |
-| Guest bedroom | 72°F / 71–73°F | Guest |
-| Primary, 10 p.m.–5 a.m. | 68°F / 67–69°F, highest comfort priority | Primary |
-| Primary, 5–9 a.m. | 69°F / 67–70°F | Primary |
-| Primary, daytime | Comfort off; house limits remain active | Primary |
-| Living room | 68°F / 67–69°F, lowest priority | Living plus auxiliary heater |
+Office and Entertainment share the Bonus head; Guest, Primary and Living have their own heads. Living participates in normal shared-system arbitration. The auxiliary can supplement Living heat or provide it while the shared heat pump cools other rooms; it does not replace Living's head unconditionally.
 
-Schedules use America/Los_Angeles. Comfort cards retain their 66–75°F editing bounds. Native protection is configured separately: the 0.8.0 defaults are a 60°F heating floor, a 65°F floor for qualified cold or untrusted outdoor conditions, and cooling emergency at 80°F. Qualified outdoor state uses a configurable reference/deadband and sustained-valid interval. Raw opposing guards still stop one degree inside the active protection bound, with a short worsening-only forecast. Generic configurations without explicit protection retain legacy 66–75°F behavior. See [protection settings and conflict rules](docs/protection-temperatures.md).
+The default weekly policy uses `America/Los_Angeles`. Overnight periods belong to the day they start. Limits-only periods enforce their room's lower and upper bounds without seeking a target. The configuration guide lists the explicit weekend transitions and the distinction between base profiles and schedules.
 
-Room control uses external ambient probes. Heat-pump readings remain available for equipment setpoint compensation, but cannot make a warm room appear cold. Living uses its assigned ambient probes rather than the heater's thermometer. A real cold-corner measurement remains valid without an invented calibration offset.
+Living's seasonal profile uses a 30-minute outdoor average: select warm above 61°F, cool below 59°F, and retain the current profile at or between those thresholds. Local observations are preferred; a qualified current weather observation can supply fallback. Missing evidence retains the profile and shows degradation. Seasonal comfort is separate from conservative freeze protection.
 
-Version 0.8.1 adds [explicit local-primary/weather-fallback selection](docs/outdoor-sources.md), source-specific age limits, observation-time checks, and qualification recovery after reporting gaps. Existing unmarked source lists retain coldest-valid selection; mark a primary explicitly in the private bindings file to opt in.
+Room inputs have explicit physical-source identities. Independently located heat-pump probes can be normal room inputs when correctly assigned and qualified. Aliases of one physical probe count once, and one shared-head probe cannot stand in for two rooms. An internal equipment reading is not automatically a representative room measurement. Report timestamps, acquisition timestamps and uncertain freshness remain distinct in diagnostics.
 
-The system makes comfort decisions every 90 seconds. Fifteen-second maintenance checks handle temperature cutoffs and acknowledgements. Five-minute acknowledged head runs and three-minute off periods reduce unnecessary cycling; protection and equipment recovery can override a run.
+Default comfort decisions run every 90 seconds, with 15-second maintenance for fresh cutoffs and acknowledgements. Five-minute acknowledged head runs, three-minute minimum Off periods and shared-direction timing remain in force. Confirmed open windows can yield ordinary comfort vetoes in either direction; actual protection and hardware constraints still apply. See [operating rules](docs/control.md) and [protection settings](docs/protection-temperatures.md).
 
-A shared head checks every attached area before starting. Comfort-only restarts need 0.5°F of headroom from the opposing comfort edges. Confirmed/forecast house protection can override those soft preferences until the affected area recovers, while the opposing house cutoffs and hardware timing stay enforced. Plan and recovery entities identify the room and threshold responsible for a wait.
+## Auxiliary power and ownership
 
-Optional private window contacts can lower only an affected direction's comfort priority to 25% after a sustained measured deficit, and allow its opposing soft shared-head boundary to yield. They never discard room measurements or hard protection. With no competing eligible demand, that room can still receive conditioning. See [window evidence and recovery](docs/window-contacts.md), [operating rules](docs/control.md), and [wiring and dashboard controls](docs/configuration.md).
+During automated ownership:
 
-## Living-room heater power guard
+- Auxiliary heat requires battery **above 40%**, available AC output corroborated by current supply telemetry, and normal device/command readiness. Positive output supports evidence of supply; zero output before startup is inconclusive.
+- Input, aggregate output and whole-circuit watts have **no software ceilings**. Their diagnostic values do not silently become admission or recovery limits.
+- The auxiliary's internal heating setpoint is **80°F**. Room demand and stopping rules determine the call; 80°F is not the room comfort target.
+- Peak assistance is efficiency-biased. Off-peak assistance does not inherit the peak 1°F/15-minute prerequisite. Equipment timers and genuine fault handling continue to apply.
+- Low reserve stops the entire auxiliary, including its fan, and creates a critical alert condition.
 
-The Elite battery supplies the heater and network equipment. By default only the heater's dedicated outlet is a cutoff actuator. The [opt-in emergency cutoff](docs/heater-emergency-cutoff.md) adds a separately bound shared AC last resort, optional individual outlet/meter stages, calibrated aggregate-output corroboration, and an optional existing HA notify group for emergency alerts. Shared AC recovery is always manual; these additions require 0.8.3 or later.
+**Auxiliary manual control** is an explicit, persistent takeover of the auxiliary only. Other heads and fans remain automated. While taken over, schedules, reserve cutoff and the recovery preset do not reclaim that device; low-battery alerts and genuine fault obligations remain. Return to automation is explicit and requires current readiness. Merely changing the appliance in another app is not this persistent ownership transfer.
 
-- Compare Elite grid input against a real-power budget of **12 × the lower fresh wall-phase voltage**, in watts. Shed only after input remains at or above its budget for at least **30 seconds and three distinct fresh reports**. Pending input qualification defers new starts without stopping an existing call solely for that pending condition. Whole-circuit load is advisory and has no enforced ceiling.
-- When fresh, trusted circuit power is **above 0 W** and fresh, trusted battery charge is **above 40%**, aggregate AC output has no trip or recovery ceiling. Otherwise the **2000 W** output trip and **below 1600 W** recovery requirement apply. Battery at/below **40%** still sheds immediately. Temperature protections remain independent.
-- Request Dyson Off first. If Off is not confirmed within five seconds, use the configured optional cutoff stages; shared AC requires explicit opt-in and manual recovery.
-- Rearm only above 40% battery, with input below 85% of the current budget, 60 seconds of safe load and the five-minute cooldown. Restore only an eligible dedicated outlet the guard cut; never restore shared AC automatically.
+Shutdown retains its five-second native-Off deadline and distinguishes reported Off, electrical verification pending, corroborated stop and contradictory draw. Heat mode may be idle; dedicated watts provide separate evidence. Genuine failed shutdown requires explicit recovery, with durable ownership and late jobs still accounted for. The dedicated cutoff and any explicitly enabled shared-AC last resort remain separate from normal supply eligibility. Read the [auxiliary supply and recovery guide](docs/auxiliary-supply-policy.md).
 
-Positive circuit watts show reported circuit consumption, not proof that the battery is charging. Zero, missing, stale or invalid circuit data cannot qualify the output exception; they do not independently prove an outage or inhibit heat. The exception uses existing freshness windows (180 seconds for circuit power, 900 seconds for battery) and is rechecked before queued activation and relay restoration. Output telemetry and aggregate shutdown corroboration remain required under their existing rules.
+An ordinary heater-only hold can permit fan-only operation after native Off and low dedicated load are proved and reserve/supply have recovered, even while heat waits through its 60-second stable-supply interval. Genuine shutdown faults, cut ownership, unresolved jobs and legacy cooldowns still block that exception.
 
-The input budget is unchanged by this output policy. Fresh measured voltage is required; missing or invalid voltage cannot fall back to a nominal value or circuit telemetry. Re-reading cached reports does not advance qualification. This reported-watt policy does **not** enforce the whole-circuit load or establish a physical 12 A guarantee. The downstream heater amp reading remains recovery evidence, not a wall-current measurement or output ceiling.
+## Recovery and visibility
 
-Grid charging can remain high after confirmed heater Off. That remains a wall-load diagnostic and heating inhibition, not proof that the heater failed to stop or a new reason to cut shared AC output. A heater already reporting fresh, trusted Off can use state-only evidence without another no-op stop when no tracked job or meter evidence conflicts. No JSON threshold or mapping changes are required, and upgrading does not clear existing recovery latches. See the [wall-budget evidence rules](docs/control.md#heater-load-shedding).
+Leaving active control through disable, restart or fault uses the configured recovery state: by default, supported dual-setpoint head operation at **68–73°F**, auxiliary Off and circulation fans **40%**. A manually owned auxiliary is excluded. Unsafe or failed transitions retain an actionable recovery state rather than claiming completion. A crash cannot issue commands while HA is down; retained work is reconciled on startup. A clean Preview startup is not permission to activate equipment.
 
-From 0.8.7, the dedicated-watts feature adds `power.heater_power` as an alternative to `power.heater_current`. Select one meter: W/kW power or A/mA current, with the unused binding `null`. Both retain the 180-second freshness check. Watts below 100 W can corroborate a fresh native Off report; thermostat idle alone does not qualify. Stale low readings cannot authorize restoration, and a new watt-based restoration requires post-command low-load feedback. This is operational load evidence, not RMS-overcurrent enforcement or physical isolation proof. See [dedicated meter configuration](docs/heater-emergency-cutoff.md#dedicated-load-meter). Do not apply the new field to 0.8.6.
+The head preset requires `heat_cool` support, fresh confirmation and normal Off/settling timers. Pre-upgrade ownership records without saved preset authority retain Off cleanup only; a successful new live ownership claim arms the durable preset. A failed or interrupted preset is not blindly replayed over later operator changes. **Retry recovery settings** explicitly retries the whole saved head/fan plan after its readiness checks, preserving auxiliary faults and manual ownership. Completion leaves **Controller enabled** Off; resuming automation is explicit.
 
-The [staged commissioning path](docs/heater-emergency-cutoff.md#staged-watt-meter-commissioning) separates relay-On, continuous low dedicated watts, native reconnection and post-Off verification during an explicitly supervised watt-meter test. Its stage deadlines share the existing ten-minute authorization limit, including cooldown; pending commands and cleanup remain tracked afterward. Normal unattended recovery and the amp path retain their ten-second verification window; this change does not run a test, permit comfort control or switch shared AC automatically. Supervised hardware validation remains required.
+Controller health and auxiliary heat authorization use separately renewed leases, with default limits of **300 seconds** and **120 seconds**. A healthy controller heartbeat alone does not prove current auxiliary supervision. An external watchdog for a complete HA outage is not included.
 
-## Device recovery and diagnostics
+Diagnostics distinguish requested commands, reported device state, operation corroboration, ownership, source quality and the active reason for a hold. Shared heat-pump changeover sends Off at 0, 15 and 30 seconds, stopping early on confirmation; an unconfirmed transition is reported at 45 seconds and remains blocked. Heat-pump activation retains a 120-second acknowledgement budget.
 
-The native integration learns stable, device-specific supported modes and can repair a persistent loss of a previously available mode. It first waits through explicit refresh/rechecks: at least three failures, 60 seconds apart, over at least two minutes. A successful recheck resets consecutive failures. Reloads have a separate attempt limit and backoff; unused-mode loss can wait while healthy heads are conditioning rooms.
+Configure normal and critical notification routes explicitly. HA service acceptance is not proof that a phone received or sounded an alert. In particular, `notify.send_message` targets notify entities but has no generic critical-payload field in HA 2026.10.4. Critical routing needs provider-specific verification; an unverified route remains visible as such.
 
-A first-seen mode list cannot establish what is missing. If a head is already degraded when capability learning begins, use its **Reload integration** button once to obtain healthy reports. The controller does not invent Heat support for a Cool-only device. Recovery status explains retries, deferral, coordinated repair, and any unresolved block; [operating rules](docs/control.md#integration-capability-recovery) describe the boundaries.
+## Validation and development
 
-The controller's transition history distinguishes its commands from device reports. A reported mode and accepted setpoint do not prove compressor output, and an unexpected Off report does not prove that Home Climate issued Off. Reloading an integration can restore its feedback, but cannot repair a failing Wi-Fi adapter.
+The [release acceptance checklist](docs/release-baseline-acceptance.md) separates software checks, artifact/installation verification and supervised equipment evidence. The [thermal experiment series](docs/thermal-experiment-series.md) starts with passive observations and prepares later controlled runs. It does not arm overnight experiments. New learned coast/recovery predictions remain advisory until validated; analysis does not automatically deploy policy changes.
 
-## Development
+The canonical pure controller is in [`custom_components/house_climate/controller`](custom_components/house_climate/controller). Private wiring is separate from explicit policy edits, and upgrades retain registered room identities and valid temporary holds where possible.
 
-The central house rules are in [house_policy.py](custom_components/house_climate/controller/house_policy.py); electrical thresholds and fallback logic are in [power_guard.py](custom_components/house_climate/power_guard.py). Temperature stopping margins are in [temperature_guard.py](custom_components/house_climate/controller/temperature_guard.py).
+Run core tests with `python -m unittest discover -s tests -v`. Native tests use Python 3.14 and Home Assistant 2026.10.4: `python -m unittest discover -s tests_homeassistant -v`. Follow [CONTRIBUTING](CONTRIBUTING.md) for the complete release and packaged-source checks. Synthetic tests establish software behavior, not field capacity, sensor representativeness, network reliability or physical compressor operation. This documentation does not assert that live acceptance has passed.
 
-Existing installations migrate in place, preserving registered room identities and valid temporary holds. Daily comfort adjustments belong on the room cards; the protection form is separate. House schedules remain fixed in source. Private bindings contain entity-role mappings; the optional emergency cutoff additionally permits explicit aggregate-output calibration.
-
-Run core tests with `python -m unittest discover -s tests -v`. Native integration tests require Python 3.14 and Home Assistant 2026.10.4: `python -m unittest discover -s tests_homeassistant -v`. GitHub Actions runs both suites and validates the install archives.
-
-Core replays use synthetic probes and devices. Native tests exercise Home Assistant's real state and service machinery with simulated equipment; they do not operate physical heat pumps. These checks establish software behavior, not field cooling capacity, airflow, Wi-Fi reliability, or physical compressor cycling. Installation and a live comparison are separate validation steps.
-
-The standalone CLI and container retain their legacy file configuration for compatibility. They do not install the native house-specific electrical guard.
+The standalone CLI and container retain their file-configuration compatibility; they do not install the native house-specific electrical guard. Regenerate installed HA packages for this version: the generated watchdog now uses a separate auxiliary-authorization helper. Do not pair a new worker with an old generated watchdog. The configuration guide explains the house/generic dynamic-stop distinction.
 
 MIT licensed.

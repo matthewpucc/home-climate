@@ -78,7 +78,7 @@ class CadenceTests(unittest.TestCase):
         self.assertIn("shared", self.tick(90).head_targets_f)
 
     def test_biased_heating_stops_at_median_comfort_edge_and_latches(self):
-        self.setup_controller(temperatures={"alpha": 70, "beta": 71, "gamma": 68},
+        self.setup_controller(temperatures={"alpha": 70, "beta": 70, "gamma": 68},
                               head_heat_call_offset_f=5)
         self.assertIn("shared", self.tick(0).head_targets_f)
         stopped = self.tick(15, alpha=72.5)
@@ -173,7 +173,7 @@ class CadenceTests(unittest.TestCase):
         self.assertIn("shared", self.tick(105).head_targets_f)
 
     def test_heat_also_stops_at_raw_opposite_limit(self):
-        self.setup_controller(temperatures={"alpha": 70, "beta": 71, "gamma": 68})
+        self.setup_controller(temperatures={"alpha": 70, "beta": 70, "gamma": 68})
         self.assertEqual(self.tick(0).mode, "heat")
         stopped = self.tick(15, beta=74.8)
         self.assertEqual(stopped.mode, "cool")
@@ -300,7 +300,7 @@ class CadenceTests(unittest.TestCase):
     def test_new_confirmed_hard_limit_can_decide_before_normal_deadline(self):
         for temperature, mode in ((76, "cool"), (65, "heat")):
             with self.subTest(mode=mode):
-                self.setup_controller(temperatures={"alpha": 72, "beta": 71, "gamma": 68})
+                self.setup_controller(temperatures={"alpha": 72, "beta": 70, "gamma": 68})
                 self.assertEqual(self.tick(0).mode, "off")
                 self.assertEqual(self.tick(15, alpha=temperature).mode, mode)
                 self.assertEqual(self.policy.decide.call_count, 2)
@@ -311,7 +311,7 @@ class CadenceTests(unittest.TestCase):
         raw = configuration()
         raw["rooms"]["alpha"]["sensors"].extend(
             {"entity_id": f"sensor.test_extra_{i}"} for i in range(3))
-        self.setup_controller(raw, temperatures={"alpha": 72, "beta": 71, "gamma": 68})
+        self.setup_controller(raw, temperatures={"alpha": 72, "beta": 70, "gamma": 68})
         self.assertEqual(self.tick(0).mode, "off")
         probe = self.cfg.zones["alpha"].probes[0].entity_id
         for stamp in (15, 30, 45, 60):
@@ -340,7 +340,7 @@ class CadenceTests(unittest.TestCase):
         self.assertEqual(self.cadence.status()["decision_remaining_seconds"], 90)
         self.cadence.reset()
         self.assertEqual(self.cadence.status()["decision_remaining_seconds"], 0)
-        next_plan = self.tick(1, alpha=72)
+        next_plan = self.tick(1, alpha=72, beta=70)
         self.assertEqual(next_plan.mode, "off")
         self.assertEqual(self.cadence.status()["decision_remaining_seconds"], 90)
 

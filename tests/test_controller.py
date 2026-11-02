@@ -55,6 +55,8 @@ def add_helpers(states):
         states[helper(name, "input_boolean")] = {"state": "on" if default else "off"}
     states.update({"automation.hp_heater_watchdog": {"state": "on"},
                    "input_datetime.hp_heartbeat": {"state": "2026-10-15 22:30:00"},
+                   "input_datetime.hp_auxiliary_authorization": {"state": "2026-10-15 22:30:00"},
+                   "input_boolean.hp_auxiliary_manual": {"state": "off"},
                    "input_text.hp_status": {"state": ""},
                    "input_boolean.hp_heater_owned": {"state": "on"},
                    "binary_sensor.hp_living_probe_safe": {"state": "on", "attributes": {"configuration_signature": watchdog_signature(config())}}})
@@ -176,11 +178,11 @@ class PolicyTests(unittest.TestCase):
 
     def test_primary_fan_exact_boundaries_and_morning_band(self):
         for stamp, speed, upper in (
-            ("2026-10-16T04:59:00+00:00", 0, 75),
+            ("2026-10-16T04:59:00+00:00", 0, 70.5),
             ("2026-10-16T05:00:00+00:00", 60, 69),
             ("2026-10-16T11:59:00+00:00", 60, 69),
             ("2026-10-16T12:00:00+00:00", 0, 70),
-            ("2026-10-16T16:00:00+00:00", 0, 75),
+            ("2026-10-16T16:00:00+00:00", 0, 70.5),
         ):
             now = datetime.fromisoformat(stamp)
             plan = self.decide(now)
@@ -217,7 +219,7 @@ class PolicyTests(unittest.TestCase):
 
     def test_local_heater_hysteresis_and_hot_probe_cutoff(self):
         self.assertTrue(self.decide(living=67.4).heater_on)
-        self.assertTrue(self.decide(living=68.2).heater_on)
+        self.assertFalse(self.decide(living=68.2).heater_on)
         self.assertFalse(self.decide(living=68.5).heater_on)
         self.assertFalse(self.decide(living=68).heater_on)
         states = fixture(self.cfg, living=67)
@@ -253,9 +255,9 @@ class PolicyTests(unittest.TestCase):
         later = NIGHT + timedelta(seconds=30)
         # A comfort request safely inside the house reserve obeys dwell. A
         # primary reading of 66.9°F would correctly trigger house protection.
-        self.assertEqual(self.decide(later, guest=69.5).mode, "off")
+        self.assertEqual(self.decide(later, guest=69.5, entertainment=70).mode, "off")
         later = NIGHT + timedelta(seconds=1250)
-        self.assertEqual(self.decide(later, guest=69.5).mode, "heat")
+        self.assertEqual(self.decide(later, guest=69.5, entertainment=70).mode, "heat")
 
     def test_actual_limit_can_bypass_software_dwell(self):
         self.decide(office=73)
@@ -271,7 +273,7 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(plan.heater_on)
 
     def test_helper_changes_take_effect_without_restart(self):
-        states = fixture(self.cfg, office=73)
+        states = fixture(self.cfg, office=73, entertainment=70)
         self.assertEqual(self.policy.decide(states, NIGHT, self.settings).mode, "cool")
         add_helpers(states)
         states[helper("office_target")]["state"] = "74"

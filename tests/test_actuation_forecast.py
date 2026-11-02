@@ -171,7 +171,7 @@ class ActuationForecastTests(unittest.TestCase):
         self.assertEqual(plan.mode, "heat")
 
     def test_limits_only_uses_its_actual_release_target_not_band_midpoint(self):
-        for mode, temperatures in (("cool", (77, 75.5, 74.5, 73.5)),
+        for mode, temperatures in (("cool", (70, 69.6, 69, 68.5)),
                                    ("heat", (64, 65.5, 66.5, 67.5))):
             with self.subTest(mode=mode):
                 self.setup_controller()

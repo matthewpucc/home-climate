@@ -34,6 +34,15 @@ def plan_warnings(status):
     guard = status.get("power_guard") or {}
     if guard.get("blocked") and guard.get("reason"):
         warnings.insert(0, "Living-room heater power guard: " + guard["reason"])
+    for notice in (status.get("notifications") or {}).get("active", []):
+        label = "Critical attention" if notice.get("severity") == "critical" else "Attention"
+        warning = f"{label}: {notice.get('message') or notice.get('title') or notice.get('key')}"
+        if notice.get("critical_route_unverified"):
+            warning += "; critical notification route is unverified"
+        if notice.get("error"):
+            warning += "; " + notice["error"]
+        if warning not in warnings:
+            warnings.append(warning)
     return warnings
 
 
@@ -53,13 +62,35 @@ def heartbeat_attributes(status):
     if heartbeat is None:
         return {}
     result = {key: heartbeat[key] for key in
-              ("state", "blocked", "reason", "auxiliary_blocked", "auxiliary_reason")
+              ("state", "blocked", "reason", "auxiliary_blocked", "auxiliary_reason",
+               "auxiliary_authorization_state", "independent_auxiliary_authorization",
+               "controller_timeout_seconds", "auxiliary_timeout_seconds", "auxiliary_manual")
               if key in heartbeat}
     if not heartbeat.get("blocked") and heartbeat.get("state") in ("pending", "confirmed"):
         # The HA-loop confirmation publishes both stages on every ordinary pulse.
         # Keep the exact delivery phase in runtime diagnostics, not recorder churn.
         result["state"] = "ok"
     return {"heartbeat": result}
+
+
+def reported_device(hass, entity_id):
+    """Expose HA feedback without upgrading its timestamps to physical evidence."""
+    state = hass.states.get(entity_id) if hass is not None and entity_id else None
+    if state is None:
+        return {"entity_id": entity_id, "available": False, "mode": None,
+                "feedback_quality": "unavailable", "physical_operation_corroborated": False}
+    attributes = state.attributes
+    quality = ("restored" if attributes.get("restored") else
+               "assumed" if attributes.get("assumed_state") else "reported")
+    return {"entity_id": entity_id, "available": state.state not in ("unknown", "unavailable"),
+            "mode": state.state, "action": attributes.get("hvac_action"),
+            "target_temperature_native": attributes.get("temperature"),
+            "temperature_unit": attributes.get("temperature_unit"),
+            "feedback_quality": quality,
+            "ha_last_updated": state.last_updated.isoformat(),
+            "ha_last_reported": state.last_reported.isoformat(),
+            "physical_operation_corroborated": False,
+            "evidence_note": "Mode, action and timestamps are HA reports, not independent physical-operation proof"}
 
 
 def has_plan(status):
@@ -99,6 +130,24 @@ def phase_message(status):
             return "Ready; no heat-pump demand"
         return f"Settling: {seconds}s remaining"
     return None
+
+
+def handoff_message(status):
+    """A stopped worker does not mean its terminal settings were confirmed."""
+    handoff = status.get("handoff") or {}
+    stage = handoff.get("stage")
+    if stage in (None, "armed", "complete", "completed"):
+        return None
+    problems = handoff.get("problems") or {}
+    if problems:
+        first = next(iter(problems.items())) if isinstance(problems, dict) else ("", str(problems))
+        return "Recovery handoff incomplete: " + ": ".join(str(value) for value in first if value)
+    return {
+        "stopping": "Recovery handoff: confirming owned devices Off",
+        "settling": "Recovery handoff: waiting for equipment off-time",
+        "applying": "Recovery handoff: verifying fallback settings",
+        "blocked": "Recovery handoff incomplete; operator attention required",
+    }.get(stage, "Recovery handoff in progress")
 
 
 def climate_label(config, entity_id):
@@ -407,7 +456,10 @@ class ControllerStatus(ControllerEntity):
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
                  "head_stop_reasons", "head_transition_history", "pending_head_commands", "head_constraints",
-                 "head_protections", "unavailable_mode_requests", "mode_scores", "protection_context") if key in status} | heartbeat_attributes(status)
+                 "head_protections", "unavailable_mode_requests", "mode_scores", "protection_context",
+                 "auxiliary_manual", "auxiliary_manual_entity", "handoff", "notifications",
+                 "auxiliary_decision", "auxiliary_policy", "shared_stop", "seasonal",
+                 "seasonal_policy", "shutdown_evidence") if key in status} | heartbeat_attributes(status)
 
 
 class HeaterPowerStatus(ControllerEntity):
@@ -424,6 +476,13 @@ class HeaterPowerStatus(ControllerEntity):
         guard = self.runtime.power_guard.diagnostics
         if guard.get("power_restore_inflight") or guard.get("power_restore_cleanup_pending"):
             return "Waiting for heater outlet restoration to stop safely"
+        if guard.get("shutdown_evidence") == "contradictory":
+            return "Heater shutdown contradicted by electrical evidence"
+        status = getattr(self.runtime, "status", {})
+        if (guard.get("manual_override") or guard.get("auxiliary_manual") or status.get("auxiliary_manual")):
+            if guard.get("shutdown_fault") or guard.get("manual_recovery_required"):
+                return short("Manual auxiliary control · " + (guard.get("reason") or "Shutdown fault requires attention"))
+            return "Manual auxiliary control; automation reserve cutoff suspended"
         if not guard.get("live"):
             return "Preview only; live commands are not permitted"
         if guard.get("restoring"):
@@ -441,7 +500,11 @@ class HeaterPowerStatus(ControllerEntity):
                  "power_restore_cleanup_pending", "persistence_error", "live",
                  "heater_cutoff_configured", "heater_current_configured", "heater_power_configured",
                  "heater_meter_kind", "electrical_stop_confirmed",
-                 "circuit_enforced",
+                 "circuit_enforced", "watt_limits_enforced", "ac_output_enabled",
+                 "supply_reported_at", "supplying_loads", "heater_draw_status",
+                 "heater_meter_issue", "diagnostic_issues", "shutdown_fault", "restore_approval_pending",
+                 "auxiliary_manual", "manual_override", "shutdown_evidence", "shutdown_contradicted",
+                 "heater_meter_evidence", "supply_evidence",
                  "shutdown_active", "shutdown_stage", "shutdown_confirmation", "aggregate_stop", "wall_power_budget",
                  "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "emergency_notification_error", "manual_recovery_required",
@@ -460,6 +523,8 @@ class Overview(ControllerEntity):
         status = self.runtime.status
         if status.get("configuration_reload_pending"):
             return short(status["configuration_reload_reason"])
+        if message := handoff_message(status):
+            return short(message)
         if not has_plan(status):
             return short(inactive_message(status))
         if issue := heartbeat_issue(status):
@@ -488,7 +553,9 @@ class Overview(ControllerEntity):
             text = ("Would " if preview else "") + action + " " + ", ".join(active)
         else:
             text = "Heat pumps would stay off" if preview else "Heat pumps off requested"
-        if auxiliary_heartbeat_issue(status):
+        if status.get("auxiliary_manual"):
+            text += "; auxiliary under manual control"
+        elif auxiliary_heartbeat_issue(status):
             text += "; auxiliary heat blocked"
         elif status.get("heater_on"):
             text += "; auxiliary heat " + ("would be on" if preview else "requested")
@@ -515,6 +582,8 @@ class RecoveryStatus(ControllerEntity):
         status = self.runtime.status
         if status.get("configuration_reload_pending"):
             return short(status["configuration_reload_reason"])
+        if message := handoff_message(status):
+            return short(message)
         reload_status = status.get("integration_recovery", {}).get("reload_status")
         reload_message = reload_status if reload_status and reload_status not in ("Idle", "Disabled", "Shadow mode", "Stopped") else None
         if not has_plan(status):
@@ -531,9 +600,17 @@ class RecoveryStatus(ControllerEntity):
         issues = status.get("device_issues", {})
         waiting = dict.fromkeys([*details, *issues, *status.get("waiting_devices", [])])
         messages = [reload_message] if reload_message else []
+        failed_stops = set()
+        for entity_id, stop in (status.get("shared_stop") or {}).items():
+            if stop.get("failed") and not stop.get("confirmed"):
+                failed_stops.add(entity_id)
+                messages.append(f"{climate_label(self.runtime.config, entity_id)}: Off unconfirmed after "
+                                f"{stop.get('attempts', 3)} attempts; changeover blocked")
         if issue := auxiliary_heartbeat_issue(status):
             messages.append(issue)
         for entity_id in waiting:
+            if entity_id in failed_stops:
+                continue
             detail = details.get(entity_id, {})
             reason = (capability_message(detail) if detail.get("kind") == "capability"
                       else detail.get("reason") or issues.get(entity_id)
@@ -558,7 +635,8 @@ class RecoveryStatus(ControllerEntity):
         return {key: status[key] for key in
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
                  "integration_recovery", "cycle_holds", "head_stop_reasons", "head_transition_history", "pending_head_commands",
-                 "head_constraints", "head_protections", "unavailable_mode_requests", "mode_scores") if key in status} | heartbeat_attributes(status)
+                 "head_constraints", "head_protections", "unavailable_mode_requests", "mode_scores",
+                 "shared_stop", "handoff", "auxiliary_manual", "notifications") if key in status} | heartbeat_attributes(status)
 
 
 class CurrentIssues(ControllerEntity):
@@ -571,7 +649,11 @@ class CurrentIssues(ControllerEntity):
     @property
     def native_value(self):
         status = self.runtime.status
+        if message := handoff_message(status):
+            return short(message)
         if not has_plan(status):
+            if (status.get("notifications") or {}).get("active"):
+                return short("; ".join(plan_warnings(status)))
             return short(inactive_message(status))
         issues = current_issue_messages(self.runtime.config, status, guard_display_unit(self))
         if status.get("control_block_reason"):
@@ -641,7 +723,9 @@ class RoomTemperature(RoomEntity):
     @property
     def extra_state_attributes(self):
         reading = self.runtime.status.get("rooms", {}).get(self.room_id, {})
-        return {"room_id": self.room_id, "independent_sources": reading.get("sources", 0)}
+        return {"room_id": self.room_id, "independent_sources": reading.get("sources", 0),
+                **{key: reading[key] for key in ("source_evidence", "observed_at", "observation_id",
+                                                 "qualified_progress", "progress_status") if key in reading}}
 
 
 class RoomPlan(RoomEntity):
@@ -724,6 +808,11 @@ class RoomPlan(RoomEntity):
         status, config = self.runtime.status, self.runtime.config
         head = config.zones[self.room_id].head
         return {"room_id": self.room_id, "head_entity_id": config.heads[head],
+                "requested": {"mode": status.get("mode") if head in status.get("head_targets_f", {}) else "off",
+                              "target_f": status.get("head_targets_f", {}).get(head),
+                              "call_target_f": status.get("head_call_targets_f", {}).get(head),
+                              "preview": status.get("event") != "live"},
+                "reported": reported_device(self.hass, config.heads[head]),
                 "rooms_sharing_head": [room.name or key for key, room in config.zones.items()
                                       if room.head == head],
                 "head_target_f": status.get("head_targets_f", {}).get(head),
@@ -782,13 +871,16 @@ class AuxiliaryPlan(ControllerEntity):
 
     @property
     def available(self):
-        return has_plan(self.runtime.status) and "heater_on" in self.runtime.status
+        return (self.runtime.status.get("auxiliary_manual") is True
+                or (has_plan(self.runtime.status) and "heater_on" in self.runtime.status))
 
     @property
     def native_value(self):
         if not self.available:
             return None
         status = self.runtime.status
+        if status.get("auxiliary_manual"):
+            return "Manual auxiliary control; Home Climate will not reclaim it"
         if issue := auxiliary_heartbeat_issue(status):
             return short("Auxiliary heat blocked · " + issue)
         if (status.get("event") == "live"
@@ -800,3 +892,19 @@ class AuxiliaryPlan(ControllerEntity):
         action = ("heat using room probes" if status["heater_on"] else
                   "circulate air without heat" if status.get("auxiliary_fan_only") else "stay off")
         return plan_prefix(status) + action
+
+    @property
+    def extra_state_attributes(self):
+        status = self.runtime.status
+        guard = status.get("power_guard") or {}
+        manual = bool(status.get("auxiliary_manual"))
+        requested = (None if manual else "heat" if status.get("heater_on") else
+                     "fan_only" if status.get("auxiliary_fan_only") else "off")
+        return {"ownership": "manual" if manual else "automation",
+                "requested": {"mode": requested, "preview": status.get("event") != "live"},
+                "reported": reported_device(self.hass, self.runtime.config.heater_entity),
+                "operation_evidence": {"dedicated_load_status": guard.get("heater_draw_status", "unknown"),
+                                       "shutdown_evidence": guard.get("shutdown_evidence", "unknown"),
+                                       "meter_issue": guard.get("heater_meter_issue")},
+                "decision": status.get("auxiliary_policy", status.get("auxiliary_decision")),
+                "blocked": guard.get("blocked"), "block_reason": guard.get("reason")}

@@ -71,7 +71,7 @@ class SlowNativeHass(commissioning.CommissioningHass):
 
     def frame(self):
         self.clock.advance(5)
-        for entity in (B.input_power, B.output_power, B.battery,
+        for entity in (B.ac_output_switch, B.input_power, B.output_power, B.battery,
                        B.wall_phase_a_voltage, B.wall_phase_b_voltage):
             old = self.data[entity]
             self.set(entity, old["state"], old["attributes"])
@@ -147,7 +147,7 @@ class StagedCommissioningTests(unittest.IsolatedAsyncioTestCase):
             patcher.stop()
 
     def fresh_external(self):
-        for entity in (B.input_power, B.output_power, B.battery,
+        for entity in (B.ac_output_switch, B.input_power, B.output_power, B.battery,
                        B.wall_phase_a_voltage, B.wall_phase_b_voltage):
             old = self.hass.data[entity]
             self.hass.set(entity, old["state"], old["attributes"])
@@ -221,11 +221,11 @@ class StagedCommissioningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hass.data[B.output_power]["state"], "2500")
         self.assert_no_heat_or_shared_ac()
 
-    async def test_circuit_loss_during_supervised_high_output_recuts(self):
+    async def test_battery_loss_during_supervised_high_output_recuts(self):
         await self.prepare_restore()
         self.hass.set(B.circuit_power, "140")
         self.hass.set(B.output_power, "2500")
-        self.hass.frame_hook = lambda hass: hass.set(B.circuit_power, "0")
+        self.hass.frame_hook = lambda hass: hass.set(B.battery, "40")
         await self.run_restore()
         self.assertEqual(self.hass.data[B.heater_switch]["state"], "off")
         self.assertTrue(self.guard.diagnostics["manual_recovery_required"])
@@ -393,22 +393,24 @@ class StagedCommissioningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(call[1] == "turn_on" for call in self.hass.calls), before)
         self.assert_no_heat_or_shared_ac()
 
-    async def test_unattended_watt_recovery_keeps_the_short_legacy_acknowledgement_path(self):
+    async def test_explicitly_approved_watt_recovery_keeps_the_short_acknowledgement_path(self):
         self.hass.ignore_climate = True
         self.hass.set(B.heater, "heat", {"hvac_action": "heating"})
-        self.hass.set(B.output_power, "2000")
+        self.hass.set(B.battery, "40")
         self.hass.set(B.circuit_power, "0")
         self.guard._observe()
         await self.real_sleep(.09)
         self.assertTrue(self.guard.power_cut_confirmed)
         self.assertFalse(self.guard.commissioning_active)
         self.hass.ignore_climate = False
-        self.hass.set(B.output_power, "150")
+        self.hass.set(B.battery, "90")
+        self.guard._restore_approved_until = self.clock.now + 1000
+        self.guard._manual_recovery_required = False
         await self.age_cut_to_restore()
         await self.run_restore()
         self.assertEqual(self.hass.data[B.heater_switch]["state"], "off")
         self.assertTrue(self.guard.diagnostics["latched"])
-        self.assertFalse(self.guard.diagnostics["manual_recovery_required"])
+        self.assertTrue(self.guard.diagnostics["manual_recovery_required"])
         self.assertEqual(self.guard.diagnostics["commissioning"]["status"], "idle")
         self.assertLess(self.clock.now - self.hass.boot_started, self.hass.native_delay)
         self.assert_no_heat_or_shared_ac()
@@ -438,11 +440,11 @@ class StagedCommissioningTests(unittest.IsolatedAsyncioTestCase):
                               "post_off": "off_clock"}[phase]]
             target = base + (29 if not deliveries else 30 + lateness)
             self.clock.advance(target - self.clock.now)
-            for entity in (B.input_power, B.output_power, B.battery,
+            for entity in (B.ac_output_switch, B.input_power, B.output_power, B.battery,
                            B.wall_phase_a_voltage, B.wall_phase_b_voltage):
                 old = self.hass.data[entity]
-                self.hass.data[entity] = watts.report(
-                    self.clock, old["state"], old["attributes"]["unit_of_measurement"])
+                self.hass.set(entity, old["state"], old["attributes"])
+            self.clock.advance(target - self.clock.now)  # Keep the exact deadline frame.
             # Startup/gap deliberately retain the old packet until the late
             # delivery. Post-Off already has continuous healthy watts but the
             # actual service is held until its confirmation deadline expires.

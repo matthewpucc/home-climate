@@ -36,7 +36,7 @@ class OptionalPowerBindingsTests(unittest.TestCase):
         self.assertNotIn(self.original.power.heater_switch, power.entity_ids)
         self.assertNotIn(self.original.power.heater_current, power.entity_ids)
         self.assertNotIn(None, power.entity_ids)
-        self.assertEqual(len(power.entity_ids), 8)
+        self.assertEqual(len(power.entity_ids), 9)
         self.assertEqual(HouseBindings.from_dict(raw).to_dict(), raw)
 
     def test_binding_the_shared_switch_does_not_arm_fallback(self):
@@ -102,7 +102,7 @@ class OptionalPowerBindingsTests(unittest.TestCase):
     def test_meter_and_individual_cutoff_are_independently_optional(self):
         direct_metered = HouseBindings.from_dict(self.direct(meter="sensor.heater_only_current"))
         self.assertIn("sensor.heater_only_current", direct_metered.power.entity_ids)
-        self.assertEqual(len(direct_metered.power.entity_ids), 9)
+        self.assertEqual(len(direct_metered.power.entity_ids), 10)
         dedicated_without_meter = deepcopy(self.raw)
         dedicated_without_meter["power"]["heater_current"] = None
         parsed = HouseBindings.from_dict(dedicated_without_meter)
@@ -166,7 +166,7 @@ class OptionalPowerBindingsTests(unittest.TestCase):
         for section in ("heads", "rooms", "fans", "heater", "windows", "outdoor"):
             self.assertEqual(parsed.to_dict()[section], raw[section])
         self.assertTrue(all(isinstance(value, str) for value in parsed.power.entity_ids))
-        self.assertEqual(len(parsed.power.entity_ids), 8)
+        self.assertEqual(len(parsed.power.entity_ids), 9)
 
     def test_invalid_or_incomplete_calibration_is_not_accepted_as_safe_policy(self):
         for calibration in ({}, {"minimum_drop_w": 700}, [], True,

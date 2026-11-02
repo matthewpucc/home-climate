@@ -64,23 +64,12 @@ class NativeCircuitAdvisoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.guard.blocked)
         self.assertEqual(self.calls, [])
 
-    async def test_missing_authoritative_input_is_not_replaced_by_circuit(self):
+    async def test_missing_input_and_voltage_are_advisory(self):
         await self.start()
-        self.hass.states.async_set(B.circuit_power, "100", {"unit_of_measurement": "W"})
-        self.hass.states.async_set(B.input_power, "unavailable")
-        with self.assertRaises(HAActivationDeferred):
-            self.guard.check_activation(B.heater, {"hvac_mode": "heat"})
-        self.assertTrue(self.guard.blocked)
-        self.assertIn(B.input_power, self.guard.diagnostics["reason"])
-        self.assertEqual(self.calls, [])
-
-    async def test_missing_voltage_is_not_replaced_by_circuit_or_nominal_voltage(self):
-        await self.start()
-        self.hass.states.async_set(B.circuit_power, "100", {"unit_of_measurement": "W"})
-        self.hass.states.async_set(B.wall_phase_a_voltage, "unavailable")
-        with self.assertRaises(HAActivationDeferred):
-            self.guard.check_activation(B.heater, {"hvac_mode": "heat"})
-        self.assertTrue(self.guard.blocked)
+        for entity in (B.input_power, B.wall_phase_a_voltage, B.wall_phase_b_voltage):
+            self.hass.states.async_set(entity, "unavailable")
+        self.guard.check_activation(B.heater, {"hvac_mode": "heat"})
+        self.assertFalse(self.guard.blocked)
         self.assertIsNone(self.guard._reading.input_budget_w)
         self.assertEqual(self.calls, [])
 
@@ -124,6 +113,8 @@ class NativeCircuitAdvisoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guard.switch_cut_owned)
         self.assertEqual(self.hass.states.get(B.heater_switch).state, "off")
         self.ignore_climate = False
+        self.guard._restore_approved_until = self.guard._clock() + 1000
+        self.guard._manual_recovery_required = False
         for elapsed in (46, 106, 166, 226, 286, 332):
             await self.report(elapsed, {B.battery: (90, {"unit_of_measurement": "%"}),
                                         B.circuit_power: ("unavailable", {"unit_of_measurement": "W"})})
@@ -145,7 +136,7 @@ class NativeCircuitAdvisoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(advisory["status"], "advisory")
         self.assertIn("unavailable", json.dumps(advisory))
         self.assertEqual(attributes["wall_power_budget"]["qualified_sources"], [])
-        self.assertEqual(attributes["wall_power_budget"]["enforced_sources"], ["input"])
+        self.assertEqual(attributes["wall_power_budget"]["enforced_sources"], [])
         self.assertLess(len(json.dumps(attributes).encode()), 4096)
         self.assertEqual(sensor.native_value, "Ready")
 

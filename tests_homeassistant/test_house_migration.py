@@ -124,7 +124,7 @@ class HouseEntryMigrationTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         from custom_components.house_climate.climate import RoomClimate
         from custom_components.house_climate.comfort import RoomComfort
         from custom_components.house_climate.config_flow import HouseClimateOptionsFlow
-        from custom_components.house_climate.configuration import entry_configuration
+        from custom_components.house_climate.configuration import entry_configuration, entry_policy_settings
         from tests_homeassistant.test_config_navigation import EditorManager
 
         entry, _ = self.entry(2)
@@ -161,7 +161,9 @@ class HouseEntryMigrationTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
                     form = await manager.async_init(DOMAIN, context={"source": "user"})
                     result = await manager.async_configure(form["flow_id"], {"live": True})
                 self.assertEqual(result["data"], {"policy": "house", "live": True,
-                                                "protection": ProtectionTemperatures().to_dict()})
+                                                "protection": ProtectionTemperatures().to_dict(),
+                                                "policy_settings": entry_policy_settings(
+                                                    self.directory.name, {**entry.data, **entry.options})})
                 entry.options = result["data"]
                 reloaded = entry_configuration(self.directory.name, {**entry.data, **entry.options})
                 self.assertIn(room_id, reloaded.zones)
@@ -347,71 +349,66 @@ class HousePowerBridgeTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(cfg.heater_entity, "unavailable")
         return controls, guard
 
-    async def test_confirmed_heater_only_power_cut_allows_cleanup_without_dyson_reply(self):
+    async def test_confirmed_cut_can_finish_retained_auxiliary_cleanup(self):
         from custom_components.house_climate.power_guard import HeaterPowerGuard
-
         bindings = example_bindings().power
         controls, _ = self.isolated_cleanup(heater=bindings.heater)
-        guard = HeaterPowerGuard(self.hass, bindings=bindings, live=True, entry_id="real-switch-proof",
-                                 notify=lambda: None)
+        guard = HeaterPowerGuard(self.hass, bindings, live=True, entry_id="real-switch-proof", notify=lambda: None)
         controls.power_guard = guard
         guard._cut_owned = True
         guard._cut_request_wall = time.time()
-        # An accepted cut request with no observed state change is insufficient.
         self.hass.states.async_set(bindings.heater_switch, "on")
         self.assertFalse(guard.power_cut_confirmed)
-        await controls._clear_if_off()
-        self.assertTrue(controls.owned)
-        controls.store.async_save.assert_not_awaited()
-
-        self.hass.states.async_set(bindings.heater_switch, "off")
-        self.assertTrue(guard.power_cut_confirmed)
-        self.assertTrue(controls._is_off(controls.config.heater_entity))
         await controls._clear_if_off()
         self.assertEqual(controls.owned, ())
-        self.assertFalse(controls.recovering)
+        self.assertEqual(controls.pending_auxiliaries, (bindings.heater,))
         controls.store.async_save.assert_awaited_once()
+        self.hass.states.async_set(bindings.heater_switch, "off")
+        self.assertTrue(guard.power_cut_confirmed)
+        self.assertTrue(controls._is_off(bindings.heater))
+        await controls.async_check()
+        self.assertEqual(controls.pending_auxiliaries, ())
+        self.assertFalse(controls.recovering)
         self.assertEqual(self.calls, [])
-        # A later power-On revokes isolation; an old successful cut is not proof.
         self.hass.states.async_set(bindings.heater_switch, "on")
         self.assertFalse(guard.power_cut_confirmed)
-        self.assertFalse(controls._is_off(controls.config.heater_entity))
+        self.assertFalse(controls._is_off(bindings.heater))
 
-    async def test_unacknowledged_cut_cannot_release_and_proof_never_covers_other_heads(self):
+    async def test_auxiliary_cut_proof_never_covers_other_heads(self):
         controls, guard = self.isolated_cleanup()
-        self.assertFalse(controls._is_off(controls.config.heater_entity))
-        await controls._clear_if_off()
-        self.assertTrue(controls.owned)
-        controls.store.async_save.assert_not_awaited()
-
-        guard.power_cut_confirmed = True
         head = controls.config.heads["guest"]
         state = self.hass.states.get(head)
         self.hass.states.async_set(head, "cool", dict(state.attributes))
-        self.assertFalse(controls._is_off(head))
+        self.assertFalse(controls._is_off(controls.config.heater_entity))
         await controls._clear_if_off()
         self.assertTrue(controls.owned)
         controls.store.async_save.assert_not_awaited()
-
+        guard.power_cut_confirmed = True
+        await controls._clear_if_off()
+        self.assertTrue(controls.owned)
+        controls.store.async_save.assert_not_awaited()
         self.hass.states.async_set(head, "off", dict(state.attributes))
         await controls._clear_if_off()
         self.assertEqual(controls.owned, ())
+        self.assertEqual(controls.pending_auxiliaries, ())
         controls.store.async_save.assert_awaited_once()
 
-    async def test_power_isolation_does_not_release_ownership_with_activation_in_flight(self):
+    async def test_auxiliary_job_retains_its_own_obligation_while_other_jobs_block_release(self):
         controls, guard = self.isolated_cleanup()
         guard.power_cut_confirmed = True
         controls.inflight = 1
         await controls._clear_if_off()
         self.assertTrue(controls.owned)
+        controls.store.async_save.assert_not_awaited()
         controls.inflight = 0
         controls.auxiliary_inflight = 1
         await controls._clear_if_off()
-        self.assertTrue(controls.owned)
-        controls.store.async_save.assert_not_awaited()
-        controls.auxiliary_inflight = 0
-        await controls._clear_if_off()
         self.assertEqual(controls.owned, ())
+        self.assertEqual(controls.pending_auxiliaries, (controls.config.heater_entity,))
+        controls.store.async_save.assert_awaited_once()
+        controls.auxiliary_inflight = 0
+        await controls.async_check()
+        self.assertEqual(controls.pending_auxiliaries, ())
 
     async def test_unload_keeps_guard_observer_until_late_power_on_is_compensated(self):
         from homeassistant.config_entries import ConfigEntries
