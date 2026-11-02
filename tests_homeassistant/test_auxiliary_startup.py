@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from datetime import timedelta
 import logging
+import math
 import threading
 import time
 from types import SimpleNamespace
@@ -282,7 +283,11 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
 
     def use_real_output_policy(self):
         bindings = replace(example_bindings().power, heater=self.cfg.heater_entity)
-        wall = [round(time.time(), 3)]
+        native_reported_at = self.hass.states.get(bindings.heater).last_reported.timestamp()
+        # These synthetic electrical reports follow the real native Off report.
+        # Rounding wall time to milliseconds could put the meter before it and
+        # correctly invalidate the recovered-stop proof on a fast runner.
+        wall = [max(time.time(), native_reported_at) + .001]
         for entity, value, unit in (
             (bindings.circuit_power, 140, "W"), (bindings.input_power, 130, "W"),
             (bindings.output_power, 2500, "W"), (bindings.battery, 100, "%"),
@@ -312,7 +317,13 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
             await self.guard.async_close()
 
     async def test_proved_recovered_stop_allows_real_fan_dispatch_during_heat_hold(self):
-        bindings, wall = self.use_real_output_policy()
+        native_off = self.hass.states.get(self.cfg.heater_entity).last_reported.timestamp()
+        # Reproduce a fast runner whose rounded clock sample predates HA's
+        # microsecond Off report. The fixture must still establish the stated
+        # native-Off -> low-meter ordering before testing real fan dispatch.
+        rounded_earlier = math.floor(native_off * 1000) / 1000 - .001
+        with patch.object(time, "time", return_value=rounded_earlier):
+            bindings, wall = self.use_real_output_policy()
         # Synthetic completed ordinary policy stop, with current native Off
         # followed by a low dedicated measurement. No failed-stop ownership.
         self.guard._latched = self.guard._off_confirmed = True
