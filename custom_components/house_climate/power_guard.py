@@ -593,6 +593,18 @@ class HeaterPowerGuard:
             return "reported_off_unverified"
         return "not_observed"
 
+    def _shutdown_confirmation_diagnostic(self):
+        """Show current acknowledged recovery without inventing a stop command."""
+        if (self._manual_off_wall is not None
+                and self._off_boundary() == self._manual_off_wall
+                and not (self._manual_recovery_required or self._emergency_ac_latched
+                         or self._shutdown_fault)):
+            return ("manual_recovery_verified"
+                    if not self._shutdown_contradicted
+                    and self.shutdown_confirmed and self._heater_off(fresh=True)
+                    and self._heater_meter_stopped() is True else "unconfirmed")
+        return self._shutdown_confirmation
+
     def _update_alerts(self):
         if self.alerts is None:
             return
@@ -648,7 +660,7 @@ class HeaterPowerGuard:
                 "manual_override": self.manual_control,
                 "shutdown_active": shutdown_active,
                 "shutdown_stage": self._shutdown_stage if shutdown_active else "idle",
-                "shutdown_confirmation": self._shutdown_confirmation if shutdown_active else "inactive",
+                "shutdown_confirmation": self._shutdown_confirmation_diagnostic() if shutdown_active else "inactive",
                 "wall_power_budget": self._wall_diagnostics(),
                 "circuit_enforced": False,
                 "watt_limits_enforced": False,

@@ -341,8 +341,17 @@ The Heater power guard diagnostic exposes `shutdown_active`, `shutdown_stage`,
 `shutdown_confirmation`, `aggregate_stop` and the shared emergency-latch state.
 `state_only` and `aggregate_corroborated` describe different evidence; neither
 claims that a dedicated relay physically isolated the heater.
-After recovery has consumed the required native Off and dedicated-meter proof,
-there is no longer an active stop request. The sensor then shows
+After a supported manual recovery acknowledgement, `manual_recovery_verified`
+means that acknowledgement completed durably and its native Off and low dedicated
+load evidence remain valid. It is not an acknowledgement of a newly sent Off
+command or proof of relay isolation. The existing latch and stable-supply wait
+can still keep `blocked` and `shutdown_active` true. If that recovery evidence
+expires or is contradicted, the confirmation returns to `unconfirmed`; a new
+stop command uses the ordinary command-confirmation states. Restart does not
+restore this volatile proof. This display does not change recovery permissions,
+deadlines or equipment commands.
+
+Once all recovery holds and active stop work have cleared, the sensor shows
 `shutdown_active: false`, `shutdown_stage: idle`,
 `shutdown_confirmation: inactive` and `aggregate_stop: null`. The legacy
 `electrical_stop_confirmed` boolean is false in that inactive context; it is not
