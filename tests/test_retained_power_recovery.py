@@ -77,6 +77,18 @@ class RetainedPowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.saved["latched"])  # Cooldown is not acknowledged away.
         self.assertTrue(self.guard.blocked)
         self.assertTrue(self.guard._off_confirmed)
+        before = deepcopy(self.guard._saved_state())
+        diagnostic = self.guard.diagnostics
+        self.assertEqual(diagnostic["shutdown_confirmation"], "manual_recovery_verified")
+        self.assertEqual(diagnostic["shutdown_evidence"], "corroborated_off")
+        self.assertTrue(diagnostic["electrical_stop_confirmed"])
+        self.assertTrue(diagnostic["shutdown_active"])
+        self.assertEqual(diagnostic["shutdown_stage"], "idle")
+        self.assertTrue(self.guard.shutdown_confirmed)
+        # The display must not invent an Off command or alter control/storage.
+        self.assertIsNone(self.guard._off_request_wall)
+        self.assertEqual(self.guard._shutdown_confirmation, "unconfirmed")
+        self.assertEqual(self.guard._saved_state(), before)
         self.assertEqual(len(self.writes), 1)
         await self.guard.async_close()
         restarted = self.new_guard()
@@ -86,7 +98,65 @@ class RetainedPowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(restarted.diagnostics["retained_cut_recovery_pending"])
         self.assertTrue(restarted.blocked)
         self.assertFalse(restarted._off_confirmed)  # Restart does not reuse stop proof.
+        self.assertEqual(restarted.diagnostics["shutdown_confirmation"], "unconfirmed")
         self.assertEqual(self.hass.calls, [])
+
+    async def test_recovered_confirmation_requires_current_native_and_meter_evidence(self):
+        self.refresh()
+        # Good readings alone do not acknowledge the retained ownership claim.
+        self.assertEqual(self.guard.diagnostics["shutdown_confirmation"], "unconfirmed")
+        self.assertTrue(await self.guard.async_acknowledge_emergency())
+        for entity in (B.heater, WATTS):
+            original = deepcopy(self.hass.data[entity])
+            for case in ("stale", "restored", "assumed_state", "missing", "contradictory"):
+                with self.subTest(entity=entity, case=case):
+                    self.hass.data[entity] = deepcopy(original)
+                    if case == "stale":
+                        self.hass.data[entity]["last_reported"] = datetime.fromtimestamp(
+                            self.clock.wall - 181, timezone.utc).isoformat()
+                    elif case in ("restored", "assumed_state"):
+                        self.hass.data[entity]["attributes"][case] = True
+                    elif case == "missing":
+                        self.hass.data.pop(entity)
+                    else:
+                        self.hass.set(entity, "heat" if entity == B.heater else 1500)
+                    self.assertEqual(self.guard.diagnostics["shutdown_confirmation"], "unconfirmed")
+                    self.assertTrue(self.guard.blocked)
+            self.hass.data[entity] = original
+        self.assertEqual(self.guard.diagnostics["shutdown_confirmation"], "manual_recovery_verified")
+        self.assertEqual(self.hass.calls, [])
+        self.assertEqual(len(self.writes), 1)
+
+    async def test_observed_contradiction_does_not_keep_manual_confirmation(self):
+        self.refresh()
+        self.assertTrue(await self.guard.async_acknowledge_emergency())
+        self.hass.set(WATTS, 1500)
+        self.guard._observe()
+        self.assertEqual(self.guard.diagnostics["shutdown_evidence"], "contradictory")
+        self.assertEqual(self.guard.diagnostics["shutdown_confirmation"], "unconfirmed")
+        self.assertFalse(self.guard.shutdown_confirmed)
+        self.assertTrue(self.guard.blocked)
+        # Later physical isolation can satisfy the stop gate, but it must not
+        # erase the contradiction or revive an earlier manual-recovery label.
+        self.hass.set(WATTS, 1)
+        self.hass.set(B.heater_switch, "off")
+        self.guard._observe()
+        self.assertTrue(self.guard.power_cut_confirmed)
+        self.assertTrue(self.guard.shutdown_confirmed)
+        self.assertEqual(self.guard.diagnostics["shutdown_evidence"], "contradictory")
+        self.assertEqual(self.guard.diagnostics["shutdown_confirmation"], "unconfirmed")
+        self.assertEqual(self.hass.calls, [])
+
+    async def test_new_off_command_replaces_manual_recovery_diagnostic(self):
+        self.refresh()
+        self.assertTrue(await self.guard.async_acknowledge_emergency())
+        self.guard.live = True  # Synthetic service registry only.
+        self.assertTrue(await self.guard._off_ack(base.TEST_OFF_ACK_SECONDS))
+        self.assertIsNone(self.guard._manual_off_wall)
+        self.assertIsNotNone(self.guard._off_request_wall)
+        self.assertEqual(self.guard.diagnostics["shutdown_confirmation"], "state_only")
+        self.assertEqual(self.hass.calls, [("climate", "set_hvac_mode",
+            {"entity_id": B.heater, "hvac_mode": "off"})])
 
     async def test_preview_observation_and_reload_alone_do_not_clear_saved_claim(self):
         self.refresh()
@@ -249,6 +319,7 @@ class RetainedPowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.store.async_save.side_effect = OSError("synthetic storage unavailable")
         await self.rejected()
         self.assertIsNotNone(self.guard.diagnostics["persistence_error"])
+        self.assertEqual(self.guard.diagnostics["shutdown_confirmation"], "unconfirmed")
         self.assertTrue(self.saved["switch_cut_owned"])
         self.store.async_save.side_effect = self.save
         self.assertTrue(await self.guard.async_acknowledge_emergency())

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Show `manual_recovery_verified` after a durable heater recovery acknowledgement while fresh native Off and low dedicated-load evidence remain valid. Keep an outstanding latch or stable-supply wait visible, and withdraw the confirmation when its evidence is lost. This diagnostic-only correction does not invent a stop command, restore proof across restart, change equipment commands or alter recovery gates, timers, leases or persistence. No configuration migration is required.
+
 ## 0.9.0
 
 - Make house room schedules, comfort bands, priorities, peak hours and terminal recovery settings editable while preserving private device bindings. Add start-day weekly overnight schedules, room-specific limits-only operation and seasonal Living profiles selected by a qualified 30-minute outdoor average with 59–61°F hysteresis. Retain the last profile during source loss; regional weather fallback needs an actual observation timestamp. Existing temporary holds remain bounded by schedule transitions.
