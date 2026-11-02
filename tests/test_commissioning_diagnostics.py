@@ -61,7 +61,7 @@ class CommissioningDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         await self.guard.async_commission_relay(confirm=True)
         for _ in range(10):
             self.clock.advance(30)
-            for entity in (B.input_power, B.output_power, B.battery,
+            for entity in (B.ac_output_switch, B.input_power, B.output_power, B.battery,
                            B.wall_phase_a_voltage, B.wall_phase_b_voltage):
                 observed = self.hass.data[entity]
                 self.hass.set(entity, observed["state"], observed["attributes"])
@@ -136,7 +136,7 @@ class CommissioningDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(status["aggregate_stop"])
 
     async def test_stale_blocked_startup_is_not_projected_as_inactive(self):
-        self.hass.data[WATTS] = watts.report(self.clock, 0, age=181)
+        self.hass.data[B.output_power] = watts.report(self.clock, 0, age=181)
         self.guard._observe()
         self.assertTrue(self.guard.diagnostics["shutdown_active"])
         self.assertTrue(self.guard.blocked)

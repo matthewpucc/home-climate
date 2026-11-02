@@ -246,7 +246,7 @@ class HeadCoolingLimitTests(unittest.TestCase):
         cfg = replace(
             self.base, head_cool_min_f={self.bonus: 74}, head_heat_call_offset_f=0,
         )
-        states = fixture(cfg, office=68, entertainment=68, living=67)
+        states = fixture(cfg, office=68, entertainment=68, living=67, guest=73)
         plan = self.decide(states, cfg)
         self.assertEqual(plan.mode, "heat")
         self.assertEqual(plan.head_call_targets_f["bonus"], 72)

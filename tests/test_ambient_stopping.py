@@ -166,22 +166,24 @@ class AmbientStoppingTests(unittest.TestCase):
         self.assertIn("healthy", missing.head_targets_f)
         self.assertEqual(missing.mode, "heat")
 
-    def test_auxiliary_forecasts_its_existing_cutoff_without_erasing_comfort_band(self):
+    def test_auxiliary_forecasts_its_active_stop_without_erasing_comfort_band(self):
         zone = replace(self.cfg.zones["gradient"],
                        profile=replace(self.cfg.zones["gradient"].profile,
                                        target_f=68, half_band_f=.5))
         cfg = replace(self.cfg, zones={**self.cfg.zones, "gradient": zone},
                       heater_entity="climate.aux", auxiliary_room="gradient", heater_cutoff_f=70)
         policy, settings = Policy(cfg), Settings.read({}, cfg)
-        initial = states(cfg, {"gradient": (67.4, 67.4, 67.4), "healthy": (70, 70, 70)})
+        # Cooling elsewhere makes auxiliary assistance useful without removing
+        # this room from heat-pump arbitration.
+        initial = states(cfg, {"gradient": (67.4, 67.4, 67.4), "healthy": (77, 77, 77)})
         self.assertTrue(policy.decide(initial, NIGHT, settings).heater_on)
-        rising = states(cfg, {"gradient": (68.35, 68.35, 68.35),
-                              "healthy": (70, 70, 70)}, 60)
+        rising = states(cfg, {"gradient": (67.85, 67.85, 67.85),
+                              "healthy": (77, 77, 77)}, 60)
         plan = policy.decide(rising, NIGHT + timedelta(seconds=60), settings)
-        self.assertLess(plan.rooms["gradient"]["high"], 68.5)
+        self.assertLess(plan.rooms["gradient"]["high"], 68)
         self.assertFalse(plan.heater_on)
-        self.assertFalse(heating_cutoff_reached(Reading(68.35, 68.35, 68.35,
-                                                       68.35, 68.35, -.1, 3), 68.5, 75))
+        self.assertFalse(heating_cutoff_reached(Reading(67.85, 67.85, 67.85,
+                                                       67.85, 67.85, -.1, 3), 68, 75))
 
 
 if __name__ == "__main__":

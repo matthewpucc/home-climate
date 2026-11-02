@@ -109,6 +109,16 @@ class SharedHeadGuardTests(unittest.TestCase):
         self.assertNotIn("shared", deferred.head_targets_f)
         self.assertEqual(deferred.head_constraints["shared"]["cool"]["kind"], "comfort_rearm")
 
+    def test_limits_only_room_keeps_its_scheduled_opposite_bounds(self):
+        scheduled = targets(self.cfg)
+        scheduled["study"]["comfort_enabled"] = False
+        for mode, study, lounge in (("cool", 71, 73.5), ("heat", 73, 70.5)):
+            with self.subTest(mode=mode):
+                constraint = head_constraint(self.cfg, "shared", mode,
+                    {"study": reading(study), "lounge": reading(lounge)}, scheduled)
+                self.assertEqual(constraint["kind"], "comfort_limit")
+                self.assertEqual(constraint["room"], "study")
+
     def test_house_hot_override_starts_before_ceiling_and_latches_to_target(self):
         self.assertNotIn("shared", self.tick(0, 73.4, 70.88).head_targets_f)
         # A newly confirmed protection condition does not wait the remaining75s.

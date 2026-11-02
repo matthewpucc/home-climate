@@ -106,10 +106,17 @@ class WindowContactNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pre_window_stored_hold_survives_upgrade_and_new_contact_wiring(self):
         original = Config.from_dict(configuration())
-        room_data = asdict(original.zones["alpha"])
-        room_data.pop("windows")  # The exact room payload stored by 0.7.3.
-        for probe in room_data["probes"]:
-            probe.pop("report_on_change", None)
+        # The exact room payload stored by 0.7.3, independent of new optional
+        # fields in today's dataclasses.
+        current_room = asdict(original.zones["alpha"])
+        room_data = {key: current_room[key] for key in
+                     ("head", "probes", "name", "area_id", "profile", "schedules")}
+        room_data["probes"] = tuple({key: probe[key] for key in
+                                    ("entity_id", "source", "attribute", "unit", "offset_f")}
+                                   for probe in room_data["probes"])
+        room_data["schedules"] = tuple({key: period[key] for key in
+                                       ("start", "end", "profile", "name")}
+                                      for period in room_data["schedules"])
         old_data = {"room": room_data, "head": original.heads["shared"],
                     "timezone": self.hass.config.time_zone,
                     "limits": [original.low_f, original.high_f], "auxiliary_cutoff": None}

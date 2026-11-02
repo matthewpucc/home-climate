@@ -1,9 +1,10 @@
 """Wi-Fi failures reconcile one device without cycling healthy equipment."""
 import unittest
+from unittest.mock import patch
 
 from house_climate.__main__ import preflight
 from house_climate.executor import ControlFault, Executor
-from house_climate.ha import HAError
+from house_climate.ha import HAActivationDeferred, HAError
 from house_climate.policy import Plan
 from tests.test_controller import FakeHA, add_helpers, config, fixture
 
@@ -40,6 +41,23 @@ class ConnectivityTests(unittest.TestCase):
     def disconnect(self, entity):
         self.ha.data[entity]["state"] = "unavailable"
         self.ha.ignore.add(entity)
+
+    def test_deferred_recovery_off_keeps_obligation_without_fabricating_a_receipt(self):
+        entity = self.cfg.heater_entity
+        self.ha.data[entity]["state"] = "heat"
+        states = self.ha.states()
+        self.executor._issue(entity, "Original uncertain command needs Off", states)
+        recovery = self.executor.recoveries[entity]
+        baseline = recovery.baseline
+        with patch.object(self.ha, "service", side_effect=HAActivationDeferred("Ownership generation changed")):
+            self.assertFalse(self.executor._recovery_off(entity, states, 0))
+        self.assertNotIn(entity, self.executor.pending)
+        self.assertIs(self.executor.recoveries[entity], recovery)
+        self.assertEqual(recovery.baseline, baseline)
+        self.assertFalse(recovery.off_receipt)
+        self.assertFalse(self.executor._refresh_needed)
+        self.assertEqual(self.ha.calls, [])
+        self.assertIn(entity, self.executor.device_issues)
 
     def test_offline_head_preserves_established_direction_and_healthy_heads(self):
         self.start()

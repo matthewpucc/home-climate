@@ -50,6 +50,8 @@ class NativeAggregateGuardStopTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.async_set(entity, str(value), {"unit_of_measurement": unit})
         self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"})
         self.hass.states.async_set(SHARED_AC, "on")
+        self.hass.states.async_set(BASE.ac_output_switch, "on", {"device_report": {
+            "state": "on", "reported_at": datetime.now(timezone.utc).isoformat()}})
         # These disconnected legacy entities deliberately exist. They are not
         # part of this direct path and cannot confirm the real heater is Off.
         self.hass.states.async_set(BASE.heater_switch, "off")

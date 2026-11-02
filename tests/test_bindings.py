@@ -26,7 +26,7 @@ class PrivateBindingsTests(unittest.TestCase):
         public = json.loads(Path("bindings.example.json").read_text())
         self.assertEqual(HouseBindings.from_dict(public), self.example)
         self.assertEqual(self.example.power.heater, self.example.heater)
-        self.assertEqual(len(self.example.power.entity_ids), 9)
+        self.assertEqual(len(self.example.power.entity_ids), 10)
         self.assertNotIn("heater", self.raw["power"])
         house_configuration(bindings=self.example).validate(live=True)
 

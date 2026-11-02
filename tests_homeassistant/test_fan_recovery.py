@@ -193,6 +193,11 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(heater, "off", heater_attrs)
         self.hass.states.async_set(guest, "off", attrs)
         await runtime.controls.async_check()
+        await self.until(lambda: not runtime.controls.owned)
+        self.assertFalse(switch.is_on)
+        self.assertEqual(self.hass.states.get(guest).state, "off")
+        # A completed fault handoff does not silently resume active control.
+        await switch.async_turn_on()
         await self.until(lambda: self.hass.states.get(guest).state == "cool")
         self.assertEqual(runtime.fault_count, faults)
 

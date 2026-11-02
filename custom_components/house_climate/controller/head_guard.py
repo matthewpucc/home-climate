@@ -128,8 +128,6 @@ def head_constraint(config, head, mode, rooms, room_targets, *, protection=None,
         return None
     for name in names:
         target = room_targets[name]
-        if not target.get("comfort_enabled", True):
-            continue
         if soft_yield(context, name, mode):
             continue
         label = config.zones[name].name or name

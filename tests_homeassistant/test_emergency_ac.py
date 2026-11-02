@@ -50,7 +50,7 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         self.refresh_safe_measurements()
         self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"})
         self.hass.states.async_set(BASE.heater_switch, "on")
-        self.hass.states.async_set(SHARED_AC, "on")
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on", "reported_at": datetime.now(timezone.utc).isoformat()}})
 
     async def asyncTearDown(self):
         self.ac_release.set()
@@ -66,6 +66,8 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
             patcher.stop()
 
     def refresh_safe_measurements(self):
+        self.hass.states.async_set(BASE.ac_output_switch, "on", {"device_report": {
+            "state": "on", "reported_at": datetime.now(timezone.utc).isoformat()}})
         for entity, value, unit in (
             (BASE.circuit_power, 140, "W"), (BASE.input_power, 130, "W"),
             (BASE.output_power, 150, "W"), (BASE.battery, 80, "%"),
@@ -167,7 +169,8 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
     async def prepare_manual_recovery(self):
         self.ignore_climate = False
         self.refresh_safe_measurements()
-        self.hass.states.async_set(SHARED_AC, "on", force_update=True)
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on",
+            "reported_at": datetime.now(timezone.utc).isoformat()}}, force_update=True)
         self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"},
                                    force_update=True)
         await self.hass.async_block_till_done()
@@ -175,7 +178,7 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
     async def load_manual_recovery_claim(self, *, bindings=None, changed_identity=False):
         source = await self.start(bindings)
         saved = source._saved_state()
-        saved.update(latched=True, manual_recovery_required=True,
+        saved.update(latched=True, manual_recovery_required=True, legacy_cooldown=True,
                      trip_wall=source._wall_clock())
         if changed_identity:
             saved["binding_identity"] = {**saved["binding_identity"],
@@ -184,7 +187,8 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         guard = await self.start(bindings, saved=saved)
         self.assertIsNone(guard._off_request_wall)
         self.refresh_safe_measurements()
-        self.hass.states.async_set(SHARED_AC, "on", force_update=True)
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on",
+            "reported_at": datetime.now(timezone.utc).isoformat()}}, force_update=True)
         self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"},
                                    force_update=True)
         await self.hass.async_block_till_done()
@@ -272,8 +276,8 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
             ("assumed Off", BASE.heater, "attributes", {"hvac_action": "off", "assumed_state": True}),
             ("stale current", BASE.heater_current, "last_reported", old),
             ("heater drawing current", BASE.heater_current, "state", "3"),
-            ("unsafe input", BASE.input_power, "state", "1500"),
-            ("stale input", BASE.input_power, "last_reported", old),
+            ("missing output", BASE.output_power, "state", "unavailable"),
+            ("stale output", BASE.output_power, "last_reported", old),
             ("battery reserve", BASE.battery, "state", "40"),
         )
         saves = guard._store.async_save.await_count
@@ -449,16 +453,18 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guard.diagnostics["shutdown_confirmation"], "state_only")
         self.assertEqual(self.switch_calls(SHARED_AC), [])
 
-    async def test_stale_or_future_ac_on_cannot_authorize_heating(self):
+    async def test_unchanged_ac_on_uses_corroboration_but_future_report_is_invalid(self):
         guard = await self.start()
-        for offset in (-power.TELEMETRY_MAX_AGE_SECONDS - 1, 6):
-            with self.subTest(ac_report_offset_seconds=offset):
-                self.hass.states.async_set(SHARED_AC, "on", force_update=True)
-                self.hass.states.get(SHARED_AC).last_reported = (
-                    datetime.now(timezone.utc) + timedelta(seconds=offset))
-                with self.assertRaises(HAActivationDeferred):
-                    guard.check_activation(BASE.heater, {"hvac_mode": "heat"})
-        self.hass.states.async_set(SHARED_AC, "on", force_update=True)
+        old = datetime.now(timezone.utc) - timedelta(seconds=power.TELEMETRY_MAX_AGE_SECONDS + 1)
+        self.hass.states.async_set(SHARED_AC, "on")
+        self.hass.states.get(SHARED_AC).last_reported = old
+        guard.check_activation(BASE.heater, {"hvac_mode": "heat"})
+        self.assertEqual(self.hass.states.get(SHARED_AC).last_reported, old)
+        self.hass.states.get(SHARED_AC).last_reported = datetime.now(timezone.utc) + timedelta(seconds=6)
+        with self.assertRaises(HAActivationDeferred):
+            guard.check_activation(BASE.heater, {"hvac_mode": "heat"})
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on",
+            "reported_at": datetime.now(timezone.utc).isoformat()}}, force_update=True)
         guard.check_activation(BASE.heater, {"hvac_mode": "heat"})
         self.assertEqual(self.calls, [])
 
@@ -470,7 +476,8 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         # This cached Off is fresh in age, but predates manual AC restoration.
         self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"},
                                    force_update=True)
-        self.hass.states.async_set(SHARED_AC, "on", force_update=True)
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on",
+            "reported_at": datetime.now(timezone.utc).isoformat()}}, force_update=True)
         await self.hass.async_block_till_done()
         with self.assertRaisesRegex(RuntimeError, "fresh thermostat Off"):
             await guard.async_acknowledge_emergency()
@@ -771,7 +778,7 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         self.ignore_climate = self.ignore_dedicated = True
         guard = await self.start(BASE)
         await self.trip()
-        self.assertNotIn(SHARED_AC, guard.entity_ids)
+        self.assertIn(SHARED_AC, guard.entity_ids)  # Read binding does not authorize AC cutoff.
         self.assertEqual(self.switch_calls(SHARED_AC), [])
         self.assertFalse(guard.diagnostics["emergency_ac_latched"])
         self.assertFalse(guard.power_cut_confirmed)
@@ -808,13 +815,12 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(guard.blocked)
         self.assertFalse(guard.power_cut_confirmed)
 
-    async def test_configured_unavailable_meter_still_inhibits_activation(self):
+    async def test_configured_unavailable_meter_is_unknown_without_gating_normal_admission(self):
         self.hass.states.async_set(BASE.heater_current, "unavailable")
         guard = await self.start(self.direct_bindings(current=BASE.heater_current))
-        self.assertTrue(guard.blocked)
-        with self.assertRaises(HAActivationDeferred):
-            guard.check_activation(BASE.heater, {"hvac_mode": "heat"})
-        self.assertIn(BASE.heater_current, guard.diagnostics["reason"])
+        self.assertFalse(guard.blocked)
+        guard.check_activation(BASE.heater, {"hvac_mode": "heat"})
+        self.assertIn(BASE.heater_current, guard.diagnostics["heater_meter_issue"])
 
     async def test_fresh_post_off_current_contradiction_escalates(self):
         self.current_after_native_off = 3
@@ -831,7 +837,8 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await first.async_close())
         self.ignore_climate = False
         self.refresh_safe_measurements()
-        self.hass.states.async_set(SHARED_AC, "on", force_update=True)
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on",
+            "reported_at": datetime.now(timezone.utc).isoformat()}}, force_update=True)
         self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"}, force_update=True)
         previous_calls = len(self.calls)
         second = await self.start(self.direct_bindings(enabled=False), saved=saved)
@@ -848,7 +855,8 @@ class EmergencyACGuardTests(unittest.IsolatedAsyncioTestCase):
         await self.trip()
         self.ignore_climate = False
         self.refresh_safe_measurements()
-        self.hass.states.async_set(SHARED_AC, "on", force_update=True)
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on",
+            "reported_at": datetime.now(timezone.utc).isoformat()}}, force_update=True)
         self.hass.states.async_set(BASE.heater, "off", {"hvac_action": "off"}, force_update=True)
         await self.hass.async_block_till_done()
         guard._tripped_at = guard._clock() - 600
@@ -897,7 +905,7 @@ class EmergencyACNativeBridgeTests(unittest.IsolatedAsyncioTestCase):
         for service in ("turn_on", "turn_off"):
             self.hass.services.async_register("switch", service, self.handle)
         EmergencyACGuardTests.refresh_safe_measurements(self)
-        self.hass.states.async_set(SHARED_AC, "on")
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on", "reported_at": datetime.now(timezone.utc).isoformat()}})
 
     async def asyncTearDown(self):
         self.ignore_ac = False
@@ -1006,7 +1014,7 @@ class EmergencyACNativeBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guard.diagnostics["emergency_ac_status"], "unconfirmed")
         self.assertFalse(runtime.controls._is_off(heater))
         await runtime.controls._clear_if_off()
-        self.assertIn(heater, runtime.controls.owned)
+        self.assertIn(heater, (*runtime.controls.owned, *runtime.controls.pending_auxiliaries))
         self.assertFalse(await runtime.async_stop())
 
     async def test_failed_unload_can_acknowledge_manual_recovery_then_close(self):
@@ -1030,7 +1038,8 @@ class EmergencyACNativeBridgeTests(unittest.IsolatedAsyncioTestCase):
         # Simulate verified local recovery; none of these state reports issues
         # a device command. Low current and thermostat Off follow AC restoration.
         self.hass.states.async_set(SHARED_AC, "off", force_update=True)
-        self.hass.states.async_set(SHARED_AC, "on", force_update=True)
+        self.hass.states.async_set(SHARED_AC, "on", {"device_report": {"state": "on",
+            "reported_at": datetime.now(timezone.utc).isoformat()}}, force_update=True)
         EmergencyACGuardTests.refresh_safe_measurements(self)
         self.hass.states.async_set(heater, "off", {"hvac_action": "off"}, force_update=True)
         await self.hass.async_block_till_done()

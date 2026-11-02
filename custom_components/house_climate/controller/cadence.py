@@ -9,7 +9,6 @@ from datetime import datetime
 from .config import Config, Settings
 from .policy import Plan, Policy
 from .sensors import Sensors
-from .temperature_guard import heating_cutoff_reached
 from .head_guard import protection_requested
 from .protection_context import limits
 
@@ -156,16 +155,23 @@ class DecisionCadence:
             if plan.mode in ("heat", "cool") and modes and plan.mode not in modes:
                 self._inhibit(head, f"{plan.mode} unavailable (HA modes: {', '.join(modes)})")
 
-        auxiliary = rooms.get(self.config.auxiliary_room)
         if self.config.heater_entity:
-            cutoff = min(self.config.heater_cutoff_f,
-                         plan.room_targets.get(self.config.auxiliary_room, {}).get("high_f", self.config.heater_cutoff_f))
-            if plan.heater_on and (not auxiliary or heating_cutoff_reached(auxiliary, cutoff, high)):
-                plan.heater_on = False
-                self.policy.heater_on = False
+            was_heating, was_fan = plan.heater_on, plan.auxiliary_fan_only
+            stop_revision = states.get(self.config.heater_entity, {}).get("attributes", {}).get(
+                "home_climate_auxiliary_stop_revision", 0)
+            independent_stop = stop_revision != plan.auxiliary_policy.get("stop_revision", stop_revision)
+            if independent_stop:
+                # An independent watchdog may see a transient high reading and
+                # stop Heat before the worker sees that reading. Its Off still
+                # invalidates the cached positive request until a fresh decision.
+                self.policy.auxiliary_dispatch.active = False
+                plan.heater_on = self.policy.heater_on = False
+            self.policy.update_auxiliary(plan, states, rooms, now, allow_start=False)
+            if independent_stop:
+                plan.auxiliary_policy["reason"] = "Independent auxiliary stop; waiting for the next comfort decision"
+            if was_heating and not plan.heater_on:
                 self._warning("Auxiliary heat stopped by fresh room temperature/probe check; waiting for next comfort decision")
-            if plan.auxiliary_fan_only and (not auxiliary or auxiliary.low <= low + .25):
-                plan.auxiliary_fan_only = False
+            if was_fan and not plan.auxiliary_fan_only:
                 self._warning("Auxiliary circulation stopped by fresh room temperature/probe check; waiting for next comfort decision")
 
         for key, fan in self.config.fan_controls.items():
@@ -208,6 +214,7 @@ class DecisionCadence:
                 self._warning(warning)
 
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit="°F", *, monotonic_now=None):
+        settings = self.policy.seasonal_settings(states, now, settings)
         stamp = self.clock() if monotonic_now is None else monotonic_now
         environment = self.policy.operating.environment(states, now, monotonic_now=stamp)
         self.policy.context = environment
@@ -260,6 +267,8 @@ class DecisionCadence:
         self._trim(states, rooms, now, climate_unit)
         self.policy.head_requests = {head: self.cached_plan.mode for head in self.cached_plan.head_targets_f}
         plan = deepcopy(self.cached_plan)
+        if self.policy.seasonal_status is not None:
+            plan.seasonal = self.policy.seasonal_status.as_dict()
         plan.rooms = {name: asdict(room) for name, room in rooms.items()}
         plan.window_states = context.window_states
         plan.protection_context = context.as_dict()

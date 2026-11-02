@@ -23,3 +23,13 @@ commission_heater_relay:
       required: true
       selector:
         boolean:
+
+approve_heater_restore:
+  name: Approve dedicated heater recovery
+  description: Approve one dedicated relay restoration after a cutoff. Requires live commands, physical relay Off, verified supply, completed cooldown and no auxiliary jobs. Does not restore shared AC. Approval expires after two minutes or a new fault.
+  fields:
+    confirm:
+      name: Confirm heater power restoration
+      required: true
+      selector:
+        boolean:

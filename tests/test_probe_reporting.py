@@ -31,13 +31,16 @@ def sample(value="68", stamp=None):
         "attributes": {"unit_of_measurement": "°F"}}}
 
 
-def old_signature(cfg):
+def expected_signature(cfg):
     probes = cfg.zones[cfg.auxiliary_room].probes
-    mapping = {"watchdog_version": 2 if cfg.legacy else 3,
+    mapping = {"watchdog_version": 4,
                "probes": [{key: value for key, value in asdict(probe).items()
-                           if key != "report_on_change"} for probe in probes],
+                           if key != "report_on_change" and (value is not None or key not in
+                               {"observation_time_entity", "require_active_entity"})} for probe in probes],
                "stale": cfg.sensor_stale_seconds, "cutoff": cfg.heater_cutoff_f,
-               "heater": cfg.heater_entity}
+               "heater": cfg.heater_entity,
+               "controller_timeout": cfg.heartbeat_timeout_seconds,
+               "auxiliary_timeout": cfg.auxiliary_heartbeat_timeout_seconds}
     if not cfg.legacy:
         mapping["prefix"] = cfg.helper_prefix
     return hashlib.sha256(json.dumps(mapping, sort_keys=True).encode()).hexdigest()[:16]
@@ -101,10 +104,10 @@ class ProbeReportingTests(unittest.TestCase):
         self.assertEqual(readings["zone"].sources, 1)
         self.assertTrue(any("one independent" in warning for warning in warnings))
 
-    def test_default_false_preserves_existing_generic_and_legacy_watchdog_signatures(self):
+    def test_default_false_uses_current_generic_and_legacy_watchdog_contracts(self):
         for cfg in (configuration(), legacy_configuration()):
             with self.subTest(legacy=cfg.legacy):
-                self.assertEqual(watchdog_signature(cfg), old_signature(cfg))
+                self.assertEqual(watchdog_signature(cfg), expected_signature(cfg))
                 name = cfg.auxiliary_room
                 room = cfg.zones[name]
                 changed = replace(cfg, zones={**cfg.zones, name: replace(room, probes=tuple(
@@ -116,6 +119,11 @@ class ProbeReportingTests(unittest.TestCase):
 
 @unittest.skipIf(watchdog_tests.Environment is None, "Install Jinja2 to render HA templates")
 class ProbeReportingWatchdogTests(unittest.TestCase):
+    def configurations_for(self, probe):
+        for cfg in (configuration(), legacy_configuration()):
+            room = cfg.zones[cfg.auxiliary_room]
+            yield replace(cfg, zones={**cfg.zones, cfg.auxiliary_room: replace(room, probes=(probe,))})
+
     def render(self, cfg, data):
         self.data = data
         env = watchdog_tests.WatchdogTemplateTests.environment(self)
@@ -149,6 +157,60 @@ class ProbeReportingWatchdogTests(unittest.TestCase):
                 data["sensor.synthetic_temperature"]["last_reported"] = stamp
                 self.assertFalse(self.render(cfg, data))
                 self.assertFalse(self.python_safe(cfg, data))
+
+    def test_watchdogs_reject_restored_assumed_and_boolean_temperature(self):
+        probe = Probe("sensor.synthetic_temperature", "physical_sensor")
+        for cfg in self.configurations_for(probe):
+            for flag in ("restored", "assumed_state", "boolean"):
+                with self.subTest(legacy=cfg.legacy, flag=flag):
+                    data = sample(stamp=NIGHT.isoformat())
+                    if flag == "boolean":
+                        data[probe.entity_id]["state"] = True
+                    else:
+                        data[probe.entity_id]["attributes"][flag] = True
+                    self.assertFalse(self.python_safe(cfg, data))
+                    self.assertFalse(self.render(cfg, data))
+
+    def test_watchdogs_require_both_acquisition_and_report_evidence(self):
+        probe = Probe("sensor.synthetic_temperature", "physical_sensor",
+                      observation_time_entity="sensor.synthetic_observation")
+        for cfg in self.configurations_for(probe):
+            for case in ("valid", "old_measurement", "future_measurement", "missing_measurement",
+                         "naive_measurement", "restored_measurement", "assumed_measurement", "old_report"):
+                with self.subTest(legacy=cfg.legacy, case=case):
+                    data = sample(stamp=NIGHT.isoformat())
+                    observed = {"state": NIGHT.isoformat(), "attributes": {}}
+                    data[probe.observation_time_entity] = observed
+                    if case == "old_measurement":
+                        observed["state"] = (NIGHT - timedelta(hours=1)).isoformat()
+                    elif case == "future_measurement":
+                        observed["state"] = (NIGHT + timedelta(seconds=1)).isoformat()
+                    elif case == "missing_measurement":
+                        observed["state"] = "unavailable"
+                    elif case == "naive_measurement":
+                        observed["state"] = NIGHT.replace(tzinfo=None).isoformat()
+                    elif case in ("restored_measurement", "assumed_measurement"):
+                        observed["attributes"]["restored" if case.startswith("restored") else "assumed_state"] = True
+                    elif case == "old_report":
+                        data[probe.entity_id]["last_reported"] = (NIGHT - timedelta(hours=1)).isoformat()
+                    self.assertEqual(self.python_safe(cfg, data), case == "valid")
+                    self.assertEqual(self.render(cfg, data), case == "valid")
+
+    def test_watchdogs_require_active_condition_with_actual_positive_percentage(self):
+        probe = Probe("sensor.synthetic_temperature", "physical_sensor",
+                      require_active_entity="fan.synthetic_circulation")
+        for cfg in self.configurations_for(probe):
+            for state, attrs, expected in (
+                    ("on", {}, True), ("on", {"percentage": 40}, True),
+                    ("off", {"percentage": 40}, False), ("unavailable", {}, False),
+                    ("on", {"percentage": 0}, False), ("on", {"percentage": True}, False),
+                    ("on", {"percentage": "40"}, False), ("on", {"percentage": float("nan")}, False),
+                    ("on", {"restored": True}, False), ("on", {"assumed_state": True}, False)):
+                with self.subTest(legacy=cfg.legacy, state=state, attrs=attrs):
+                    data = sample(stamp=NIGHT.isoformat())
+                    data[probe.require_active_entity] = {"state": state, "attributes": attrs}
+                    self.assertEqual(self.python_safe(cfg, data), expected)
+                    self.assertEqual(self.render(cfg, data), expected)
 
     def test_real_ha_aware_datetime_report_is_accepted_and_naive_datetime_is_rejected(self):
         cfg = configuration(True)

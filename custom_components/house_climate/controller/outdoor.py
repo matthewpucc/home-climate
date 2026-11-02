@@ -15,6 +15,17 @@ OUTDOOR_MAX_F = 150
 
 
 @dataclass(frozen=True)
+class OutdoorSourceSample:
+    source: str
+    role: str
+    temperature_f: float
+    reported_at: float
+    measurement_at: float | None
+    valid_until: float
+    entity_id: str
+
+
+@dataclass(frozen=True)
 class OutdoorReading:
     temperature_f: float | None = None
     sources: int = 0
@@ -24,6 +35,8 @@ class OutdoorReading:
     source_timestamps: tuple[tuple[str, float], ...] = ()
     coverage_intervals: tuple[tuple[float, float], ...] = ()
     selected_role: str | None = None
+    primary_configured: bool = False
+    source_samples: tuple[OutdoorSourceSample, ...] = ()
 
 
 def _available(state):
@@ -34,8 +47,8 @@ def _available(state):
     attrs = state.get("attributes") or {}
     if not isinstance(attrs, Mapping):
         raise ValueError("invalid attributes")
-    if attrs.get("restored") is True:
-        raise ValueError("restored reading")
+    if attrs.get("restored") is True or attrs.get("assumed_state") is True:
+        raise ValueError("restored/assumed reading")
     return attrs
 
 
@@ -60,6 +73,7 @@ def _current(probe, state, states, now):
     report = _timestamp(state.get("last_reported") or state.get("last_updated"), now, maximum_age)
     coverage_start, expiry = report, report + maximum_age
     observation_entity = getattr(probe, "observation_time_entity", None)
+    observation = None
     if observation_entity is not None:
         observation_state = states.get(observation_entity, {})
         try:
@@ -77,7 +91,7 @@ def _current(probe, state, states, now):
     temperature = to_f(float(raw), unit)
     if not math.isfinite(temperature) or not OUTDOOR_MIN_F <= temperature <= OUTDOOR_MAX_F:
         raise ValueError("implausible temperature")
-    return temperature, report, coverage_start, expiry
+    return temperature, report, coverage_start, expiry, observation
 
 
 def read_outdoor(config, states, now):
@@ -96,6 +110,8 @@ def read_outdoor(config, states, now):
         return OutdoorReading(warnings=("Outdoor evaluation requires a timezone-aware timestamp",))
     now = now.astimezone(timezone.utc)
     probes = config.outdoor_probes
+    primary_configured = any(getattr(probe, "role", "fallback") == "primary" for probe in probes)
+    source_samples = {}
     for probe in probes:
         try:
             current = _current(probe, states.get(probe.entity_id, {}), states, now)
@@ -103,12 +119,17 @@ def read_outdoor(config, states, now):
             warnings.append(f"Outdoor {probe.entity_id}: {exc}")
             continue
         tiers[getattr(probe, "role", "fallback")].setdefault(probe.source, []).append(current)
+        source_key = (getattr(probe, "role", "fallback"), probe.source)
+        sample = OutdoorSourceSample(probe.source, source_key[0], current[0], current[1],
+                                     current[4], current[3], probe.entity_id)
+        if source_key not in source_samples or current[0] < source_samples[source_key].temperature_f:
+            source_samples[source_key] = sample
     selected_role = "primary" if tiers["primary"] else "fallback"
     valid = tiers[selected_role]
     if not valid:
         if not probes:
             warnings.append("No outdoor temperature sources configured")
-        return OutdoorReading(warnings=tuple(warnings))
+        return OutdoorReading(warnings=tuple(warnings), primary_configured=primary_configured)
     if len(valid) == 1:
         warnings.append("Outdoor temperature has only one independent source")
     values = [value for aliases in valid.values() for value in aliases]
@@ -120,4 +141,6 @@ def read_outdoor(config, states, now):
                                       for source, aliases in valid.items())),
         coverage_intervals=tuple(sorted((value[2], value[3]) for value in values)),
         selected_role=selected_role,
+        primary_configured=primary_configured,
+        source_samples=tuple(source_samples[key] for key in sorted(source_samples)),
     )

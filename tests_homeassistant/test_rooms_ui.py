@@ -73,7 +73,7 @@ class FixedRoomUITests(unittest.IsolatedAsyncioTestCase):
             "policy": "house", "config_file": "../not-a-file.toml",
             "configuration": previous, "live": True})
         self.assertEqual((cfg.low_f, cfg.high_f), (66, 75))
-        self.assertEqual(cfg.heater_high_setpoint_f, 86)
+        self.assertEqual(cfg.heater_high_setpoint_f, 80)
         cfg.validate(live=True)
 
     async def test_legacy_parser_remains_available_for_migration_and_standalone_users(self):

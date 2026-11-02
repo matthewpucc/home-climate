@@ -87,10 +87,11 @@ class WatchdogTemplateTests(unittest.TestCase):
         condition = self.generated["automation"][0]["conditions"][1]["value_template"]
         self.data.update({"input_boolean.hp_enabled": {"state": "on"},
                           "input_datetime.hp_heartbeat": {"state": NIGHT.isoformat()},
+                          "input_datetime.hp_auxiliary_authorization": {"state": NIGHT.isoformat()},
                           "binary_sensor.hp_living_probe_safe": {"state": "on"}})
         render = lambda: self.environment().from_string(condition).render().strip()
         self.assertEqual(render(), "False")
-        self.data["input_datetime.hp_heartbeat"]["state"] = (NIGHT - timedelta(seconds=121)).isoformat()
+        self.data["input_datetime.hp_heartbeat"]["state"] = (NIGHT - timedelta(seconds=301)).isoformat()
         self.assertEqual(render(), "True")
         self.data["input_datetime.hp_heartbeat"]["state"] = NIGHT.isoformat()
         self.data["input_boolean.hp_enabled"]["state"] = "off"
@@ -104,6 +105,7 @@ class WatchdogTemplateTests(unittest.TestCase):
         condition = self.generated["automation"][0]["conditions"][1]["value_template"]
         self.data.update({"input_boolean.hp_enabled": {"state": "on"},
                           "input_datetime.hp_heartbeat": {"state": NIGHT.isoformat()},
+                          "input_datetime.hp_auxiliary_authorization": {"state": NIGHT.isoformat()},
                           "binary_sensor.hp_living_probe_safe": {"state": "off"}})
         self.data[self.cfg.heater_entity]["state"] = "fan_only"
         render = lambda: self.environment().from_string(condition).render().strip()
@@ -111,13 +113,14 @@ class WatchdogTemplateTests(unittest.TestCase):
         self.data[self.cfg.heater_entity]["attributes"]["hvac_action"] = "heating"
         self.assertEqual(render(), "True")
         self.data[self.cfg.heater_entity]["attributes"]["hvac_action"] = "fan"
-        self.data["input_datetime.hp_heartbeat"]["state"] = (NIGHT - timedelta(seconds=121)).isoformat()
+        self.data["input_datetime.hp_heartbeat"]["state"] = (NIGHT - timedelta(seconds=301)).isoformat()
         self.assertEqual(render(), "True")
 
     def test_unknown_heater_state_remains_protected_by_probe_cutoff(self):
         condition = self.generated["automation"][0]["conditions"][1]["value_template"]
         self.data.update({"input_boolean.hp_enabled": {"state": "on"},
                           "input_datetime.hp_heartbeat": {"state": NIGHT.isoformat()},
+                          "input_datetime.hp_auxiliary_authorization": {"state": NIGHT.isoformat()},
                           "binary_sensor.hp_living_probe_safe": {"state": "off"}})
         self.data[self.cfg.heater_entity]["state"] = "unavailable"
         self.assertEqual(self.environment().from_string(condition).render().strip(), "True")

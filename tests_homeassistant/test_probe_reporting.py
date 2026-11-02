@@ -121,7 +121,13 @@ class ProbeReportingTests(unittest.IsolatedAsyncioTestCase):
         plan = Policy(cfg).decide(states, self.now, Settings.read({}, cfg))
         self.assertAlmostEqual(plan.rooms["guest"]["temperature"], 70.8)
         self.assertEqual(plan.rooms["guest"]["sources"], 2)
-        self.assertFalse(any(external.entity_id in warning for warning in plan.warnings))
+        self.assertTrue(any(external.entity_id in warning and "unverified" in warning
+                            for warning in plan.warnings))
+        self.assertIsNone(plan.rooms["guest"]["observed_at"])
+        self.assertEqual(plan.rooms["guest"]["observation_id"], ())
+        evidence = {item["source"]: item for item in plan.rooms["guest"]["source_evidence"]}
+        self.assertEqual(evidence["external"]["freshness"], "change_only_unverified")
+        self.assertEqual(evidence["head"]["freshness"], "qualified")
 
         periodic_room = replace(room, probes=(replace(external, report_on_change=False), head))
         periodic = replace(cfg, zones={"guest": periodic_room})
@@ -134,10 +140,16 @@ class ProbeReportingTests(unittest.IsolatedAsyncioTestCase):
         cfg = Config.from_dict(self.cfg.to_dict())
         room_id = "guest"
         room = cfg.zones[room_id]
-        old_room = asdict(room)
-        old_room.pop("windows", None)  # This field did not exist in the saved format.
-        for probe in old_room["probes"]:
-            probe.pop("report_on_change", None)
+        # Pin the actual historical schema rather than letting additions to the
+        # current dataclasses silently change this pre-upgrade fixture.
+        old_room = {key: asdict(room)[key] for key in
+                    ("head", "probes", "name", "area_id", "profile", "schedules")}
+        old_room["probes"] = tuple({key: probe[key] for key in
+                                   ("entity_id", "source", "attribute", "unit", "offset_f")}
+                                  for probe in old_room["probes"])
+        old_room["schedules"] = tuple({key: period[key] for key in
+                                      ("start", "end", "profile", "name")}
+                                     for period in old_room["schedules"])
         old_payload = {
             "room": old_room, "head": cfg.heads[room.head],
             "timezone": self.hass.config.time_zone,
@@ -163,6 +175,12 @@ class ProbeReportingTests(unittest.IsolatedAsyncioTestCase):
                 replace(room.probes[0], report_on_change=True), *room.probes[1:]))
             changed = replace(cfg, zones={**cfg.zones, room_id: changed_room})
             self.assertNotEqual(manager._fingerprint(room_id, changed), fingerprint)
+            for field, value in (("observation_time_entity", "sensor.fixture_sample_time"),
+                                 ("require_active_entity", "fan.fixture_probe_airflow")):
+                changed_room = replace(room, probes=(
+                    replace(room.probes[0], **{field: value}), *room.probes[1:]))
+                changed = replace(cfg, zones={**cfg.zones, room_id: changed_room})
+                self.assertNotEqual(manager._fingerprint(room_id, changed), fingerprint)
         finally:
             await manager.async_close()
 

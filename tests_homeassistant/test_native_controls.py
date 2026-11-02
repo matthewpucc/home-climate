@@ -42,6 +42,8 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         await runtime.controls.async_set_enabled(True)
         await asyncio.to_thread(runtime.api.service, "input_boolean", "turn_on",
                                 entity_id=runtime.config.entity("heater_owned"))
+        if runtime.config.heater_entity in runtime.controls.owned:
+            runtime.controls.confirm_auxiliary_authorization()
 
     async def settle_watchdog(self, controls):
         await self.hass.async_block_till_done()

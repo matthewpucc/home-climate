@@ -105,6 +105,7 @@ class RetainedPowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_acknowledgement_does_not_shortcut_recent_trip_cooldown(self):
         self.saved["trip_wall"] = self.clock.wall
+        self.saved.pop("supply_policy_version", None)  # Legacy cooldown survives migration.
         await self.load(self.guard)
         self.refresh()
         self.assertTrue(await self.guard.async_acknowledge_emergency())
@@ -149,13 +150,14 @@ class RetainedPowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                         stamp = {"before_load": self.guard._retained_cut_claim_after,
                                  "stale": self.clock.wall - 181, "future": self.clock.wall + 6}[case]
                         self.hass.data[entity]["last_reported"] = datetime.fromtimestamp(stamp, timezone.utc).isoformat()
+                        if entity == B.heater_switch:
+                            self.hass.data[entity]["attributes"]["device_report"]["reported_at"] = datetime.fromtimestamp(stamp, timezone.utc).isoformat()
                     await self.rejected()
                     self.hass.data[entity] = original
 
     async def test_unsafe_or_invalid_electrical_inputs_are_rejected(self):
         cases = ((B.battery, 40), (B.battery, 39), (B.battery, "unavailable"),
-                 (B.input_power, 1300), (B.input_power, "unknown"),
-                 (B.output_power, "NaN"), (B.wall_phase_a_voltage, 89),
+                 (B.output_power, "NaN"),
                  (WATTS, 100), (WATTS, 1500), (WATTS, "NaN"), (WATTS, "unavailable"),
                  (B.heater, "heat"), (B.heater_switch, "off"))
         for entity, value in cases:
@@ -165,8 +167,7 @@ class RetainedPowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.hass.set(entity, value)
                 await self.rejected()
                 self.hass.data[entity] = original
-        for entity in (B.input_power, B.output_power, B.battery, B.wall_phase_a_voltage,
-                       B.wall_phase_b_voltage):
+        for entity in (B.output_power, B.battery, B.ac_output_switch):
             for flag in ("restored", "assumed_state"):
                 with self.subTest(entity=entity, flag=flag):
                     self.refresh()
@@ -174,20 +175,13 @@ class RetainedPowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     await self.rejected()
                     del self.hass.data[entity]["attributes"][flag]
 
-    async def test_output_exception_is_preserved_and_requires_qualifying_circuit(self):
+    async def test_retained_acknowledgement_has_no_watt_ceiling_or_circuit_dependency(self):
         self.refresh()
-        self.hass.set(B.output_power, 2500)
-        for case in ("missing", "stale", "restored", "assumed_state", "nonfinite", "unavailable"):
-            with self.subTest(case=case):
-                original = deepcopy(self.hass.data[B.circuit_power])
-                self.hass.data[B.circuit_power] = base.advisory_report(self.clock, case)
-                await self.rejected()
-                self.hass.data[B.circuit_power] = original
-        self.hass.set(B.circuit_power, 0)
-        await self.rejected()
-        self.hass.set(B.circuit_power, 150)
+        self.hass.set(B.output_power, 5000)
+        self.hass.set(B.input_power, 5000)
+        self.hass.set(B.circuit_power, "unavailable")
         self.assertTrue(await self.guard.async_acknowledge_emergency())
-        self.assertTrue(self.guard._reading.output_limits_bypassed)
+        self.assertFalse(self.guard.switch_cut_owned)
         self.assertEqual(self.hass.calls, [])
 
     async def test_pending_jobs_controller_activity_and_missing_storage_are_rejected(self):
@@ -329,6 +323,39 @@ class RetainedPowerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 self.hass.data.update(original_states)
                 self.guard.pending_external_jobs = lambda: ()
                 self.guard.recovery_controller_off = lambda: True
+
+    async def test_read_only_physical_reply_recovers_unchanged_relay_without_cache_write(self):
+        self.refresh()
+        self.hass.data[B.heater_switch]['attributes'].pop('device_report')
+        old = deepcopy(self.hass.data[B.heater_switch])
+        self.guard.async_read_recovery_feedback = AsyncMock(return_value='on')
+        self.assertTrue(await self.guard.async_acknowledge_emergency())
+        self.guard.async_read_recovery_feedback.assert_awaited_once_with(B.heater_switch)
+        self.assertEqual(self.hass.data[B.heater_switch], old)
+        self.assertEqual(self.hass.calls, [])
+        self.assertFalse(self.saved['switch_cut_owned'])
+
+    async def test_physical_read_failure_does_not_reuse_an_earlier_internal_reply(self):
+        self.refresh()
+        self.hass.data[B.heater_switch]['attributes'].pop('device_report')
+        self.guard.async_read_recovery_feedback = AsyncMock(return_value='on')
+        await self.guard._refresh_recovery_feedback()
+        self.assertIn(B.heater_switch, self.guard._recovery_feedback)
+        self.guard.async_read_recovery_feedback.side_effect = TimeoutError()
+        await self.rejected()
+        self.assertNotIn(B.heater_switch, self.guard._recovery_feedback)
+
+    async def test_relay_transition_during_read_cannot_authenticate_older_on_reply(self):
+        self.refresh()
+        self.hass.data[B.heater_switch]['attributes'].pop('device_report')
+        async def read(entity):
+            self.hass.set(entity, 'off')
+            self.hass.set(entity, 'on')
+            self.hass.data[entity]['attributes'].pop('device_report')
+            return 'on'
+        self.guard.async_read_recovery_feedback = read
+        await self.rejected()
+        self.assertNotIn(B.heater_switch, self.guard._recovery_feedback)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,8 @@ async def async_setup_entry(hass, entry):
         hass.config_entries.async_update_entry(entry, title=NAME)
     runtime = ControllerRuntime(
         hass, config, live, house_policy=values.get("policy") == "house",
-        power_bindings=bindings.power if bindings is not None else None)
+        power_bindings=bindings.power if bindings is not None else None,
+        notification_settings=getattr(bindings, "notifications", None))
     await runtime.async_setup_controls(entry.entry_id)
     entry.runtime_data = runtime
     hass.data[DOMAIN] = runtime
@@ -81,6 +82,17 @@ async def async_setup_entry(hass, entry):
         except (RuntimeError, ValueError) as exc:
             raise HomeAssistantError(str(exc)) from exc
 
+    async def approve_heater_restore(call):
+        if (hass.data.get(DOMAIN) is not runtime or runtime.stop_event.is_set()
+                or runtime.power_guard is None):
+            raise HomeAssistantError("Heater recovery is unavailable")
+        try:
+            await runtime.power_guard.async_approve_restore(confirm=call.data["confirm"])
+        except (RuntimeError, ValueError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
+    hass.services.async_register(DOMAIN, "approve_heater_restore", approve_heater_restore,
+        schema=vol.Schema({vol.Required("confirm"): vol.All(bool, vol.In((True,)))}))
     hass.services.async_register(DOMAIN, "generate_package", generate_package)
     hass.services.async_register(
         DOMAIN, "commission_heater_relay", commission_heater_relay,
@@ -100,6 +112,7 @@ async def async_unload_entry(hass, entry):
     if unloaded:
         hass.services.async_remove(DOMAIN, "generate_package")
         hass.services.async_remove(DOMAIN, "commission_heater_relay")
+        hass.services.async_remove(DOMAIN, "approve_heater_restore")
         hass.data.pop(DOMAIN, None)
     return unloaded
 

@@ -13,6 +13,7 @@ from homeassistant.helpers import config_validation as cv
 from custom_components.house_climate.config_flow import HouseClimateConfigFlow, HouseClimateOptionsFlow
 from custom_components.house_climate.controller.bindings import BINDINGS_FILENAME, example_bindings
 from custom_components.house_climate.controller.protection import ProtectionTemperatures
+from custom_components.house_climate.configuration import entry_configuration
 from tests_homeassistant import test_native as fixtures
 
 
@@ -62,23 +63,28 @@ class FixedFlowTests(unittest.IsolatedAsyncioTestCase):
         manager, form, _ = await self.start()
         fields = probatio.to_field_list(form["data_schema"], custom_serializer=cv.custom_serializer)
         self.assertEqual([field["name"] for field in fields],
-                         ["live", *ProtectionTemperatures().to_dict()])
+                         ["live", *ProtectionTemperatures().to_dict(), "rooms", "auxiliary_policy",
+                          "seasonal_policy", "fallback", "heartbeat_timeout_seconds",
+                          "auxiliary_heartbeat_timeout_seconds"])
         self.assertEqual(form["step_id"], "user")
         self.assertFalse(form["data_schema"]({})["live"])
         saved = await manager.async_configure(form["flow_id"], {"live": False})
         self.assertEqual(saved["type"], "create_entry")
-        self.assertEqual(saved["data"], {"policy": "house", "live": False,
-                                         "protection": ProtectionTemperatures().to_dict()})
+        self.assertEqual({key: value for key, value in saved["data"].items() if key != "policy_settings"},
+                         {"policy": "house", "live": False, "protection": ProtectionTemperatures().to_dict()})
+        self.assertEqual(saved["data"]["policy_settings"]["fallback"],
+                         {"heat_low_f": 68, "cool_high_f": 73, "fan_percentage": 40})
         self.assertEqual(self.calls, [])
 
-    async def test_options_use_latest_live_permission_and_save_no_tuning(self):
+    async def test_options_use_latest_live_permission_and_save_editable_policy(self):
         entry = SimpleNamespace(data={"policy": "house", "live": False}, options={"live": True})
         manager, form, _ = await self.start(options=True, entry=entry)
         self.assertEqual(form["step_id"], "init")
         self.assertTrue(form["data_schema"]({})["live"])
         saved = await manager.async_configure(form["flow_id"], {"live": False})
-        self.assertEqual(saved["data"], {"policy": "house", "live": False,
-                                         "protection": ProtectionTemperatures().to_dict()})
+        self.assertEqual({key: value for key, value in saved["data"].items() if key != "policy_settings"},
+                         {"policy": "house", "live": False, "protection": ProtectionTemperatures().to_dict()})
+        self.assertIn("rooms", saved["data"]["policy_settings"])
         self.assertEqual(entry.options, {"live": True})
         self.assertEqual(self.calls, [])
 
@@ -95,7 +101,7 @@ class FixedFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_removed_tuning_fields_are_rejected_by_real_form_dispatch(self):
         manager, form, _ = await self.start()
         with self.assertRaises(InvalidData):
-            await manager.async_configure(form["flow_id"], {"live": True, "heartbeat_timeout_seconds": 900})
+            await manager.async_configure(form["flow_id"], {"live": True, "head_minimum_off_seconds": 0})
         self.assertEqual(manager.completed, [])
         self.assertEqual(self.calls, [])
 
@@ -117,6 +123,40 @@ class FixedFlowTests(unittest.IsolatedAsyncioTestCase):
         manager, _, _ = await self.start()
         result = await manager.editor.async_step_user({"live": "false"})
         self.assertEqual(result["errors"], {"base": "invalid_config"})
+        self.assertEqual(self.calls, [])
+
+    async def test_room_policy_peak_hours_and_recovery_edits_save_atomically(self):
+        manager, form, _ = await self.start()
+        saved = await manager.async_configure(form["flow_id"], {
+            "live": False,
+            "rooms": {"office": {"profile": {"target_f": 72, "priority": 3}}},
+            "auxiliary_policy": {"peak_start": "16:30"},
+            "fallback": {"fan_percentage": 45},
+            "heartbeat_timeout_seconds": 240,
+        })
+        config = entry_configuration(self.directory.name, saved["data"])
+        self.assertEqual(config.zones["office"].profile.target_f, 72)
+        self.assertEqual(config.zones["office"].profile.priority, 3)
+        self.assertTrue(config.zones["office"].schedules)
+        self.assertEqual(config.auxiliary_policy.peak_start, "16:30")
+        self.assertEqual(config.auxiliary_policy.peak_end, "21:00")
+        self.assertEqual(config.fallback.fan_percentage, 45)
+        self.assertEqual(config.fallback.heat_low_f, 68)
+        self.assertEqual(config.heartbeat_timeout_seconds, 240)
+        self.assertEqual(self.calls, [])
+
+    async def test_conflicting_weekly_schedule_does_not_partially_save_other_changes(self):
+        manager, form, _ = await self.start()
+        result = await manager.async_configure(form["flow_id"], {
+            "live": True, "fallback": {"fan_percentage": 55},
+            "rooms": {"office": {"schedules": [
+                {"start": "22:00", "end": "08:00", "weekdays": [6], "target_f": 70},
+                {"start": "07:00", "end": "09:00", "weekdays": [0], "target_f": 71},
+            ]}},
+        })
+        self.assertEqual(result["type"], "form")
+        self.assertEqual(result["errors"], {"base": "invalid_config"})
+        self.assertEqual(manager.completed, [])
         self.assertEqual(self.calls, [])
 
 

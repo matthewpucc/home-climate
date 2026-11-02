@@ -9,7 +9,10 @@ from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
-    async_add_entities([ControllerEnabled(entry)])
+    entities = [ControllerEnabled(entry)]
+    if entry.runtime_data.controls is not None and entry.runtime_data.config.heater_entity:
+        entities.append(AuxiliaryManual(entry))
+    async_add_entities(entities)
 
 
 class ControllerEnabled(SwitchEntity):
@@ -72,4 +75,38 @@ class ControllerEnabled(SwitchEntity):
                 )
             self.runtime.wake_event.set()
         except (RuntimeError, ValueError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
+
+class AuxiliaryManual(ControllerEnabled):
+    """Explicit persistent takeover of the auxiliary, independent of other rooms."""
+    _attr_name = "Auxiliary manual control"
+    _attr_icon = "mdi:hand-back-right"
+
+    def __init__(self, entry):
+        super().__init__(entry)
+        self._attr_unique_id = f"{entry.entry_id}_auxiliary_manual"
+
+    @property
+    def is_on(self):
+        return self.runtime.controls.auxiliary_manual
+
+    @property
+    def extra_state_attributes(self):
+        return {"entity_id": self.runtime.controls.auxiliary_manual_entity,
+                "scope": "auxiliary_only", "persists_until_returned": True}
+
+    async def async_turn_on(self, **kwargs):
+        await self._set_manual(True)
+
+    async def async_turn_off(self, **kwargs):
+        await self._set_manual(False)
+
+    async def _set_manual(self, manual):
+        try:
+            if self.runtime.stop_event.is_set():
+                raise HomeAssistantError("Controller is stopping")
+            await self.runtime.controls.async_set_auxiliary_manual(manual)
+            self.runtime.wake_event.set()
+        except (RuntimeError, ValueError, OSError) as exc:
             raise HomeAssistantError(str(exc)) from exc

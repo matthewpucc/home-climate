@@ -41,6 +41,21 @@ class RoomComfortTests(unittest.IsolatedAsyncioTestCase):
         await comfort.async_load()
         return comfort
 
+    async def test_unchanged_house_policy_editor_preserves_all_room_fingerprints(self):
+        from custom_components.house_climate.controller.bindings import example_bindings
+        from custom_components.house_climate.controller.house_policy import (
+            editable_policy_settings, house_configuration)
+
+        bindings = example_bindings()
+        original = house_configuration(bindings=bindings)
+        reloaded = house_configuration(bindings=bindings,
+                                       policy_settings=editable_policy_settings(original, bindings))
+        before = await self.manager(original, "policy_before")
+        after = await self.manager(reloaded, "policy_after")
+        for room in original.zones:
+            with self.subTest(room=room):
+                self.assertEqual(before._fingerprint(room), after._fingerprint(room))
+
     async def test_desired_temperature_moves_band_within_limits_and_range_clamps_desired(self):
         comfort = await self.manager()
         await comfort.async_set_target("guest", 74)
@@ -79,16 +94,14 @@ class RoomComfortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(comfort.effective("guest"), before)
         self.assertEqual(await comfort.store.async_load(), saved)
 
-    async def test_auxiliary_cutoff_also_limits_dashboard_edits(self):
+    async def test_auxiliary_room_can_request_heat_pump_comfort_above_heater_cutoff(self):
         comfort = await self.manager()
-        self.assertEqual(comfort.bounds("living"), (66, 70))
-        with self.assertRaises(ValueError):
-            await comfort.async_set_range("living", 68, 71)
-        with self.assertRaises(ValueError):
-            await comfort.async_set_target("living", 71)
-        await comfort.async_set_target("living", 70)
+        self.assertEqual(comfort.bounds("living"), (66, 75))
+        await comfort.async_set_target("living", 71)
+        await comfort.async_set_range("living", 69, 73)
         effective = comfort.effective("living")
-        self.assertEqual((effective["low_f"], effective["high_f"], effective["target_f"]), (69, 70, 70))
+        self.assertEqual((effective["low_f"], effective["high_f"], effective["target_f"]), (69, 73, 71))
+        self.assertEqual(self.calls, [])
 
     async def test_daytime_edit_and_temporary_preset_enable_a_useful_comfort_band(self):
         self.now = datetime(2026, 10, 16, 20, tzinfo=timezone.utc)
@@ -97,7 +110,7 @@ class RoomComfortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(comfort.effective("primary")["low_f"], 69.5)
         self.assertEqual(comfort.effective("primary")["high_f"], 70.5)
         settings = comfort.settings({}, self.cfg, self.now)
-        self.assertEqual(Policy(self.cfg).band("primary", settings, self.now)[:2], (66, 75))
+        self.assertEqual(Policy(self.cfg).band("primary", settings, self.now)[:2], (69.5, 70.5))
         await comfort.async_set_target("primary", 71)
         current = comfort.effective("primary")
         self.assertTrue(current["comfort_enabled"])
@@ -120,10 +133,26 @@ class RoomComfortTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(effective["comfort_enabled"])
         self.assertFalse(effective["hold"])
         self.assertEqual((effective["low_f"], effective["high_f"], effective["target_f"]),
-                         (69, 70, 70))
+                         (73.5, 74.5, 74))
         settings = comfort.settings({}, config, self.now)
-        self.assertEqual(Policy(config).band("living", settings, self.now)[:2], (66, 75))
+        self.assertEqual(Policy(config).band("living", settings, self.now)[:2], (73.5, 74.5))
         self.assertEqual(config.zones["living"].profile.target_f, 74)
+
+    async def test_room_card_and_worker_follow_qualified_season_without_touching_devices(self):
+        from custom_components.house_climate.controller.house_policy import house_configuration
+        from custom_components.house_climate.controller.bindings import example_bindings
+        config = house_configuration(bindings=example_bindings())
+        self.now = datetime(2026, 11, 2, 20, tzinfo=timezone.utc)
+        comfort = await self.manager(config, "seasonal_cards")
+        self.assertEqual(comfort.effective("living")["target_f"], 69)
+        comfort.set_seasonal_profile("warm")
+        self.assertEqual(comfort.effective("living")["target_f"], 71)
+        self.assertEqual(comfort.effective("living")["high_f"], 73)
+        settings = comfort.settings({}, config, self.now)
+        self.assertEqual(settings.profile(config.zones["living"], self.now, config.timezone).target_f, 71)
+        comfort.set_seasonal_profile("invalid")
+        self.assertEqual(comfort.effective("living")["target_f"], 71)
+        self.assertEqual(self.calls, [])
 
     async def test_hold_preserves_schedule_priority_and_fan_percentage(self):
         comfort = await self.manager()

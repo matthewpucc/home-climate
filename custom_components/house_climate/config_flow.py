@@ -9,7 +9,7 @@ from homeassistant.helpers import selector
 
 from .const import DOMAIN, NAME
 from .house_policy import HOUSE_POLICY
-from .configuration import entry_configuration
+from .configuration import entry_configuration, entry_policy_settings
 from .controller.protection import PROTECTION_RANGES, ProtectionTemperatures
 
 
@@ -22,7 +22,7 @@ class _ProtectionNumber(selector.NumberSelector):
         return super().__call__(value)
 
 
-def _schema(live=False, protection=None):
+def _schema(live=False, protection=None, policy_settings=None):
     protection = protection or ProtectionTemperatures()
     data = {vol.Required("live", default=live): bool}
     for name, (minimum, maximum) in PROTECTION_RANGES.items():
@@ -36,6 +36,14 @@ def _schema(live=False, protection=None):
             selector.SelectSelectorConfig(options=[{"label": "Heating", "value": "heat"},
                                                    {"label": "Cooling", "value": "cool"}],
                                           mode=selector.SelectSelectorMode.DROPDOWN))
+    policy_settings = policy_settings or {}
+    for name in ("rooms", "auxiliary_policy", "seasonal_policy", "fallback"):
+        data[vol.Optional(name, default=policy_settings.get(name, {}))] = selector.ObjectSelector()
+    for name, default, minimum in (("heartbeat_timeout_seconds", 300, 60),
+                                    ("auxiliary_heartbeat_timeout_seconds", 120, 30)):
+        data[vol.Optional(name, default=policy_settings.get(name, default))] = _ProtectionNumber(
+            selector.NumberSelectorConfig(min=minimum, max=900, step=1,
+                mode=selector.NumberSelectorMode.BOX, unit_of_measurement="s"))
     return vol.Schema(data)
 
 
@@ -46,10 +54,30 @@ def _live(values):
     return live
 
 
-def _values(user_input, current):
+def _values(user_input, current, policy_settings=None):
     protection = ProtectionTemperatures.from_dict({
-        **current.to_dict(), **{key: value for key, value in user_input.items() if key != "live"}})
-    return {"policy": HOUSE_POLICY, "live": _live(user_input), "protection": protection.to_dict()}
+        **current.to_dict(), **{key: value for key, value in user_input.items() if key in current.to_dict()}})
+    policy = dict(policy_settings or {})
+    for key in ("rooms", "auxiliary_policy", "seasonal_policy", "fallback",
+                "heartbeat_timeout_seconds", "auxiliary_heartbeat_timeout_seconds"):
+        if key in user_input:
+            selected = user_input[key]
+            if key == "rooms" and isinstance(selected, dict):
+                rooms = dict(policy.get("rooms", {}))
+                for room, edits in selected.items():
+                    if not isinstance(edits, dict):
+                        raise ValueError("Room policy must be an object")
+                    rooms[room] = {**rooms.get(room, {}), **edits}
+                    if isinstance(edits.get("profile"), dict):
+                        rooms[room]["profile"] = {**policy.get("rooms", {}).get(room, {}).get("profile", {}),
+                                                  **edits["profile"]}
+                policy[key] = rooms
+            elif isinstance(selected, dict) and isinstance(policy.get(key), dict):
+                policy[key] = {**policy[key], **selected}
+            else:
+                policy[key] = selected
+    return {"policy": HOUSE_POLICY, "live": _live(user_input),
+            "protection": protection.to_dict(), "policy_settings": policy}
 
 
 class HouseClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -60,9 +88,16 @@ class HouseClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="single_instance_allowed")
         errors, detail = {}, ""
         protection = ProtectionTemperatures()
+        policy = {}
+        try:
+            policy = await self.hass.async_add_executor_job(
+                entry_policy_settings, self.hass.config.config_dir,
+                {"policy": HOUSE_POLICY, "live": False})
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            errors, detail = {"base": "invalid_config"}, str(exc)
         if user_input is not None:
             try:
-                values = _values(user_input, protection)
+                values = _values(user_input, protection, policy)
                 await self.hass.async_add_executor_job(
                     entry_configuration, self.hass.config.config_dir, values)
             except (OSError, KeyError, TypeError, ValueError) as exc:
@@ -71,7 +106,7 @@ class HouseClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(
                     title=NAME, data=values)
         return self.async_show_form(
-            step_id="user", data_schema=_schema(protection=protection), errors=errors,
+            step_id="user", data_schema=_schema(protection=protection, policy_settings=policy), errors=errors,
             description_placeholders={"detail": detail}, last_step=True)
 
     @staticmethod
@@ -85,13 +120,16 @@ class HouseClimateOptionsFlow(config_entries.OptionsFlow):
         values = {**self.config_entry.data, **self.config_entry.options}
         errors, detail = {}, ""
         protection = ProtectionTemperatures()
+        policy = values.get("policy_settings", {})
         try:
             protection = ProtectionTemperatures.from_dict(values.get("protection", {}))
-        except (TypeError, ValueError) as exc:
+            policy = await self.hass.async_add_executor_job(
+                entry_policy_settings, self.hass.config.config_dir, values)
+        except (OSError, KeyError, TypeError, ValueError) as exc:
             errors, detail = {"base": "invalid_config"}, str(exc)
         if user_input is not None:
             try:
-                selected = _values(user_input, protection)
+                selected = _values(user_input, protection, policy)
                 await self.hass.async_add_executor_job(
                     entry_configuration, self.hass.config.config_dir,
                     {**values, **selected})
@@ -101,5 +139,5 @@ class HouseClimateOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(
                     title="", data=selected)
         return self.async_show_form(
-            step_id="init", data_schema=_schema(values.get("live", False), protection), errors=errors,
+            step_id="init", data_schema=_schema(values.get("live", False), protection, policy), errors=errors,
             description_placeholders={"detail": detail}, last_step=True)

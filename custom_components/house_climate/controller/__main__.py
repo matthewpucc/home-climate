@@ -62,6 +62,10 @@ def release(ha, executor, event_callback=None, *, reason="Controller shutdown",
     report = event_callback or emit
     context = stop_context(executor.config, reason, cause, forced)
     announce_stop(report, context)
+    native_release = getattr(ha, "release_control", None)
+    if callable(native_release) and native_release(reason=reason, cause=cause, forced=forced):
+        report("handoff_requested", **context)
+        return
     failures = executor.shutdown(reason=reason)
     # Leave ownership armed if the off command was not acknowledged. HA keeps retrying.
     try:
@@ -128,6 +132,18 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                 plan = cadence.decide(states, now, settings, unit)
                 if args.live and enabled:
                     preflight(config, states, executor)
+                    if getattr(config, "auxiliary_dynamic_stop", False) and config.heater_entity and getattr(ha, "controls", None) is None:
+                        # The standalone HA watchdog independently re-reads probes
+                        # against the current deterministic stopping bound. Changing
+                        # this helper never renews either lease or starts equipment.
+                        bound = getattr(plan, "auxiliary_policy", {}).get("stop_target_f")
+                        if isinstance(bound, (int, float)) and not isinstance(bound, bool):
+                            import math
+                            upper = (config.protection.emergency_cooling_at_f if config.protection else config.high_f) - 1
+                            if math.isfinite(bound) and 40 <= bound <= upper:
+                                entity = config.entity("auxiliary_stop_limit_f", "input_number")
+                                if states.get(entity, {}).get("state") != str(bound):
+                                    ha.service("input_number", "set_value", entity_id=entity, value=bound)
                     if plan.heater_on and states.get(config.entity("auxiliary_probe_safe", "binary_sensor"), {}).get("state") != "on":
                         plan.heater_on = False
                         plan.warnings.append("HA independent probe check blocks auxiliary heat")
@@ -150,6 +166,14 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         if states[config.entity("heater_owned")]["state"] != "on":
                             raise ControlFault("Heater ownership was removed; refusing further activation")
                         ha.service("input_datetime", "set_datetime", entity_id=config.entity("heartbeat", "input_datetime"), timestamp=now.timestamp())
+                        authorize = getattr(ha, "authorize_auxiliary", None)
+                        if callable(authorize):
+                            if not authorize(plan, states):
+                                plan.heater_on = plan.auxiliary_fan_only = False
+                        elif config.heater_entity and (plan.heater_on or plan.auxiliary_fan_only):
+                            ha.service("input_datetime", "set_datetime",
+                                entity_id=config.entity("auxiliary_authorization", "input_datetime"),
+                                timestamp=now.timestamp())
                         executor.step(plan, states, time.monotonic())
                         status = (f"Requested {plan.mode}; {executor.phase}. " + "; ".join(plan.reasons + plan.warnings))[:255]
                         if states.get(config.entity("status", "input_text"), {}).get("state") != status:
@@ -173,6 +197,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                        head_stop_reasons=recovery["head_stop_reasons"],
                        head_transition_history=recovery["head_transition_history"],
                        pending_head_commands=recovery["pending_head_commands"],
+                       shared_stop=recovery.get("shared_stop", {}),
                        **cadence.status(), **plan.as_dict())
                 faults = 0
             except Exception as exc:

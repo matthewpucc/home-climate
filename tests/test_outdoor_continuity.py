@@ -188,13 +188,21 @@ class OutdoorContinuityTests(unittest.TestCase):
         self.assertEqual((qualified.outdoor_selected_role, qualified.valid_until_monotonic),
                          ("primary", 1800))
 
-    def test_observed_fallback_with_overlapping_coverage_can_keep_qualification(self):
+    def test_warm_fallback_cannot_clear_missing_local_freeze_protection(self):
         self.primary_and_weather()
         self.snapshot(0, (-1700, 50), (-5100, 50))
         fallback = self.snapshot(200, (-1700, 50), (-5100, 50))
-        self.assert_context(fallback, "unqualified", 65)
+        self.assert_context(fallback, "unknown", 65)
         self.assertEqual(fallback.outdoor_selected_role, "fallback")
-        self.assert_context(self.snapshot(300, second=(200, 50)), "warm", 60)
+        self.assert_context(self.snapshot(300, second=(200, 50)), "unknown", 65)
+        self.assertTrue(any("regional warmth" in warning for warning in fallback.warnings))
+
+    def test_cold_fallback_with_overlapping_coverage_can_keep_qualification(self):
+        self.primary_and_weather()
+        self.snapshot(0, (-1700, 20), (-5100, 20))
+        fallback = self.snapshot(200, (-1700, 20), (-5100, 20))
+        self.assert_context(fallback, "unqualified", 65)
+        self.assert_context(self.snapshot(300, second=(200, 20)), "cold", 65)
 
     def test_missing_poll_does_not_invent_historical_fallback_selection(self):
         self.primary_and_weather()

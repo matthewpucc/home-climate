@@ -26,7 +26,7 @@ class LivingDysonTests(unittest.TestCase):
         self.assertTrue(plan.heater_on)
         self.assertFalse(plan.auxiliary_fan_only)
         plan = self.decide(68.2)
-        self.assertTrue(plan.heater_on)
+        self.assertFalse(plan.heater_on)  # Off-peak assistance stops at the room target.
         self.assertFalse(plan.auxiliary_fan_only)
         plan = self.decide(71)
         self.assertFalse(plan.heater_on)

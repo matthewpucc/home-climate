@@ -95,6 +95,15 @@ class RoomComfort:
         self._remove_expiry = None
         self._expiry_task = None
         self._closed = False
+        self._seasonal_profile = config.seasonal_policy.initial_profile
+
+    @callback
+    def set_seasonal_profile(self, profile):
+        """Reflect the planner's qualified seasonal profile on room cards."""
+        if profile not in ("cool", "warm") or profile == self._seasonal_profile:
+            return
+        self._seasonal_profile = profile
+        self.notify()
 
     @staticmethod
     def _now():
@@ -111,12 +120,9 @@ class RoomComfort:
             raise ValueError("Unknown configured room") from None
 
     def bounds(self, room_id):
-        """Editable Fahrenheit limits, including the auxiliary heater cutoff."""
+        """Room comfort limits are independent of the auxiliary thermostat."""
         self._room(room_id)
-        high = self.config.high_f
-        if room_id == self.config.auxiliary_room:
-            high = min(high, self.config.heater_cutoff_f)
-        return self.config.low_f, high
+        return self.config.low_f, self.config.high_f
 
     def _fingerprint(self, room_id, config=None):
         config = config or self.config
@@ -129,10 +135,22 @@ class RoomComfort:
         # Contact wiring does not change the room's thermostat hold or identity.
         # Preserve fingerprints written before optional windows existed, too.
         data["room"].pop("windows", None)
+        if not data["room"].get("seasonal_profiles"):
+            data["room"].pop("seasonal_profiles", None)
+        for period in data["room"]["schedules"]:
+            if tuple(period.get("weekdays", ())) == tuple(range(7)):
+                period.pop("weekdays", None)
+            if not period.get("all_day"):
+                period.pop("all_day", None)
+            if not period.get("seasonal_profiles"):
+                period.pop("seasonal_profiles", None)
         # Preserve fingerprints stored before report-on-change probes existed.
         for probe in data["room"]["probes"]:
             if not probe.get("report_on_change", False):
                 probe.pop("report_on_change", None)
+            for name in ("observation_time_entity", "require_active_entity"):
+                if probe.get(name) is None:
+                    probe.pop(name, None)
         return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def _states(self):
@@ -154,6 +172,7 @@ class RoomComfort:
     def _base(self, room_id, now):
         room = self._room(room_id)
         settings = Settings.read(self._states(), self.config)
+        settings.seasonal_profile = self._seasonal_profile
         return settings, settings.profile(room, now, self._timezone)
 
     def _active(self, room_id, now, config=None):
@@ -201,6 +220,7 @@ class RoomComfort:
     def settings(self, states, config, now, strict=False):
         """Worker-side provider; expired holds are ignored even if HA is busy."""
         settings = Settings.read(states, config, strict=strict)
+        settings.seasonal_profile = self._seasonal_profile
         profiles = {}
         for room_id, room in config.zones.items():
             hold = self._active(room_id, now, config)

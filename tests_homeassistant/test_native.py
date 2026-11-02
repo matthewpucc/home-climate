@@ -295,8 +295,11 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(form["data_schema"]({})["live"])
         result = await flow.async_step_user({"live": False})
         self.assertEqual(result["type"], "create_entry")
+        from custom_components.house_climate.configuration import entry_policy_settings
         self.assertEqual(result["data"], {"policy": "house", "live": False,
-                                          "protection": ProtectionTemperatures().to_dict()})
+                                          "protection": ProtectionTemperatures().to_dict(),
+                                          "policy_settings": entry_policy_settings(
+                                              self.directory.name, {"policy": "house", "live": False})})
         self.assertFalse(hasattr(flow, "async_step_import_file"))
         flow._async_current_entries = Mock(return_value=[object()])
         self.assertEqual((await flow.async_step_user())["type"], "abort")

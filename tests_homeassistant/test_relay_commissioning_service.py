@@ -1,6 +1,7 @@
 """Validate deliberate relay commissioning through HA's service registry."""
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timezone
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -26,7 +27,7 @@ class RelayCommissioningServiceTests(unittest.IsolatedAsyncioTestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.directory.name)
         self.config = house_configuration(bindings=example_bindings())
-        self.guard = SimpleNamespace(async_commission_relay=AsyncMock())
+        self.guard = SimpleNamespace(async_commission_relay=AsyncMock(), async_approve_restore=AsyncMock())
         self.runtime = SimpleNamespace(
             config=self.config, live=True, stop_event=threading.Event(),
             power_guard=self.guard, async_setup_controls=AsyncMock(),
@@ -112,13 +113,31 @@ class RelayCommissioningServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         self.assertEqual(self.guard.async_commission_relay.await_count, 1)
 
+    async def test_restore_approval_requires_explicit_boolean_and_surfaces_rejection(self):
+        async def approve(data):
+            return await self.hass.services.async_call(DOMAIN, "approve_heater_restore", data, blocking=True)
+        for data in ({}, {"confirm": False}, {"confirm": 1}, {"confirm": "true"}):
+            with self.subTest(data=data), self.assertRaises(vol.Invalid):
+                await approve(data)
+        self.guard.async_approve_restore.assert_not_awaited()
+        self.guard.async_approve_restore.side_effect = RuntimeError("Physical relay feedback required")
+        with self.assertRaisesRegex(HomeAssistantError, "Physical relay"):
+            await approve({"confirm": True})
+        self.guard.async_approve_restore.assert_awaited_once_with(confirm=True)
+        self.runtime.stop_event.set()
+        with self.assertRaisesRegex(HomeAssistantError, "unavailable"):
+            await approve({"confirm": True})
+        self.assertEqual(self.guard.async_approve_restore.await_count, 1)
+
     async def test_successful_unload_removes_action_but_deferred_unload_preserves_it(self):
         self.runtime.async_stop.return_value = False
         self.assertFalse(await integration.async_unload_entry(self.hass, self.entry))
         self.assertTrue(self.hass.services.has_service(DOMAIN, "commission_heater_relay"))
+        self.assertTrue(self.hass.services.has_service(DOMAIN, "approve_heater_restore"))
         self.runtime.async_stop.return_value = True
         self.assertTrue(await integration.async_unload_entry(self.hass, self.entry))
         self.assertFalse(self.hass.services.has_service(DOMAIN, "commission_heater_relay"))
+        self.assertFalse(self.hass.services.has_service(DOMAIN, "approve_heater_restore"))
         self.assertNotIn(DOMAIN, self.hass.data)
 
 
@@ -170,14 +189,13 @@ class RelayCommissioningOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.runtime._commissioning_controller_off())
         self.assertTrue(self.runtime._commissioning_controller_off())
 
-    async def test_preview_recovery_requires_idle_controller_without_allowing_commissioning(self):
+    async def test_preview_recovery_requires_stopped_auxiliary_without_allowing_commissioning(self):
         self.runtime.live = self.controls.live = False
+        self.runtime.power_guard = SimpleNamespace(blocked=True)
         self.assertTrue(self.runtime._recovery_controller_off())
         self.assertFalse(self.runtime._commissioning_controller_off())
-        for field, value in (("enabled", True), ("owned", ("climate.fixture_head",)),
-                             ("pending_fans", ("fan.fixture_transfer",)), ("active", False),
-                             ("recovering", True), ("_closing", True), ("_claiming", True),
-                             ("inflight", 1), ("service_inflight", 1), ("auxiliary_inflight", 1)):
+        for field, value in (("active", False), ("_closing", True), ("_claiming", True),
+                             ("auxiliary_inflight", 1)):
             with self.subTest(field=field):
                 old = getattr(self.controls, field)
                 setattr(self.controls, field, value)
@@ -202,7 +220,7 @@ class RelayCommissioningOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(runtime.power_guard.recovery_controller_off())
             self.assertFalse(runtime.power_guard.commissioning_controller_off())
             runtime.controls.enabled = True
-            self.assertFalse(runtime.power_guard.recovery_controller_off())
+            self.assertTrue(runtime.power_guard.recovery_controller_off())
             runtime.controls.enabled = False
         finally:
             await runtime.async_stop()
@@ -282,6 +300,8 @@ class NativeGuardCommissioningTests(unittest.IsolatedAsyncioTestCase):
             self.hass.states.async_set(entity, value, {"unit_of_measurement": unit})
         self.hass.states.async_set(self.bindings.heater, "off", {"hvac_action": "off"})
         self.hass.states.async_set(self.bindings.heater_switch, "on")
+        self.hass.states.async_set(self.bindings.ac_output_switch, "on", {"device_report": {
+            "state": "on", "reported_at": datetime.now(timezone.utc).isoformat()}})
         await self.guard.async_load()
         self.guard.async_start()
         await self.hass.async_block_till_done()
@@ -342,6 +362,8 @@ class NativeGuardCommissioningTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HomeAssistantError):
             await self.invoke({"confirm": True})
         self.hass.states.async_set(self.bindings.heater_switch, "on")
+        self.hass.states.async_set(self.bindings.ac_output_switch, "on", {"device_report": {
+            "state": "on", "reported_at": datetime.now(timezone.utc).isoformat()}})
         await self.hass.async_block_till_done()
         self.assertFalse(self.guard.commissioning_active)
         self.assertTrue(self.guard.diagnostics["manual_recovery_required"])

@@ -75,7 +75,7 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
                          "Would cool shared head toward 72 °F (head setpoint 67 °F) · comfort 71.5 °F–72.5 °F")
         # The second area shares the head's target, not an invented independent target.
         self.assertEqual(self.rendered(RoomPlan(entry, "beta")),
-                         "Would cool shared head toward 72 °F (head setpoint 67 °F) · limits only 66 °F–75 °F")
+                         "Would cool shared head toward 72 °F (head setpoint 67 °F) · limits only 69.5 °F–70.5 °F")
         self.assertEqual(self.rendered(CurrentIssues(entry)), "None")
         self.assertEqual(ControllerStatus(entry).native_value, "shadow")
         self.assertEqual(self.calls, [])
@@ -94,7 +94,7 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
         fan = cfg.fan_controls["fan.test_rest"]
         # UTC 23:00 is 16:00 locally: base limits and fan off.
         self.decide(entry, {"gamma": 68})
-        self.assertIn("limits only 66 °F–75 °F", self.rendered(RoomPlan(entry, "gamma")))
+        self.assertIn("limits only 69.5 °F–70.5 °F", self.rendered(RoomPlan(entry, "gamma")))
         self.assertEqual(self.rendered(FanPlan(entry, fan, "Rest fan")), "0")
         # UTC 06:00 next day is 23:00 locally: the sleep profile applies.
         self.decide(entry, {"gamma": 68}, now=NOW + timedelta(hours=7))

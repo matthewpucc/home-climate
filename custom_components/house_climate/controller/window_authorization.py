@@ -152,8 +152,8 @@ class WindowAuthorizationResult:
 
 
 def window_relief_required(config, head, plan, states):
-    """Only cooling which relies on confirmed-open soft relief needs a ticket."""
-    if plan.mode != "cool" or head not in plan.head_targets_f:
+    """Conditioning relying on confirmed-open soft relief needs a ticket."""
+    if plan.mode not in ("heat", "cool") or head not in plan.head_targets_f:
         return False
     context = plan.protection_context
     opened = set(context.get("confirmed_open_rooms", ()))
@@ -163,7 +163,7 @@ def window_relief_required(config, head, plan, states):
     # Dependence is measured against ordinary comfort, including when the old
     # measured-deficit relief has also qualified. It cannot bypass this fence.
     without_relief = {**context, "confirmed_open_rooms": (), "window_effects": {}}
-    ordinary = head_constraint(config, head, "cool", plan.rooms, plan.room_targets,
+    ordinary = head_constraint(config, head, plan.mode, plan.rooms, plan.room_targets,
         protection=plan.head_protections.get(head), rearm=True, context=without_relief)
     return bool(ordinary and ordinary.get("kind") in {"comfort_limit", "comfort_rearm"})
 
