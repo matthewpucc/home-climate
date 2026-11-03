@@ -29,9 +29,9 @@ Acknowledgement counts deduplicate repeated acceptance of the same receipt (or
 isolation epoch). The download's sequence numbers provide event ordering if the
 wall clock jumps; wall timestamps alone must not be used to infer elapsed time.
 The diagnostics instrument worker/watchdog operations and the native controls'
-accepted stop evidence. Independent guard-internal service attempts, relay/AC
-commands and physical acknowledgements are outside these operation counters;
-existing heater-power diagnostics describe those paths.
+accepted stop evidence. Independent guard-internal service attempts and relay/AC commands are outside
+these worker/watchdog counters. The separate [shutdown observation stream](emergency-shutdown-diagnostics.md)
+records guard actions, evidence and unattributed HA Off requests.
 
 ## Current values and freshness
 
@@ -82,8 +82,9 @@ between the last successful sample and a restart can be lost; exact complete eve
 traces across restarts are not promised.
 
 The integration's **Download diagnostics** contains only this bounded observation
-history, counters and times, without configuration, live input snapshots, free-form
-errors or device IDs. It is an in-memory recent window, not a durable event journal.
+history, counters and times, without configuration or raw live input snapshots.
+The separate shutdown stream adds bounded trigger text that can contain installation-specific names;
+it excludes raw service payloads and HA context/user IDs. It is an in-memory recent window, not a durable event journal.
 History is not repeated in entity attributes on every update.
 
 ## Recorder and direct Prometheus collection

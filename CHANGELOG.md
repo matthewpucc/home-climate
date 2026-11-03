@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Extend native diagnostics with bounded guard trip/Off-job/electrical evidence and explicitly unattributed HA Off requests. Keep local guard execution separate from unknown external callers, service completion separate from feedback, and whole-supply drop corroboration separate from dedicated load. No control-policy or live configuration changes. See `docs/emergency-shutdown-diagnostics.md`.
+
 - Add native auxiliary authorization and Off-operation diagnostic sensors with cumulative event counts, precise event times, ownership/freshness evidence and bounded downloadable history. Export numeric states directly through Home Assistant Prometheus without helpers. Diagnostics are observational and reset on integration reload; control policy, safety timing and command behavior are unchanged. See `docs/auxiliary-diagnostics.md`.
 
 ## 0.9.3

@@ -13,6 +13,7 @@ from homeassistant.helpers import entity_registry as er
 from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 from .controller.sensors import from_f, to_f
 from .auxiliary_diagnostics import EVENTS
+from .controller.shutdown_diagnostics import METRICS as SHUTDOWN_METRICS
 
 
 def short(text):
@@ -402,6 +403,10 @@ async def async_setup_entry(hass, entry, async_add_entities):
         if getattr(entry.runtime_data, "controls", None) is not None:
             diagnostics = AuxiliaryDiagnosticGroup(entry.runtime_data.controls)
             entities.extend(AuxiliaryDiagnostic(entry, diagnostics, key) for key in AUXILIARY_METRICS)
+        guard = getattr(entry.runtime_data, "power_guard", None)
+        if guard is not None and hasattr(guard, "shutdown_observations"):
+            diagnostics = ShutdownDiagnosticGroup(guard)
+            entities.extend(AuxiliaryDiagnostic(entry, diagnostics, key) for key in SHUTDOWN_METRICS)
 
     # Preserve existing temperature IDs/history and remove obsolete plan entities
     # when rooms, fans, or the auxiliary heater are removed in Configure.
@@ -499,8 +504,12 @@ class AuxiliaryDiagnostic(ControllerEntity):
             # numeric, without claiming these epoch values are durations.
             self._attr_native_unit_of_measurement = "s"
             self._attr_suggested_display_precision = 6
-        elif key.endswith("_count") or key in ("sequence", "observation_errors"):
+        elif key.endswith("_count") or key in ("sequence", "observation_errors", "shutdown_sequence", "shutdown_observation_errors"):
             self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        elif key.endswith("_w"):
+            self._attr_native_unit_of_measurement = "W"
+        elif key.endswith("_a"):
+            self._attr_native_unit_of_measurement = "A"
 
     async def async_added_to_hass(self):
         self.async_on_remove(self._diagnostic_group.connect(self.hass, self._updated))
@@ -511,7 +520,15 @@ class AuxiliaryDiagnostic(ControllerEntity):
 
     @property
     def extra_state_attributes(self):
-        return self._diagnostic_group.attributes if self.key == "sequence" else None
+        return self._diagnostic_group.attributes if self.key in ("sequence", "shutdown_sequence") else None
+
+
+class ShutdownDiagnosticGroup(AuxiliaryDiagnosticGroup):
+    @callback
+    def refresh(self, *_):
+        self.values, self.attributes = self.controls.shutdown_observations.values(time.time())
+        for listener in tuple(self.listeners):
+            listener()
 
 
 class ControllerStatus(ControllerEntity):

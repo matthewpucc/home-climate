@@ -18,6 +18,7 @@ from homeassistant.helpers.entity_values import EntityValues
 
 from custom_components.house_climate.const import DOMAIN
 from custom_components.house_climate.controls import NativeControls
+from custom_components.house_climate.controller.shutdown_diagnostics import ShutdownDiagnostics
 from custom_components.house_climate.sensor import AuxiliaryDiagnostic, AUXILIARY_METRICS, async_setup_entry
 from tests_homeassistant import test_auxiliary_diagnostics as diagnostic_tests
 
@@ -155,3 +156,49 @@ class AuxiliaryPrometheusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sample(samples, 'authorization_renewed_count')[0].value, 0)
         self.assertEqual(self.sample(samples, 'ownership_retained')[0].value, 1)
         self.assertEqual(self.sample(samples, 'authorization_valid'), [])
+
+    async def test_shutdown_metrics_export_numeric_evidence_and_withdraw_stale_samples(self):
+        import time
+        from custom_components.house_climate.sensor import SHUTDOWN_METRICS
+        now = time.time()
+        observations = ShutdownDiagnostics()
+        guard = SimpleNamespace(shutdown_observations=observations, _wall_clock=lambda: now,
+            _last_observation_wall=now, _off_request_wall=now - 5,
+            _cut_request_wall=None, _emergency_ac_request_wall=None)
+        self.controller.power_guard = guard
+        added = []
+        try:
+            await async_setup_entry(self.hass, self.entry, added.extend)
+        finally:
+            self.controller.power_guard = None
+        sensors = [sensor for sensor in added if isinstance(sensor, AuxiliaryDiagnostic)
+                   and sensor.key in SHUTDOWN_METRICS]
+        self.assertEqual({sensor.key for sensor in sensors}, set(SHUTDOWN_METRICS))
+        for sensor in sensors:
+            sensor.entity_id = f'sensor.home_climate_auxiliary_{sensor.key}'
+            self.sensors[sensor.key] = sensor
+        await self.platform.async_add_entities(sensors)
+        self.group = sensors[0]._diagnostic_group
+        observations.record('guard_trip', at=now, reason='Synthetic reserve cutoff')
+        observations.capture(guard, {'power_cut_confirmed': True, 'electrical_stop_confirmed': True,
+            'heater_power_w': 4, 'aggregate_stop': {'status': 'corroborated', 'classification': 'drop',
+            'baseline_w': 1400, 'latest_w': 100}})
+        samples, text = await self.scrape()
+        for key in SHUTDOWN_METRICS:
+            metric = ('homeassistant_sensor_unit_s' if key.endswith('_at') else
+                      'homeassistant_sensor_unit_w' if key.endswith('_w') else
+                      'homeassistant_sensor_unit_a' if key.endswith('_a') else 'homeassistant_sensor_state')
+            series = self.sample(samples, key, metric)
+            value = self.group.values[key]
+            if value is None:
+                self.assertEqual(series, [], key)
+            else:
+                self.assertAlmostEqual(series[0].value, value, places=5, msg=key)
+                self.assertEqual(set(series[0].labels), {'entity', 'friendly_name', 'domain'})
+        self.assertNotIn('reason=', text)
+        self.assertNotIn('initiator=', text)
+        observations.sampled_at = now - 31
+        samples, _ = await self.scrape()
+        self.assertEqual(self.sample(samples, 'shutdown_dedicated_load_w', 'homeassistant_sensor_unit_w'), [])
+        self.assertEqual(self.sample(samples, 'shutdown_aggregate_drop_w', 'homeassistant_sensor_unit_w'), [])
+        self.assertEqual(self.sample(samples, 'shutdown_guard_trip_count')[0].value, 1)
