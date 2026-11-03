@@ -177,7 +177,8 @@ class PlanEntityTests(unittest.IsolatedAsyncioTestCase):
                          old["plans_room_alpha"])
         self.assertEqual(registry.async_get_entity_id("sensor", "house_climate", "plans_plan_room_alpha"),
                          old["plans_plan_room_alpha"])
-        for key in ("plans_room_beta", "plans_plan_room_beta", "plans_plan_fan_fan.test_airflow"):
+        for key in ("plans_room_beta", "plans_plan_room_beta", "plans_comfort_mode_beta",
+                    "plans_plan_fan_fan.test_airflow"):
             self.assertIsNone(registry.async_get(old[key]))
         self.assertIsNotNone(registry.async_get(unrelated.entity_id))
         self.assertIn("Renamed alcove plan", [entity.name for entity in refreshed])

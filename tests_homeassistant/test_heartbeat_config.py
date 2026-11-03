@@ -45,7 +45,8 @@ class FixedHeartbeatTests(unittest.TestCase):
         for section, step in (("config", "user"), ("options", "init")):
             self.assertEqual(set(strings[section]["step"]), {step})
             self.assertEqual(set(strings[section]["step"][step]["data"]), actual)
-            self.assertIn("Room cards create temporary holds", strings[section]["step"][step]["description"])
+            self.assertIn("Room cards support Schedule, Temporary and persistent Hold presets",
+                          strings[section]["step"][step]["description"])
             self.assertIn("Protection thresholds remain separate from comfort bands",
                           strings[section]["step"][step]["description"])
 

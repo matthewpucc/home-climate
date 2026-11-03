@@ -7,10 +7,13 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers import entity_registry as er
 
 from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
+from .climate import RoomControl
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     entities = [ReloadHeadIntegration(entry, key) for key in entry.runtime_data.config.heads]
+    entities.extend(ResumeRoomSchedule(entry, room_id)
+                    for room_id in entry.runtime_data.config.zones)
     if (getattr(entry.runtime_data, "controls", None) is not None
             and getattr(entry.runtime_data.config, "fallback", None) is not None):
         entities.append(RetryRecoverySettings(entry))
@@ -24,11 +27,29 @@ async def async_setup_entry(hass, entry, async_add_entities):
     prefix = f"{entry.entry_id}_reload_"
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (entity.domain == "button" and entity.platform == DOMAIN
-                and (entity.unique_id.startswith(prefix)
+                and (entity.unique_id.startswith((prefix, f"{entry.entry_id}_resume_schedule_"))
                      or entity.unique_id == f"{entry.entry_id}_heater_power_recovery")
                 and entity.unique_id not in current):
             registry.async_remove(entity.entity_id)
     async_add_entities(entities)
+
+
+class ResumeRoomSchedule(RoomControl, ButtonEntity):
+    """One-room release action supported by Assist/MCP's button press intent."""
+    _attr_icon = "mdi:calendar-refresh"
+
+    def __init__(self, entry, room_id):
+        super().__init__(entry, room_id, f"resume_schedule_{room_id}")
+        room = self.runtime.config.zones[room_id]
+        self._attr_name = f"{room.name or room_id} resume schedule"
+
+    async def async_press(self):
+        if self.runtime.stop_event.is_set():
+            raise HomeAssistantError("Room comfort controls are stopping")
+        try:
+            await self.runtime.comfort.async_resume(self.room_id)
+        except (ValueError, OSError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
 
 
 class ReloadHeadIntegration(ButtonEntity):

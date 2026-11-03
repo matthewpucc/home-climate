@@ -58,6 +58,14 @@ class HouseHoldMigrationTests(unittest.IsolatedAsyncioTestCase):
         value = (await self.migrate())["rooms"]["primary"]
         self.assertEqual(value["expires_at"], expiry.isoformat())
 
+    async def test_explicit_persistent_hold_keeps_its_mode_during_known_migration(self):
+        self.seed()
+        self.store.async_load.return_value["rooms"]["primary"].update(mode="hold", expires_at=None)
+        value = (await self.migrate())["rooms"]["primary"]
+        self.assertEqual(value["mode"], "hold")
+        self.assertIsNone(value["expires_at"])
+        self.assertEqual(value["fingerprint"], self.new._fingerprint("primary"))
+
     async def test_a_room_without_schedule_retains_its_nonexpiring_manual_hold(self):
         self.previous = replace(self.previous, zones={**self.previous.zones,
             "guest": replace(self.previous.zones["guest"], schedules=())})

@@ -29,8 +29,9 @@ async def async_migrate_house_holds(hass, entry_id, previous_config, fixed_confi
 
     A configuration fingerprint is intentionally strict during normal startup.
     This one-time entry migration checks the old fingerprint before replacing it,
-    retains only still-valid user temperatures, and never extends a hold beyond
-    either its original expiration or the next new schedule boundary.
+    retains only still-valid user temperatures. Temporary overrides never extend
+    beyond their original expiration or the next new schedule boundary; explicit
+    persistent holds keep their non-expiring intent.
     """
     previous = RoomComfort(hass, previous_config, entry_id, lambda: None)
     fixed = RoomComfort(hass, fixed_config, entry_id, lambda: None)
@@ -53,6 +54,7 @@ async def async_migrate_house_holds(hass, entry_id, previous_config, fixed_confi
                 continue
             low, high, target = fixed._validate(
                 room_id, value["low_f"], value["high_f"], value["target_f"])
+            mode = RoomComfort._stored_mode(value)
             expiry = value["expires_at"]
             if expiry is not None:
                 expiry = datetime.fromisoformat(expiry)
@@ -62,9 +64,9 @@ async def async_migrate_house_holds(hass, entry_id, previous_config, fixed_confi
             settings, _ = fixed._base(room_id, now)
             next_change = next_schedule_change(
                 fixed._room(room_id), settings, now, fixed._timezone)
-            if next_change is not None:
+            if mode == "temporary" and next_change is not None:
                 expiry = min(expiry, next_change) if expiry is not None else next_change
-            migrated[room_id] = _Hold(low, high, target, expiry, new_fingerprint)
+            migrated[room_id] = _Hold(low, high, target, expiry, new_fingerprint, mode)
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
     result = RoomComfort._data(migrated)
@@ -81,10 +83,11 @@ class _Hold:
     target_f: float
     expires_at: datetime | None
     fingerprint: str
+    mode: str = "temporary"
 
 
 class RoomComfort:
-    """Room targets held until the next local schedule boundary."""
+    """Durable room targets with temporary or explicit persistent intent."""
 
     def __init__(self, hass, config, entry_id, notify, wake_event=None):
         self.hass, self.config, self.notify = hass, config, notify
@@ -214,6 +217,7 @@ class RoomComfort:
             "low_f": low, "high_f": high, "target_f": target,
             "comfort_enabled": bool(hold) or profile.comfort_enabled,
             "hold": hold is not None,
+            "mode": hold.mode if hold else "schedule",
             "expires_at": hold.expires_at.isoformat() if hold and hold.expires_at else None,
         }
 
@@ -250,11 +254,28 @@ class RoomComfort:
             raise ValueError("Desired temperature must be within the comfort range")
         return low, high, target
 
-    def _new_hold(self, room_id, low, high, target, now):
+    @staticmethod
+    def _stored_mode(value):
+        # Legacy rooms without schedules already have expiry=None. Never infer
+        # a new persistent Hold from that old Temporary representation.
+        mode = value.get("mode", "temporary")
+        if mode not in ("temporary", "hold"):
+            raise ValueError("Unknown room override mode")
+        if mode == "hold" and value["expires_at"] is not None:
+            raise ValueError("A persistent Hold cannot have an expiry")
+        return mode
+
+    def _new_hold(self, room_id, low, high, target, now, *, mode=None):
         low, high, target = self._validate(room_id, low, high, target)
+        if mode is None:
+            active = self._active(room_id, now)
+            mode = active.mode if active else "temporary"
+        if mode not in ("temporary", "hold"):
+            raise ValueError("Choose Temporary or Hold")
         settings, _ = self._base(room_id, now)
-        return _Hold(low, high, target, next_schedule_change(
-            self._room(room_id), settings, now, self._timezone), self._fingerprint(room_id))
+        expiry = (next_schedule_change(self._room(room_id), settings, now, self._timezone)
+                  if mode == "temporary" else None)
+        return _Hold(low, high, target, expiry, self._fingerprint(room_id), mode)
 
     @staticmethod
     def _data(holds):
@@ -292,6 +313,7 @@ class RoomComfort:
                             continue
                         low, high, target = self._validate(
                             room_id, value["low_f"], value["high_f"], value["target_f"])
+                        mode = self._stored_mode(value)
                         expiry = value["expires_at"]
                         if expiry is not None:
                             expiry = datetime.fromisoformat(expiry)
@@ -303,14 +325,14 @@ class RoomComfort:
                             self._room(room_id), settings, now, self._timezone)
                         # A restored hold must not survive a boundary introduced
                         # by changed legacy time helpers.
-                        if (next_change is None) != (expiry is None):
+                        if mode == "temporary" and (next_change is None) != (expiry is None):
                             continue
-                        if next_change is not None and expiry > next_change:
+                        if mode == "temporary" and next_change is not None and expiry > next_change:
                             continue
                         fingerprint = self._fingerprint(room_id)
                         if value["fingerprint"] != fingerprint:
                             continue
-                        holds[room_id] = _Hold(low, high, target, expiry, fingerprint)
+                        holds[room_id] = _Hold(low, high, target, expiry, fingerprint, mode)
                     except (KeyError, TypeError, ValueError, OverflowError):
                         continue
             if data is not None and data != self._data(holds):
@@ -354,21 +376,26 @@ class RoomComfort:
             hold = self._new_hold(room_id, low, high, target, now)
             await self._commit({**self._snapshot, room_id: hold})
 
-    async def async_hold(self, room_id):
+    async def async_hold(self, room_id, *, persistent=False):
         async with self._lock:
             self._check_open()
             now = self._now()
-            target = self.effective(room_id, now)["target_f"]
+            current = self.effective(room_id, now)
+            target = current["target_f"]
             minimum, maximum = self.bounds(room_id)
             target = min(maximum, max(minimum, target))
-            low, high = self._shifted_band(room_id, target, now)
-            hold = self._new_hold(room_id, low, high, target, now)
+            low, high = ((current["low_f"], current["high_f"]) if persistent
+                         else self._shifted_band(room_id, target, now))
+            hold = self._new_hold(room_id, low, high, target, now,
+                                  mode="hold" if persistent else "temporary")
             await self._commit({**self._snapshot, room_id: hold})
 
     async def async_resume(self, room_id):
         async with self._lock:
             self._check_open()
             self._room(room_id)
+            if room_id not in self._snapshot:
+                return
             await self._commit({key: value for key, value in self._snapshot.items() if key != room_id})
 
     def _schedule_expiry(self):

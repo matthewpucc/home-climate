@@ -137,7 +137,8 @@ class WindowContactNativeTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((effective["low_f"], effective["high_f"], effective["target_f"]),
                                      (70, 74, 72))
                     self.assertEqual(comfort._fingerprint("alpha"), old_fingerprint)
-                    self.assertEqual(await comfort.store.async_load(), stored)
+                    expected = {"rooms": {"alpha": {**stored["rooms"]["alpha"], "mode": "temporary"}}}
+                    self.assertEqual(await comfort.store.async_load(), expected)
                 finally:
                     await comfort.async_close()
 

@@ -1,6 +1,6 @@
 # Wiring, policy and everyday controls
 
-Home Climate separates physical wiring, editable operating policy and temporary room holds. Changes are validated together before being saved. Inspection of a plan is not evidence that the equipment has acted on it.
+Home Climate separates physical wiring, editable operating policy and room holds. Changes are validated together before being saved. Inspection of a plan is not evidence that the equipment has acted on it.
 
 ## Configure the policy
 
@@ -71,7 +71,9 @@ These are defaults, not a reading of the installed configuration. High comfort u
 | Living, warm-season 07:00–22:00 | 71; 69–73 | Comfort |
 | Living, warm-season 22:00–07:00 | 68–75 | Limits-only |
 
-Use a room climate card for a temporary target/range adjustment. The hold ends at the next scheduled profile change; protection still applies. Valid existing holds and registered room identities are preserved where migration can match them safely. A displayed room range is that room's active comfort/hold range, not the heat-pump equipment's allowable setpoint range.
+Use a room climate card and its desired-temperature number for a target/range adjustment. Edits normally create **Temporary**, ending at that room's next scheduled profile change. Select **Hold** to retain the current desired temperature and range across schedule boundaries and normal restarts until explicitly selecting **Schedule**. Edits made in Hold stay in Hold. Selecting Temporary instead restores its ordinary room-specific expiry. A room with no scheduled transitions has no Temporary expiry; this legacy behavior does not silently become the new Hold mode.
+
+Protection, shared-head arbitration, equipment timers and auxiliary manual ownership still apply. Hold enables comfort in that room; it does not freeze the scheduled priority or fan policy and does not turn the controller or Live permission on. The mode is independent of equipment operation. Valid existing holds and registered room identities are preserved where migration can match them safely. A displayed room range is that room's active comfort/hold range, not the heat-pump equipment's allowable setpoint range. See [persistent holds and MCP release](room-holds.md) for persistence limits and scoped restoration.
 
 ## Seasonal and auxiliary defaults
 

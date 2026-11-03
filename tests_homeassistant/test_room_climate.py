@@ -16,7 +16,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
 
 from custom_components.house_climate.climate import (
-    PRESET_SCHEDULE, PRESET_TEMPORARY, RoomClimate,
+    PRESET_SCHEDULE, PRESET_TEMPORARY, PRESET_HOLD, RoomClimate,
     async_setup_entry as setup_climate,
 )
 from custom_components.house_climate.const import DOMAIN
@@ -34,7 +34,8 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
         self.hass.config.units = US_CUSTOMARY_SYSTEM
         self.cfg = Config.from_dict(config().to_dict())
         self.value = {"low_f": 70.0, "high_f": 72.0, "target_f": 71.0,
-                      "comfort_enabled": True, "hold": False, "expires_at": None}
+                      "comfort_enabled": True, "hold": False, "expires_at": None,
+                      "mode": "schedule"}
         self.comfort = SimpleNamespace(
             effective=Mock(side_effect=lambda room: dict(self.value)),
             bounds=Mock(side_effect=lambda room: (self.cfg.low_f,
@@ -149,15 +150,24 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.climate.preset_mode, PRESET_SCHEDULE)
         await self.climate.async_set_preset_mode(PRESET_TEMPORARY)
         self.comfort.async_hold.assert_awaited_once_with("office")
-        self.value.update(hold=True, expires_at="2026-10-17T05:00:00+00:00")
+        self.value.update(hold=True, mode="temporary", expires_at="2026-10-17T05:00:00+00:00")
         self.assertEqual(self.climate.preset_mode, PRESET_TEMPORARY)
         self.assertEqual(self.climate.extra_state_attributes["override_expires_at"],
                          "2026-10-17T05:00:00+00:00")
         await self.climate.async_set_preset_mode(PRESET_SCHEDULE)
         self.comfort.async_resume.assert_awaited_once_with("office")
         # Expiry/resume is read from the manager rather than latched by the entity.
-        self.value.update(hold=False, expires_at=None)
+        self.value.update(hold=False, mode="schedule", expires_at=None)
         self.assertEqual(self.climate.preset_mode, PRESET_SCHEDULE)
+
+    async def test_explicit_hold_preset_and_nonexpiring_state(self):
+        self.assertEqual(self.climate.preset_modes, [PRESET_SCHEDULE, PRESET_TEMPORARY, PRESET_HOLD])
+        await self.climate.async_set_preset_mode(PRESET_HOLD)
+        self.comfort.async_hold.assert_awaited_once_with("office", persistent=True)
+        self.value.update(hold=True, mode="hold", expires_at=None)
+        self.assertEqual(self.climate.preset_mode, PRESET_HOLD)
+        self.assertEqual(self.climate.extra_state_attributes["comfort_mode"], "hold")
+        self.assertIsNone(self.climate.extra_state_attributes["override_expires_at"])
 
     async def test_editing_is_available_in_shadow_disabled_and_missing_probe_states(self):
         self.runtime.status["rooms"] = {}
