@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Retry a completed fallback preset with a fresh mismatched HA report up to three total attempts per device, at least 15 seconds after the previous service call finishes, within the original configured feedback window (120 seconds by default). Skip completed devices and retain operator-change, mode, ownership, persistence, interrupted-restart and uncertain-command barriers. A matching late report can still complete recovery without another command. Expose exhausted retries through the existing critical recovery notification. No equipment timing change or live configuration migration.
+- Retain one bounded HA unload operation across caller cancellation, including storage waits, actual cleanup and platform removal. Give configured fallback its mandatory minimum Off and feedback windows instead of failing a healthy three-minute settle after two minutes. Keep unresolved operations and ownership on timeout, expose unload phase and sampled remaining time, and prevent a new worker during HA shutdown. Late cleanup does not automatically reset HA's failed-unload state.
+
 ## 0.9.2
 
 - Let explicit native Controller On supersede incomplete fallback preset confirmation, retaining real command lifetimes, uncertain-job ownership and fresh shared-head Off before normal acquisition. Fence queued fallback writes and invalidate earlier stop evidence after late head activation. Preserve independent auxiliary shutdown, cutoff and manual ownership.

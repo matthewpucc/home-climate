@@ -949,6 +949,9 @@ class NativeControls:
 
     @callback
     def _schedule_check(self, _event=None):
+        if _event is not None and self.handoff:
+            from .handoff import observe_operator_change
+            observe_operator_change(self, _event)
         if (not self.active or self._claiming or self._closing
                 or (self._task and not self._task.done())):
             return

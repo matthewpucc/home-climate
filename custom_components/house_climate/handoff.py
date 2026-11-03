@@ -11,6 +11,86 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import math
 
+HANDOFF_MAX_ATTEMPTS = 3
+HANDOFF_RETRY_SECONDS = 15
+
+
+def _valid_retry_record(request):
+    """Old records remain readable; malformed retry bookkeeping never grants a write."""
+    if not isinstance(request, dict) or not isinstance(request.get("data"), dict):
+        return False
+    attempts = request.get("attempts", 1)
+    if type(attempts) is not int or not 1 <= attempts <= HANDOFF_MAX_ATTEMPTS:
+        return False
+    for key in ("at", "first_at", "dispatched_at", "finished_at"):
+        value = request.get(key, request.get("at") if key == "first_at" else None)
+        if value is None and (key == "finished_at" or key not in request and key == "dispatched_at"):
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return False
+    return (request.get("at") is not None
+            and request.get("first_at", request["at"]) <= request["at"]
+            and (request.get("dispatched_at") is None or request["dispatched_at"] >= request["at"])
+            and (request.get("finished_at") is None or request["finished_at"] >= _report_boundary(request)))
+
+
+def _report_boundary(request):
+    return request.get("dispatched_at", request["at"])
+
+
+def _operator_changed(state, request):
+    return (request.get("operator_changed") or (state is not None
+            and state.context.user_id is not None
+            and state.last_updated.timestamp() > request.get("first_at", request["at"])))
+
+
+def observe_operator_change(controls, event):
+    """Remember an operator event before a later integration echo can replace it."""
+    plan = controls.handoff
+    data = getattr(event, "data", {})
+    if not plan or not isinstance(data, dict):
+        return
+    request = plan["requests"].get(data.get("entity_id"))
+    if request and _valid_retry_record(request) and _operator_changed(data.get("new_state"), request):
+        request["operator_changed"] = True
+
+
+def _reported_target_valid(state, *, fan):
+    if fan and state.state not in ("on", "off"):
+        return False
+    if fan and state.state == "off":
+        return True
+    keys = ("percentage",) if fan else ("target_temp_low", "target_temp_high")
+    values = []
+    for key in keys:
+        value = state.attributes.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return False
+        values.append(value)
+    return 0 <= values[0] <= 100 if fan else values[0] <= values[1]
+
+
+def _retry_evidence(controls, plan, entity, request, state):
+    """A reported mismatch permits bounded reassertion, not a claim of physical failure."""
+    current = now()
+    if (not _valid_retry_record(request) or plan.get("interrupted")
+            or not request.get("dispatched") or request.get("finished_at") is None
+            or request.get("uncertain") or request.get("cancelled_before_dispatch")
+            or entity in controls._uncertain_device_jobs
+            or request.get("attempts", 1) >= HANDOFF_MAX_ATTEMPTS
+            or _operator_changed(state, request)
+            or current < request["finished_at"] + HANDOFF_RETRY_SECONDS
+            or current >= request.get("first_at", request["at"]) + controls.config.head_activation_timeout_seconds
+            or state is None or state.state in ("unknown", "unavailable")
+            or state.attributes.get("restored") or state.attributes.get("assumed_state")
+            or not _reported_target_valid(state, fan=entity in plan["fans"])
+            or state.last_reported.timestamp() <= _report_boundary(request)
+            or state.last_reported.timestamp() > current
+            or (entity in plan["heads"] and state.state != "heat_cool")
+            or controls.stop_jobs({entity}) or controls.pending_device_jobs({entity})):
+        return False
+    return True
+
 
 def now():
     return datetime.now(timezone.utc).timestamp()
@@ -177,61 +257,93 @@ async def step(controls):
             continue
         request = plan["requests"].get(entity)
         state = controls.hass.states.get(entity)
+        retry = None
         if request:
+            if not _valid_retry_record(request):
+                plan["problems"][entity] = "Recovery retry bookkeeping is invalid; inspect this device before retrying"
+                continue
             job = controls._handoff_jobs.get(entity)
             if job is not None and not job.done():
-                if now() - request["at"] >= controls.config.head_activation_timeout_seconds:
+                if now() - request.get("first_at", request["at"]) >= controls.config.head_activation_timeout_seconds:
                     plan["problems"][entity] = "Recovery command is still running; completion is unknown"
                 continue
             if request.get("uncertain") or request.get("cancelled_before_dispatch") or entity in controls._uncertain_device_jobs:
                 plan["problems"][entity] = "Recovery command completion is uncertain; ownership is retained"
                 continue
-            if (state is not None and state.last_reported.timestamp() > max(request["at"], plan.get("resume_after", 0))
+            if (state is not None and state.last_reported.timestamp() > max(_report_boundary(request), plan.get("resume_after", 0))
                     and _matches(state, request["data"], fan=entity in plan["fans"])):
                 plan["completed"].append(entity)
                 plan["problems"].pop(entity, None)
                 await _save(controls)
                 continue
-            if (state is not None and state.context.user_id is not None
-                    and state.last_updated.timestamp() > request["at"]):
+            if _operator_changed(state, request):
+                request["operator_changed"] = True
                 plan["problems"][entity] = "Operator changed this device during recovery; no preset will be replayed"
                 continue
-            if plan.get("interrupted") or now() - request["at"] >= controls.config.head_activation_timeout_seconds:
-                plan["problems"][entity] = "Recovery outcome is unconfirmed; inspect this device before retrying"
-            continue
+            if plan.get("interrupted") or now() - request.get("first_at", request["at"]) >= controls.config.head_activation_timeout_seconds:
+                exhausted = "; automatic retries exhausted" if request.get("attempts", 1) >= HANDOFF_MAX_ATTEMPTS else ""
+                plan["problems"][entity] = f"Recovery outcome is unconfirmed{exhausted}; inspect this device before retrying"
+                continue
+            if not _retry_evidence(controls, plan, entity, request, state):
+                continue
+            retry = request
         if plan.get("interrupted"):
             plan["problems"][entity] = "Interrupted recovery needs review before another positive command"
             continue
         try:
             domain, service, data = _desired(controls, plan, entity)
+            if retry is not None and data != retry["data"]:
+                raise ValueError("Recovery targets changed; automatic retry is inhibited")
             if controls.repair_gate:
                 epoch = controls.repair_gate.capture(entity, activation=True)
                 controls.repair_gate.check(entity, epoch, activation=True)
         except (ValueError, RuntimeError) as exc:
             plan["problems"][entity] = str(exc)
             continue
-        plan["requests"][entity] = {"at": now(), "data": data}
+        reserved_at = now()
+        request = {"at": reserved_at, "data": data,
+                   "first_at": retry.get("first_at", retry["at"]) if retry else reserved_at,
+                   "attempts": retry.get("attempts", 1) + 1 if retry else 1}
+        plan["requests"][entity] = request
+        generation = controls.ownership_generation
         await _save(controls)
         controls.service_inflight += 1
         async def dispatch(entity=entity, domain=domain, service=service, data=data,
                            epoch=epoch if controls.repair_gate else None,
-                           generation=controls.ownership_generation):
+                           generation=generation, request=request, retry=retry):
             started = False
             try:
                 if (controls.handoff is not plan or controls.takeover_pending
-                        or controls.enabled or generation != controls.ownership_generation):
+                        or controls.enabled or plan["stage"] != "applying"
+                        or not plan["authorized"]
+                        or generation != controls.ownership_generation):
+                    return
+                if (now() < request["at"] or now() >= request["first_at"] + controls.config.head_activation_timeout_seconds):
+                    plan["problems"][entity] = "Recovery feedback deadline passed before dispatch; inspect this device"
                     return
                 current_state = controls.hass.states.get(entity)
-                if (current_state is not None and current_state.context.user_id is not None
-                        and current_state.last_updated.timestamp() > plan["requests"][entity]["at"]):
+                if _operator_changed(current_state, request):
+                    request["operator_changed"] = True
                     plan["problems"][entity] = "Operator changed this device during recovery; no preset will be replayed"
                     return
+                if retry is not None:
+                    # A late successful report can arrive while retry intent is
+                    # saved. Consume the reservation, but do not reapply it.
+                    if (current_state is not None
+                            and current_state.last_reported.timestamp() > _report_boundary(retry)
+                            and _matches(current_state, data, fan=entity in plan["fans"])):
+                        return
+                    if (not _retry_evidence(controls, plan, entity, retry, current_state)
+                            or _desired(controls, plan, entity) != (domain, service, data)):
+                        plan["problems"][entity] = "Recovery retry no longer has valid reported-state evidence; inspect this device"
+                        return
                 if controls.repair_gate:
                     controls.repair_gate.check(entity, epoch, activation=True)
                 if controls.pending_device_jobs({entity}) or controls.stop_jobs({entity}):
                     plan["problems"][entity] = "Previous device command remains unresolved; recovery activation blocked"
                     return
-                plan["requests"][entity]["dispatched"] = True
+                request["dispatched"] = True
+                request["dispatched_at"] = now()
                 controls.head_activation_started(entity)
                 started = True
                 await controls.hass.services.async_call(domain, service, {"entity_id": entity, **data}, blocking=True)
@@ -239,13 +351,13 @@ async def step(controls):
                 plan["problems"][entity] = f"Recovery command failed: {exc}"
             finally:
                 if started:
+                    request["finished_at"] = now()
                     controls.head_activation_finished(entity)
         task = controls.hass.async_create_background_task(dispatch(), "Home Climate recovery setting", eager_start=False)
         controls._handoff_jobs[entity] = task
-        def finished(job, entity=entity):
+        def finished(job, entity=entity, request=request):
             controls.service_inflight -= 1
             if job.cancelled():
-                request = plan["requests"][entity]
                 if request.get("dispatched"):
                     request["uncertain"] = True
                     controls.activation_job_uncertain(entity)

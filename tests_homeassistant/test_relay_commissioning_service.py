@@ -3,7 +3,6 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 import tempfile
-import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -28,11 +27,11 @@ class RelayCommissioningServiceTests(unittest.IsolatedAsyncioTestCase):
         self.hass = HomeAssistant(self.directory.name)
         self.config = house_configuration(bindings=example_bindings())
         self.guard = SimpleNamespace(async_commission_relay=AsyncMock(), async_approve_restore=AsyncMock())
-        self.runtime = SimpleNamespace(
-            config=self.config, live=True, stop_event=threading.Event(),
-            power_guard=self.guard, async_setup_controls=AsyncMock(),
-            async_stop=AsyncMock(return_value=True), async_start=AsyncMock(),
-        )
+        self.runtime = ControllerRuntime(self.hass, self.config, True)
+        self.runtime.power_guard = self.guard
+        self.runtime.async_setup_controls = AsyncMock()
+        self.runtime.async_stop = AsyncMock(return_value=True)
+        self.runtime.async_start = AsyncMock()
         self.entry = SimpleNamespace(
             entry_id="commissioning-controller", data={"live": True}, options={},
             title="Home Climate", async_on_unload=Mock(), add_update_listener=Mock(),
@@ -131,7 +130,9 @@ class RelayCommissioningServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_unload_removes_action_but_deferred_unload_preserves_it(self):
         self.runtime.async_stop.return_value = False
-        self.assertFalse(await integration.async_unload_entry(self.hass, self.entry))
+        with patch.object(self.runtime, "_unload_budget_seconds", return_value=.02):
+            self.assertFalse(await integration.async_unload_entry(self.hass, self.entry))
+            self.assertFalse(await asyncio.wait_for(asyncio.shield(self.runtime._unload_task), 1))
         self.assertTrue(self.hass.services.has_service(DOMAIN, "commission_heater_relay"))
         self.assertTrue(self.hass.services.has_service(DOMAIN, "approve_heater_restore"))
         self.runtime.async_stop.return_value = True

@@ -161,7 +161,11 @@ It applies whenever active ownership ends: requested disable, graceful restart o
 
 Heads must support HA's `heat_cool` dual-setpoint mode; an unrelated `auto` mode is not a substitute. The handoff requires fresh device confirmation and waits through existing Off, minimum-Off and settling barriers. Confirmed preset completion releases routine head/fan ownership and leaves **Controller enabled** Off for an explicit disable or active-control fault. Explicit On, or startup with saved On and Allow Live, supersedes remaining preset confirmation through safe takeover.
 
-For an incomplete handoff, **Retry recovery settings** is an explicit retry of the **whole saved head/fan plan**, not just its failed devices. Review the saved targets and scope first: retry can reapply every saved head and fan. It requires:
+During an uninterrupted handoff, a completed preset command with a fresh mismatched HA report can be retried automatically, up to three total attempts per device. Each retry waits at least 15 seconds after the prior service handler finishes and keeps the original feedback deadline (120 seconds by default). Completed devices are skipped. No retry overlaps an actual command, crosses an ownership change or restart, overwrites an observed operator change, or changes a head out of its reported dual-setpoint Auto mode. Missing, stale, restored, assumed or uncertain evidence inhibits retries. Retry progress is visible in each saved handoff request's `attempts`, `first_at`, `dispatched_at` and `finished_at` fields. HA handler completion and HA reports do not establish physical acquisition times.
+
+A fresh matching report can complete recovery after a reported mismatch or exhausted retry budget. For example, an operator can correct a synthetic head's Auto range to its saved requested range; the existing handoff accepts that report once actual command work has finished and no uncertainty remains. It does not need another Controller toggle. Exhausted or inhibited retries retain ownership and the critical recovery notice; they do not guarantee that an already-failed HA reload will resume.
+
+For an incomplete handoff, **Retry recovery settings** remains an explicit retry of the **whole saved head/fan plan**, not just its failed devices. Review the saved targets and scope first: this button can reapply every saved head and fan. It requires:
 
 - Controller Off and a saved, authorized recovery plan.
 - No actual pending head/fan service work.
