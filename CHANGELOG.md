@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.9.1
+
+- Normalize automated auxiliary targets against the actual native climate unit, range and step, rounding down to preserve the configured Fahrenheit ceiling. Match HA's exact rendered target plus native target readback instead of confusing a native Celsius step with a Fahrenheit display step. For a whole-Celsius heater, an 80°F ceiling selects 26°C (78.8°F, displayed 79°F); 81°F does not acknowledge it. Recheck the native capability contract before both startup commands, retaining explicit Heat, fresh feedback, deadlines and uncertain-command cleanup. Missing native metadata inhibits auxiliary use locally. No configuration migration or watt-limit change.
 
 - Show `manual_recovery_verified` after a durable heater recovery acknowledgement while fresh native Off and low dedicated-load evidence remain valid. Keep an outstanding latch or stable-supply wait visible, and withdraw the confirmation when its evidence is lost. This diagnostic-only correction does not invent a stop command, restore proof across restart, change equipment commands or alter recovery gates, timers, leases or persistence. No configuration migration is required.
 

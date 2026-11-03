@@ -150,9 +150,10 @@ class NativeDispatchTests(unittest.IsolatedAsyncioTestCase):
         def started_submission(coroutine, loop):
             actual_futures.append(submit(coroutine, loop))
             return StartedFuture()
+        selected = await asyncio.to_thread(runtime.api.auxiliary_target, 86)
         instant = time.monotonic()
         try:
-            with patch(
+            with patch.object(runtime.api, "auxiliary_target", return_value=selected), patch(
                 "custom_components.house_climate.runtime.asyncio.run_coroutine_threadsafe",
                 side_effect=started_submission,
             ):

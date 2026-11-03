@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.core import HomeAssistant, CoreState
+from homeassistant.components.climate import ClimateEntity
+from homeassistant.components.climate.const import DATA_COMPONENT
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
@@ -26,6 +28,28 @@ from custom_components.house_climate.controller.policy import Policy
 from custom_components.house_climate.controller.protection import ProtectionTemperatures
 from custom_components.house_climate.sensor import ControllerStatus
 from tests.test_controller import config, fixture, add_helpers
+
+
+class FixtureClimateCapabilities(ClimateEntity):
+    """Native Fahrenheit contract for the synthetic state/service fixture.
+
+    This fixture's handlers store unrounded native Fahrenheit directly in HA;
+    the real entity conversion and rounding path is tested in auxiliary_startup.
+    """
+    _attr_temperature_unit = "°F"
+    _attr_precision = 1
+    _attr_target_temperature_step = 1
+
+    def __init__(self, hass, entity_id):
+        self.hass, self.entity_id = hass, entity_id
+        state = hass.states.get(entity_id)
+        self._attr_min_temp = state.attributes["min_temp"]
+        self._attr_max_temp = state.attributes["max_temp"]
+
+    @property
+    def target_temperature(self):
+        state = self.hass.states.get(self.entity_id)
+        return state.attributes.get("temperature") if state else None
 
 
 class NativeTests(unittest.IsolatedAsyncioTestCase):
@@ -59,6 +83,9 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         states["input_boolean.hp_heater_owned"]["state"] = "off"
         for entity, state in states.items():
             self.hass.states.async_set(entity, state["state"], state.get("attributes", {}))
+        native_entities = {entity: FixtureClimateCapabilities(self.hass, entity)
+                           for entity in self.cfg.climate_entities}
+        self.hass.data[DATA_COMPONENT] = SimpleNamespace(get_entity=native_entities.get)
         source = Path("tests/fixtures/legacy.toml").read_text().replace(
             "equipment_timing_confirmed = false", "equipment_timing_confirmed = true"
         ).replace("heater_setpoint_confirmed = false", "heater_setpoint_confirmed = true")

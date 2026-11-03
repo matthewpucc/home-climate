@@ -5,6 +5,7 @@ import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from dataclasses import dataclass, replace
+from decimal import Decimal, ROUND_FLOOR
 import logging
 import math
 import threading
@@ -12,6 +13,9 @@ import time
 from types import SimpleNamespace
 
 from homeassistant.core import callback
+from homeassistant.components.climate.const import DATA_COMPONENT
+from homeassistant.helpers.temperature import display_temp
+from homeassistant.util.unit_conversion import TemperatureConverter
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event
 
@@ -19,6 +23,7 @@ from .const import SIGNAL_STATUS
 from .controller.__main__ import run_loop
 from .controller.ha import HAActivationDeferred, HAError
 from .controller.config import Settings
+from .controller.auxiliary_target import AuxiliaryTarget, trusted_auxiliary_state
 from .controller.window_authorization import WindowAuthorization, check_window_authorization
 from .recovery import RecoveryManager
 from .repair_gate import RepairGate
@@ -85,9 +90,10 @@ def controller_entity_ids(config):
 class NativeActivationDispatch:
     """Serialize worker abandonment with HA-loop dispatch for one positive call."""
 
-    def __init__(self, deadline, window_authorization=None):
+    def __init__(self, deadline, window_authorization=None, auxiliary_target=None):
         self.deadline = deadline
         self.window_authorization = window_authorization
+        self.auxiliary_target = auxiliary_target
         self._lock = threading.Lock()
         self._dispatched = False
         self._abandoned = False
@@ -136,9 +142,10 @@ class NativeAPI:
         # Volatile controller metadata survives a worker/executor replacement
         # on this runtime, without becoming a persisted emergency-guard latch.
         self.auxiliary_startup_failure = None
+        self._auxiliary_target_snapshot = None
 
     def request(self, path, body=None, *, window_authorization=None,
-                activation_deadline=None):
+                activation_deadline=None, auxiliary_target=None):
         if body is not None and not self.live:
             raise HAError("Shadow mode forbids all service calls")
         if threading.get_ident() == self.hass.loop_thread_id:
@@ -173,9 +180,9 @@ class NativeAPI:
             deadline = min(deadline, self._activation_deadline(activation_deadline))
             if deadline <= time.monotonic():
                 raise HAActivationDeferred("Activation deadline expired before dispatch")
-        dispatch = (NativeActivationDispatch(deadline, window_authorization)
+        dispatch = (NativeActivationDispatch(deadline, window_authorization, auxiliary_target)
                     if activation and (self.controls is not None or window_authorization is not None
-                                       or bounded_activation) else None)
+                                       or bounded_activation or auxiliary_target is not None) else None)
         future = asyncio.run_coroutine_threadsafe(
             self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
                                 repair_epoch=repair_epoch), self.hass.loop
@@ -381,6 +388,8 @@ class NativeAPI:
                     "Home Assistant has not dispatched this command; retrying after responsiveness returns")
             raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
 
+        if path.startswith("auxiliary_target/") and body is None:
+            return self._auxiliary_target(float(path.split("/", 1)[1]))
         if path == "config" and body is None:
             return {"time_zone": self.hass.config.time_zone,
                     "unit_system": {"temperature": self.hass.config.units.temperature_unit}}
@@ -504,6 +513,20 @@ class NativeAPI:
                 monotonic_now=time.monotonic(), climate_unit=self.hass.config.units.temperature_unit)
             if not checked:
                 raise HAActivationDeferred(checked.reason)
+        if activation and dispatch is not None and dispatch.auxiliary_target is not None:
+            selected = dispatch.auxiliary_target
+            try:
+                current = self._auxiliary_target(selected.ceiling_f)
+            except HAError as exc:
+                raise HAActivationDeferred(str(exc)) from exc
+            if body.get("entity_id") != self.config.heater_entity or current != selected:
+                raise HAActivationDeferred("Auxiliary native target capabilities changed before dispatch")
+            if service == "set_temperature" and body.get("temperature") != current.command:
+                raise HAActivationDeferred("Auxiliary command differs from its supported target")
+            if service == "set_hvac_mode" and body.get("hvac_mode") == "heat":
+                state = self.hass.states.get(self.config.heater_entity)
+                if state is None or not current.matches({"attributes": state.attributes}):
+                    raise HAActivationDeferred("Auxiliary target changed before explicit Heat dispatch")
         if activation and self.stop_event.is_set():
             raise HAActivationDeferred("Controller is stopping; activation was not dispatched")
         if dispatch is not None:
@@ -533,6 +556,8 @@ class NativeAPI:
         except Exception as exc:
             raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
         else:
+            if activation and body.get("entity_id") == self.config.heater_entity:
+                self.capture_auxiliary_target()
             if auxiliary_off:
                 controls.auxiliary_off_finished(off_receipt)
             if controls and head_off_receipt is not None:
@@ -549,8 +574,72 @@ class NativeAPI:
     def states(self):
         return {state["entity_id"]: state for state in self.request("states")}
 
-    def service(self, domain, service, **data):
-        return self.request(f"services/{domain}/{service}", data)
+    def service(self, domain, service, *, auxiliary_target=None, **data):
+        return self.request(f"services/{domain}/{service}", data, auxiliary_target=auxiliary_target)
+
+    def auxiliary_target(self, ceiling_f):
+        """Resolve native capabilities on HA's loop; never infer units from state."""
+        return self.request(f"auxiliary_target/{float(ceiling_f)}")
+
+    def cached_auxiliary_target(self, observed):
+        """Nonblocking evidence for a stop; never postpone Off for metadata I/O."""
+        snapshot = self._auxiliary_target_snapshot
+        if snapshot is None or snapshot[0] != observed.get("last_reported"):
+            return None
+        return snapshot[1]
+
+    @callback
+    def capture_auxiliary_target(self):
+        try:
+            self._auxiliary_target(self.config.heater_high_setpoint_f)
+        except HAError:
+            pass  # The invalidated cache cannot acknowledge a completed start.
+
+    @callback
+    def _auxiliary_target(self, ceiling_f):
+        try:
+            component = self.hass.data.get(DATA_COMPONENT)
+            entity = component.get_entity(self.config.heater_entity) if component else None
+            if entity is None:
+                raise ValueError("native climate entity unavailable")
+            state = self.hass.states.get(self.config.heater_entity)
+            if (not entity.available or state is None or not trusted_auxiliary_state(
+                    {"state": state.state, "attributes": state.attributes})):
+                raise ValueError("native climate feedback unavailable or untrusted")
+            unit = entity.temperature_unit
+            display_unit = self.hass.config.units.temperature_unit
+            if unit not in ("°C", "°F") or display_unit not in ("°C", "°F"):
+                raise ValueError("unsupported temperature unit")
+            low, high, step, precision = (entity.min_temp, entity.max_temp,
+                                         entity.target_temperature_step, entity.precision)
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                   for v in (low, high, step, precision, ceiling_f)):
+                raise ValueError("missing or non-finite native range, step or precision")
+            if low >= high or step <= 0 or precision <= 0:
+                raise ValueError("invalid native range, step or precision")
+            # Decimal conversion avoids flooring one extra rung at exact C/F
+            # boundaries. The advertised minimum anchors the native step grid.
+            cap = Decimal(str(ceiling_f))
+            if unit == "°C":
+                cap = (cap - 32) * 5 / 9
+            lower, upper, increment = map(lambda v: Decimal(str(v)), (low, high, step))
+            if not lower <= cap <= upper:
+                raise ValueError("configured heater ceiling outside native range")
+            native = float(lower + ((cap - lower) / increment).to_integral_value(rounding=ROUND_FLOOR) * increment)
+            command = TemperatureConverter.convert(native, unit, display_unit)
+            reported = display_temp(self.hass, native, unit, precision)
+            raw = entity.target_temperature
+            observed = (float(raw) if not isinstance(raw, bool) and isinstance(raw, (int, float))
+                        and math.isfinite(raw) else None)
+            selected = AuxiliaryTarget(command, reported, native, ceiling_f,
+                (id(entity), unit, low, high, step, precision, display_unit), observed)
+            self._auxiliary_target_snapshot = (state.last_reported.isoformat(), selected)
+            return selected
+        except Exception as exc:
+            self._auxiliary_target_snapshot = None
+            # Third-party entity properties can fail independently of the rest
+            # of the house; retain an auxiliary-only inhibition and Off path.
+            raise HAError(f"Auxiliary native target capabilities unavailable: {exc}") from exc
 
     @staticmethod
     def _activation_deadline(value):
@@ -564,13 +653,13 @@ class NativeAPI:
             raise HAActivationDeferred("Activation deadline must be a finite monotonic time")
         return deadline
 
-    def service_before(self, domain, service, *, deadline, **data):
+    def service_before(self, domain, service, *, deadline, auxiliary_target=None, **data):
         """Bound positive dispatch without leaking controller metadata to HA."""
         path = f"services/{domain}/{service}"
         if self._is_activation(path, data):
             deadline = self._activation_deadline(deadline)
         return self.request(path, data,
-                            activation_deadline=deadline)
+                            activation_deadline=deadline, auxiliary_target=auxiliary_target)
 
     def service_guarded(self, domain, service, *, ticket, **data):
         """Carry a prior plan's proof; never mint permission from current inputs."""
@@ -809,6 +898,8 @@ class ControllerRuntime:
 
     @callback
     def _async_climate_changed(self, event):
+        if event.data["entity_id"] == self.config.heater_entity:
+            self.api.capture_auxiliary_target()
         if self.stop_event.is_set():
             return
         old, new = event.data.get("old_state"), event.data.get("new_state")
