@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.2
 
 - Let explicit native Controller On supersede incomplete fallback preset confirmation, retaining real command lifetimes, uncertain-job ownership and fresh shared-head Off before normal acquisition. Fence queued fallback writes and invalidate earlier stop evidence after late head activation. Preserve independent auxiliary shutdown, cutoff and manual ownership.
 - Persist explicit Controller On/Off intent separately from temporary execution state. Resume after graceful restart only with saved On and Allow Live; operational faults inhibit resumption. Legacy storage without saved intent starts Off. Expose takeover progress without claiming the abandoned fallback matched. No new positive fallback retries, equipment timers, watt limits or live configuration changes.
