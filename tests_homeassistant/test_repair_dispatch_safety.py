@@ -287,8 +287,9 @@ class RepairDispatchSafetyTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(runtime.api.service_jobs([head]))
             self.assertTrue(runtime.controls.owned,
                             "A pending Off could outlive ownership and stop a later manual call")
-            with self.assertRaises(HAError):
-                await runtime.controls.async_set_enabled(True)
+            await runtime.controls.async_set_enabled(True)
+            self.assertFalse(runtime.controls._snapshot["enabled"])
+            self.assertTrue(runtime.controls.takeover_pending)
             release_first_off.set()
             await asyncio.wait_for(first_off_done.wait(), 1)
             await self.until(lambda: not runtime.api.service_jobs([head]))
@@ -332,8 +333,9 @@ class RepairDispatchSafetyTests(unittest.IsolatedAsyncioTestCase):
                 await self.settle_watchdog(runtime.controls)
                 self.assertTrue(runtime.controls.owned,
                                 "An uncounted queued Off could stop the next ownership session")
-                with self.assertRaises(HAError):
-                    await runtime.controls.async_set_enabled(True)
+                await runtime.controls.async_set_enabled(True)
+                self.assertFalse(runtime.controls._snapshot["enabled"])
+                self.assertTrue(runtime.controls.takeover_pending)
                 release_dispatch.set()
                 await self.until(lambda: not runtime.api.service_jobs([head]))
                 await runtime.controls.async_check()

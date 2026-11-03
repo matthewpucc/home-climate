@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from house_climate.__main__ import run_loop
+from house_climate.ha import HAError, HAStopping
 from tests.test_controller import FakeHA, add_helpers, config, fixture
 
 
@@ -25,6 +26,11 @@ class BoundedEvent:
 
 class RuntimeTests(unittest.TestCase):
     def setup_run(self, live, enabled):
+        # These worker lifecycle tests exercise ordinary admission; peak policy
+        # is covered with fixed times in test_auxiliary_dispatch_policy.
+        off_peak = patch("house_climate.auxiliary_dispatch.AuxiliaryDispatch.peak", return_value=False)
+        off_peak.start()
+        self.addCleanup(off_peak.stop)
         cfg = replace(config(), equipment_timing_confirmed=True, heater_setpoint_confirmed=True)
         states = fixture(cfg, datetime.now(timezone.utc), guest=76, living=67)
         add_helpers(states)
@@ -48,6 +54,28 @@ class RuntimeTests(unittest.TestCase):
         output = self.execute(cfg, ha, args)
         self.assertEqual(ha.calls, [])
         self.assertTrue(any(call.args[0] == "shadow" and call.kwargs.get("mode") == "cool" for call in output.call_args_list))
+
+    def test_shutdown_rejection_preserves_intent_but_real_fault_does_not(self):
+        for exception, stopping, expected in ((HAStopping, True, "shutdown"),
+                (HAError, True, "fault"), (HAStopping, False, "fault")):
+            with self.subTest(exception=exception.__name__, stopping=stopping):
+                cfg, ha, args = self.setup_run(live=True, enabled=True)
+                event = BoundedEvent(loops=5)
+                original = ha.service
+                def service(domain, name, **data):
+                    if domain == "input_datetime":
+                        if stopping:
+                            event.set()
+                        raise exception("synthetic stop boundary")
+                    return original(domain, name, **data)
+                ha.service = service
+                ha.release_control = Mock(return_value=True)
+                report = Mock()
+                with patch("house_climate.__main__.signal.signal"):
+                    run_loop(args, cfg, ha_client=ha, stop_event=event, event_callback=report)
+                self.assertEqual(ha.release_control.call_args_list[0].kwargs['cause'], expected)
+                self.assertEqual(any(call.args[0] == 'fault' for call in report.call_args_list),
+                                 expected == 'fault')
 
     def test_live_flag_alone_does_not_activate_devices(self):
         cfg, ha, args = self.setup_run(live=True, enabled=False)

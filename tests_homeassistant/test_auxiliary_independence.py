@@ -70,8 +70,9 @@ class AuxiliaryIndependenceTests(unittest.IsolatedAsyncioTestCase):
         c.inflight = 1
         await c._clear_if_off()
         self.assertTrue(c.recovering)
-        with self.assertRaises(HAError):
-            await c.async_set_enabled(True)
+        await c.async_set_enabled(True)
+        self.assertFalse(c._snapshot["enabled"])
+        self.assertTrue(c.takeover_pending)
         c.inflight = 0
         self.hass.states.async_set(self.cfg.heater_entity, 'off')
 

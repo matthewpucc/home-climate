@@ -37,7 +37,7 @@ class ReadinessWakeupTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(runtime.controls, "async_close", new=AsyncMock(return_value=True)) as close:
                     with self.assertLogs("custom_components.house_climate.runtime", level="ERROR"):
                         self.assertFalse(await runtime.async_stop())
-        disable.assert_awaited_once_with(False)
+        disable.assert_awaited_once_with(False, preserve_intent=True)
         close.assert_awaited_once()
         self.assertTrue(runtime.stop_event.is_set())
         self.assertIn("unload deferred", runtime.status["error"])

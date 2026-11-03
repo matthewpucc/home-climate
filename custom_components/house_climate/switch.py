@@ -48,7 +48,9 @@ class ControllerEnabled(SwitchEntity):
     @property
     def is_on(self):
         if self.runtime.controls:
-            return self.runtime.controls.enabled
+            # Show durable user intent even while Live is disabled or takeover
+            # is reconciling; runtime status separately exposes admission.
+            return self.runtime.controls.enabled_intent
         return self.hass.states.is_state(self.runtime.config.entity("enabled"), "on")
 
     async def async_turn_on(self, **kwargs):
@@ -74,7 +76,7 @@ class ControllerEnabled(SwitchEntity):
                     {"entity_id": entity}, blocking=True,
                 )
             self.runtime.wake_event.set()
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, OSError) as exc:
             raise HomeAssistantError(str(exc)) from exc
 
 

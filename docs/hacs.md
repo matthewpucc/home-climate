@@ -27,7 +27,7 @@ The living-room heater power guard is independent of the comfort switch once liv
 
 The rename to Home Climate preserves the existing integration, entities, stored settings, and add-on install. Existing `house_climate_bindings.json` files continue to work. If both private files exist, `home_climate_bindings.json` takes precedence; an invalid new file fails closed rather than selecting the older wiring.
 
-Install a published release through HACS and restart Home Assistant. Comfort control starts disabled. The persisted power-cut latch survives restart; the dedicated outlet is not blindly re-enabled. Review the power-guard and recovery statuses before starting another trial.
+Install a published release through HACS and restart Home Assistant. On the first upgrade from a version without saved Controller On intent, comfort control starts disabled. After explicitly enabling this version, a graceful restart resumes control only when saved Controller On and Allow Live are both enabled, after startup reconciliation. Explicit Off and operational faults inhibit resumption. The persisted power-cut latch survives restart; the dedicated outlet is not blindly re-enabled. Review the power-guard and recovery statuses before starting another trial.
 
 Version 0.8.8 combines isolated dedicated-relay recovery and advisory whole-circuit
 telemetry. Existing meter/binding selections remain valid; no JSON migration is
