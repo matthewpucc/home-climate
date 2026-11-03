@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.6
+
+- Align distribution metadata with the native integration release. Bounded shutdown-recovery mode retries and current Kumo Auto capability checks are native-integration fixes; updating the add-on alone does not install them.
+
 ## 0.9.3
 
 - Align distribution metadata with the native integration release and package the shared controller's configurable purifier minimums.
