@@ -1,10 +1,12 @@
 """Takeover abandons preset matching, not actual commands or fresh stop proof."""
 import asyncio
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 import unittest
 
 from custom_components.house_climate.controls import NativeControls
+from custom_components.house_climate.switch import ControllerEnabled
 from custom_components.house_climate.controller.ha import HAError, HAStopping
 from custom_components.house_climate import handoff
 from tests_homeassistant import test_lifecycle_policy as lifecycle
@@ -172,6 +174,27 @@ class ControllerTakeoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(c.takeover_pending)
         self.assertIsNotNone(c.handoff)
         self.assertTrue(c.recovering)
+
+    async def test_saved_on_is_visible_and_can_be_cancelled_in_shadow(self):
+        runtime, _ = await self.runtime(live=False)
+        c = runtime.controls
+        await self.settle_watchdog(c)
+        c.enabled_intent = True
+        await c._save((), ())
+        c = await self.reload_controls(runtime, live=False)
+        switch = ControllerEnabled(SimpleNamespace(entry_id='native', runtime_data=runtime))
+        switch.hass = self.hass
+        self.assertTrue(switch.is_on)
+        self.assertFalse(c._snapshot['enabled'])
+        self.assertEqual(self.calls, [])
+        await switch.async_turn_off()
+        self.assertFalse(switch.is_on)
+        self.assertFalse((await c.store.async_load())['enabled_intent'])
+        c = await self.reload_controls(runtime, live=True)
+        await c.async_check()
+        self.assertFalse(c.enabled)
+        self.assertFalse(c.enabled_intent)
+        self.assertEqual(self.calls, [])
 
     async def test_explicit_off_cancels_pending_startup_resume(self):
         runtime, c, _ = await self.failed_preset()
