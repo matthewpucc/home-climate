@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.9.3
+
 - Preserve saved purifier minimums when deciding whether a late fan report cancels a bounded recovery retry. A report below the saved floor or fallback target keeps the valid retry available instead of consuming it without dispatch.
 
 - Keep ordinary house purifiers at a configurable 20% minimum while preserving higher scheduled and thermal-assist speeds. Thermal transfer vetoes remove the boost, not the independent purification floor. Add an optional explicitly bound separate Living purifier, default 100%; no auxiliary-heater fan alias is inferred or controlled. Generic configurations retain zero minimum unless selected.
