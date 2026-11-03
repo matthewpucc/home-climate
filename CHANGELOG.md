@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.1
 
 - Normalize automated auxiliary targets against the actual native climate unit, range and step, rounding down to preserve the configured Fahrenheit ceiling. Match HA's exact rendered target plus native target readback instead of confusing a native Celsius step with a Fahrenheit display step. For a whole-Celsius heater, an 80°F ceiling selects 26°C (78.8°F, displayed 79°F); 81°F does not acknowledge it. Recheck the native capability contract before both startup commands, retaining explicit Heat, fresh feedback, deadlines and uncertain-command cleanup. Missing native metadata inhibits auxiliary use locally. No configuration migration or watt-limit change.
 
