@@ -1,5 +1,6 @@
 """Takeover abandons preset matching, not actual commands or fresh stop proof."""
 import asyncio
+import time
 from unittest.mock import patch
 import unittest
 
@@ -337,7 +338,7 @@ class ControllerTakeoverTests(unittest.IsolatedAsyncioTestCase):
         c = runtime.controls
         await self.settle_watchdog(c)
         with patch.object(c, '_schedule_check'):
-            c.heartbeat_monotonic = 0
+            c.heartbeat_monotonic = time.monotonic() - c.config.heartbeat_timeout_seconds - 1
             await c.async_check()
         self.assertFalse(c.enabled)
         self.assertFalse(c.enabled_intent)
