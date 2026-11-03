@@ -7,7 +7,7 @@ from types import MappingProxyType
 from types import SimpleNamespace
 import time
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from homeassistant.config_entries import ConfigEntries, ConfigEntry, ConfigEntryState
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -17,8 +17,10 @@ from custom_components.house_climate.controller.executor import Executor
 from custom_components.house_climate.controller.ha import HAActivationDeferred, HAError
 from custom_components.house_climate.controller.policy import Policy
 from custom_components.house_climate.runtime import NativeActivationDispatch
+from custom_components.house_climate.runtime import NativeAPI
+from custom_components.house_climate.airflow_calibration import async_load_calibrations
 from custom_components.house_climate.sensor import ControllerStatus
-from tests.test_directed_airflow import directed_config, FAN
+from tests.test_directed_airflow import directed_config, fixed_config, FAN
 from tests.test_rooms import states
 from tests_homeassistant import test_native as fixtures
 from tests_homeassistant import test_native_controls as native
@@ -54,7 +56,7 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         self.data = states(self.cfg, {"alpha": 73, "beta": 72, "gamma": 68}, datetime.now(timezone.utc))
         for entity, state in self.data.items():
             self.hass.states.async_set(entity, state["state"], state.get("attributes", {}))
-        self.set_fan(state="on", percentage=20, supported_features=39, percentage_step=10,
+        self.set_fan(state="on", percentage=20, supported_features=63, percentage_step=10,
                      angle_low=43, angle_high=75, direction="forward", oscillating=True, oscillation_enabled=True)
         self.hass.services.async_register("fan", "set_direction", self.profile_handler)
         self.hass.services.async_register("hass_dyson", "set_oscillation_angles", self.profile_handler)
@@ -98,6 +100,19 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         plan, data = await self.plan()
         ticket = self.runtime_obj.api.airflow_authorization(FAN, plan, data, time.monotonic())
         return ticket
+
+    async def configure_fixed(self, *, commission=True, demand=74.5):
+        control = Config.from_dict(fixed_config()).fan_controls[FAN]
+        self.cfg = replace(self.cfg, fan_controls={**self.cfg.fan_controls, FAN: control})
+        self.runtime_obj.api.config = self.cfg
+        self.runtime_obj.config = self.cfg
+        self.policy = Policy(self.cfg)
+        self.executor = Executor(self.cfg, self.runtime_obj.api, "°F")
+        self.set_fan(supported_features=59, angle_low=100, angle_high=190,
+                     oscillating=False, oscillation_enabled=False)
+        self.temperature("alpha", demand)
+        if commission:
+            await async_load_calibrations(self.runtime_obj.api, "native")
 
     async def send(self, ticket, service="set_airflow_profile", **data):
         if not data:
@@ -423,6 +438,211 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         ticket = await self.ticket()
         with self.assertRaisesRegex(HAError, "same device"):
             await self.send(ticket)
+        self.assertEqual(self.calls, [])
+
+    async def test_59_fixed_outlet_rotates_and_boosts_without_direction_service(self):
+        await self.configure_fixed()
+        self.hass.services.async_remove("fan", "set_direction")
+        for _ in range(5):
+            plan = await self.tick()
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 60)
+        self.assertTrue(any(call[1] == "set_oscillation_angles" for call in self.calls))
+        self.assertFalse(any(call[1] == "set_direction" for call in self.calls))
+        execution = plan.fan_airflow[FAN]["execution"]
+        self.assertEqual(execution["outlet_control"], "calibrated_fixed")
+        self.assertFalse(execution["direction_telemetry_applicable"])
+        self.assertIsNone(execution["last_verified_command"]["direction"])
+        self.assertIn("direction telemetry not applicable", execution["last_verified_command"]["evidence"])
+
+    async def test_fixed_comfort_aim_needs_no_active_head_and_ignores_synthetic_direction(self):
+        await self.configure_fixed(demand=73)
+        self.set_fan(direction="synthetic_default_not_evidence")
+        for _ in range(5):
+            plan = await self.tick()
+        self.assertEqual(plan.mode, "off")
+        self.assertEqual(plan.head_targets_f, {})
+        self.assertEqual(plan.fan_airflow[FAN]["execution"]["phase"], "verified")
+        self.assertEqual(self.boosts(), [])
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 20)
+        self.assertFalse(any(call[1] == "set_direction" for call in self.calls))
+
+    async def test_missing_direction_never_auto_converts_unproven_switchable_profile(self):
+        self.set_fan(supported_features=59, direction="forward")
+        for _ in range(3):
+            plan = await self.tick()
+        self.assertEqual(self.boosts(), [])
+        self.assertFalse(any(call[1] in ("set_direction", "set_oscillation_angles") for call in self.calls))
+        self.assertIn("default forward string is not proof", plan.fan_airflow[FAN]["execution"]["error"])
+
+    async def test_fixed_stored_angles_and_optimistic_oscillation_never_complete_ack(self):
+        await self.configure_fixed()
+        async def accepted(call):
+            self.calls.append((call.domain, call.service, dict(call.data)))
+            self.set_fan(oscillating=True, oscillation_enabled=False)
+        self.hass.services.async_register("hass_dyson", "set_oscillation_angles", accepted)
+        for _ in range(5):
+            plan = await self.tick()
+        self.assertEqual(self.boosts(), [])
+        self.assertEqual(plan.fan_airflow[FAN]["execution"]["phase"], "angles")
+        self.assertFalse(any(call[1] == "set_direction" for call in self.calls))
+
+    async def test_fixed_outlet_rejects_direction_calls_and_changed_capability_at_dispatch(self):
+        await self.configure_fixed()
+        ticket = await self.ticket()
+        with self.assertRaisesRegex(HAError, "no direction command"):
+            await self.send(ticket, "set_direction", direction="forward")
+        for features in (63, 57, 51):
+            self.set_fan(supported_features=59)
+            ticket = await self.ticket()
+            self.set_fan(supported_features=features)
+            with self.subTest(features=features), self.assertRaises(HAError):
+                await self.send(ticket)
+        self.assertEqual(self.calls, [])
+
+    async def test_outlet_calibration_contract_change_invalidates_queued_authorization(self):
+        await self.configure_fixed()
+        ticket = await self.ticket()
+        fan = self.cfg.fan_controls[FAN]
+        changed = replace(fan, airflow=replace(fan.airflow, calibration_key="synthetic_new_calibration"))
+        self.runtime_obj.api.config = replace(self.cfg, fan_controls={**self.cfg.fan_controls, FAN: changed})
+        with self.assertRaisesRegex(HAActivationDeferred, "calibration/outlet contract changed"):
+            await self.send(ticket)
+        self.assertEqual(self.calls, [])
+
+    async def test_fixed_identity_pin_survives_api_restart_and_rejects_replacement(self):
+        await self.configure_fixed()
+        original = dict(self.runtime_obj.api._fixed_airflow_bindings)
+        replacement = dr.async_get(self.hass).async_get_or_create(config_entry_id=self.owner.entry_id,
+            identifiers={("hass_dyson", "synthetic_replacement_purifier")})
+        er.async_get(self.hass).async_update_entity(FAN, device_id=replacement.id)
+        with self.assertRaisesRegex(HAError, "physical identity"):
+            await self.ticket()
+        api = NativeAPI(self.hass, True, self.runtime_obj.stop_event, self.cfg)
+        api.controls = self.runtime_obj.controls
+        await async_load_calibrations(api, "native")
+        self.assertEqual(api._fixed_airflow_bindings, original)
+        plan, _ = await self.plan()
+        data = await asyncio.to_thread(api.states)
+        with self.assertRaisesRegex(HAError, "physical identity"):
+            api.airflow_authorization(FAN, plan, data, time.monotonic())
+        self.assertEqual(self.calls, [])
+
+    async def test_fixed_lifecycle_reload_rejects_old_ticket_and_requires_new_ack(self):
+        await self.configure_fixed()
+        for _ in range(5):
+            await self.tick()
+        ticket = await self.ticket()
+        self.hass.data["fan"] = SimpleNamespace(get_entity=lambda entity: native_object)
+        native_object = object()
+        with self.assertRaisesRegex(HAActivationDeferred, "lifecycle changed"):
+            await self.send(ticket)
+        plan = await self.tick()
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 20)
+        self.assertEqual(plan.fan_airflow[FAN]["execution"]["phase"], "reduce")
+
+    async def test_explicit_new_calibration_key_can_commission_replacement(self):
+        await self.configure_fixed()
+        original = dict(self.runtime_obj.api._fixed_airflow_bindings)
+        replacement = dr.async_get(self.hass).async_get_or_create(config_entry_id=self.owner.entry_id,
+            identifiers={("hass_dyson", "synthetic_recalibrated_purifier")})
+        er.async_get(self.hass).async_update_entity(FAN, device_id=replacement.id)
+        fan = self.cfg.fan_controls[FAN]
+        changed = replace(fan, airflow=replace(fan.airflow, calibration_key="synthetic_new_calibration"))
+        self.cfg = replace(self.cfg, fan_controls={**self.cfg.fan_controls, FAN: changed})
+        self.runtime_obj.api.config = self.cfg
+        self.policy = Policy(self.cfg)
+        await async_load_calibrations(self.runtime_obj.api, "native")
+        bindings = self.runtime_obj.api._fixed_airflow_bindings
+        self.assertEqual(bindings["synthetic_local_purifier"], original["synthetic_local_purifier"])
+        self.assertEqual(bindings["synthetic_new_calibration"][0], replacement.id)
+        self.assertEqual((await self.ticket()).identity[0], replacement.id)
+        self.assertEqual(self.calls, [])
+
+    async def test_fixed_without_durable_commissioning_or_with_failed_storage_keeps_minimum(self):
+        await self.configure_fixed(commission=False)
+        plan = await self.tick()
+        self.assertIn("uncommissioned", plan.fan_airflow[FAN]["execution"]["error"])
+        with patch("custom_components.house_climate.airflow_calibration.Store.async_save",
+                   new=AsyncMock(side_effect=OSError("synthetic storage failure"))):
+            await async_load_calibrations(self.runtime_obj.api, "native")
+        plan = await self.tick()
+        self.assertIn("storage unavailable", plan.fan_airflow[FAN]["execution"]["error"])
+        self.assertEqual(self.boosts(), [])
+        self.assertFalse(any(call[1] in ("set_direction", "set_oscillation_angles") for call in self.calls))
+
+    async def test_corrupt_fixed_calibration_storage_never_recommissions(self):
+        await self.configure_fixed(commission=False)
+        with patch("custom_components.house_climate.airflow_calibration.Store.async_load",
+                   new=AsyncMock(return_value={"bindings": {"synthetic_local_purifier": ["incomplete"]}})), \
+             patch("custom_components.house_climate.airflow_calibration.Store.async_save", new=AsyncMock()) as save:
+            await async_load_calibrations(self.runtime_obj.api, "native")
+        save.assert_not_awaited()
+        self.assertEqual(self.runtime_obj.api._fixed_airflow_bindings, {})
+        with self.assertRaisesRegex(HAError, "storage unavailable"):
+            await self.ticket()
+        self.assertEqual(self.calls, [])
+
+    async def test_lost_fixed_calibration_record_never_rebinds_same_key(self):
+        from homeassistant.helpers.storage import Store
+        await self.configure_fixed()
+        replacement = dr.async_get(self.hass).async_get_or_create(config_entry_id=self.owner.entry_id,
+            identifiers={("hass_dyson", "synthetic_replacement_purifier")})
+        er.async_get(self.hass).async_update_entity(FAN, device_id=replacement.id)
+        original_load = Store.async_load
+        for missing in ("airflow_calibration", "airflow_commissioned"):
+            async def load(store):
+                if f".{missing}." in store.key:
+                    return None
+                return await original_load(store)
+            with self.subTest(missing=missing), \
+                 patch.object(Store, "async_load", new=load), \
+                 patch.object(Store, "async_save", new=AsyncMock()) as save:
+                await async_load_calibrations(self.runtime_obj.api, "native")
+            save.assert_not_awaited()
+            self.assertEqual(self.runtime_obj.api._fixed_airflow_bindings, {})
+            with self.assertRaisesRegex(HAError, "storage unavailable"):
+                await self.ticket()
+        self.assertEqual(self.calls, [])
+
+    async def test_fixed_calibration_key_change_discards_verified_settings(self):
+        await self.configure_fixed()
+        for _ in range(5):
+            await self.tick()
+        self.assertIn(FAN, self.executor.airflow.verified)
+        fan = self.cfg.fan_controls[FAN]
+        changed = replace(fan, airflow=replace(fan.airflow, calibration_key="synthetic_new_calibration"))
+        self.cfg = replace(self.cfg, fan_controls={**self.cfg.fan_controls, FAN: changed})
+        self.runtime_obj.api.config = self.cfg
+        self.executor.config = self.cfg
+        self.policy = Policy(self.cfg)
+        plan = await self.tick()
+        self.assertNotIn(FAN, self.executor.airflow.verified)
+        self.assertIsNone(plan.fan_airflow[FAN]["execution"]["last_verified_command"])
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 20)
+
+    async def test_fixed_lost_oscillation_feedback_removes_boost(self):
+        await self.configure_fixed()
+        for _ in range(5):
+            await self.tick()
+        self.set_fan(oscillating=True, oscillation_enabled=False)
+        plan = await self.tick()
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 20)
+        self.assertEqual(plan.fan_airflow[FAN]["execution"]["phase"], "reduce")
+
+    async def test_fixed_stop_at_actual_dispatch_prevents_angle_command(self):
+        await self.configure_fixed()
+        ticket = await self.ticket()
+        original = self.hass.async_create_background_task
+        def create(coroutine, name, **kwargs):
+            if name == "Home Climate device service":
+                self.runtime_obj.stop_event.set()
+            return original(coroutine, name, **kwargs)
+        try:
+            with patch.object(self.hass, "async_create_background_task", side_effect=create):
+                with self.assertRaises(HAError):
+                    await self.send(ticket)
+        finally:
+            self.runtime_obj.stop_event.clear()
         self.assertEqual(self.calls, [])
 
     async def test_raw_device_and_untyped_virtual_calls_are_rejected(self):

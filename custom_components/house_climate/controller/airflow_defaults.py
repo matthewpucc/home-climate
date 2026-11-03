@@ -1,4 +1,5 @@
 """Accepted house sweeps, kept separate from private physical device bindings."""
+import re
 
 
 CALIBRATIONS = {
@@ -19,8 +20,12 @@ def validate_overrides(overrides):
         if not isinstance(profiles, dict) or set(profiles) - set(CALIBRATIONS[device]):
             raise ValueError("Only known per-device airflow profiles may be adjusted")
         for name, values in profiles.items():
-            if not isinstance(values, dict) or set(values) - {"lower_angle", "upper_angle", "calibration"}:
+            if not isinstance(values, dict) or set(values) - {"lower_angle", "upper_angle", "calibration", "calibration_key"}:
                 raise ValueError("Calibration edits may change sweep endpoints and verification status only")
+            if "calibration_key" in values and (device != "entertainment"
+                    or not isinstance(values["calibration_key"], str)
+                    or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", values["calibration_key"])):
+                raise ValueError("A fixed-outlet recommissioning key must be an explicit stable identifier")
             value = {**CALIBRATIONS[device][name], **values}
             if (any(type(value[k]) is not int or not 0 <= value[k] <= 350
                     for k in ("lower_angle", "upper_angle"))
@@ -32,14 +37,21 @@ def validate_overrides(overrides):
 def house_airflow(device, identities, overrides):
     validate_overrides(overrides)
     profiles = {}
+    calibration_key = None
     for name, angles in CALIBRATIONS[device].items():
+        edited = {**angles, **overrides.get(device, {}).get(name, {})}
+        if device == "entertainment":
+            calibration_key = edited.pop("calibration_key", "entertainment_purifier")
         destination = "office" if name == "toward_office" else "entertainment"
         source = ("entertainment" if destination == "office" else "office") if device == "office" else destination
-        profiles[name] = {**angles, **overrides.get(device, {}).get(name, {}),
+        profiles[name] = {**edited,
                           "destination": identities[destination], "source": identities[source],
-                          "purpose": "transfer" if device == "office" else "circulation"}
+                          "purpose": "transfer" if device == "office" else "circulation",
+                          "direction": "forward" if device == "office" else None}
     limitation = "No Office-facing profile is known for this device; only Entertainment circulation is supported"
     if device == "office":
         limitation = ("Office-facing sweep is provisionally accepted; physical calibration pending"
                       if profiles["toward_office"]["calibration"] == "provisional" else "")
-    return {"profiles": profiles, "limitation": limitation}
+    return {"profiles": profiles, "limitation": limitation,
+            "outlet": "switchable" if device == "office" else "calibrated_fixed",
+            "calibration_key": calibration_key}

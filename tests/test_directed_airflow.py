@@ -32,6 +32,16 @@ def directed_config():
     return raw
 
 
+def fixed_config():
+    raw = directed_config()
+    raw["rooms"]["alpha"]["fans"][0]["airflow"] = {
+        "outlet": "calibrated_fixed", "calibration_key": "synthetic_local_purifier",
+        "profiles": {"local_circulation": {
+            "source": "alpha", "destination": "alpha", "purpose": "circulation",
+            "lower_angle": 100, "upper_angle": 190, "calibration": "verified", "direction": None}}}
+    return raw
+
+
 class DirectedAirflowTests(unittest.TestCase):
     def setUp(self):
         self.cfg = Config.from_dict(directed_config())
@@ -211,12 +221,39 @@ class DirectedAirflowTests(unittest.TestCase):
         self.assertEqual(office.profiles["toward_office"].calibration, "provisional")
         self.assertEqual(set(entertainment.profiles), {"entertainment_circulation"})
         self.assertEqual(entertainment.profiles["entertainment_circulation"].purpose, "circulation")
+        self.assertEqual(entertainment.outlet, "calibrated_fixed")
+        self.assertIsNone(entertainment.profiles["entertainment_circulation"].direction)
+        self.assertEqual(office.outlet, "switchable")
         overrides = {"office": {"toward_office": {"lower_angle": 105, "calibration": "verified"}}}
         changed = house_configuration(bindings=bindings, policy_settings={"purifiers": {"airflow_profiles": overrides}})
         exported = editable_policy_settings(changed, bindings)
         self.assertEqual(exported["purifiers"]["airflow_profiles"], overrides)
         restored = house_configuration(bindings=bindings, policy_settings=exported)
         self.assertEqual(restored.fan_controls, changed.fan_controls)
+
+    def test_fixed_outlet_requires_explicit_verified_local_calibration(self):
+        cfg = Config.from_dict(fixed_config())
+        self.assertEqual(Config.from_dict(cfg.to_dict()).fan_controls, cfg.fan_controls)
+        for edit in ({"calibration": "provisional"}, {"direction": "forward"},
+                     {"purpose": "transfer", "source": "beta"}):
+            raw = fixed_config()
+            raw["rooms"]["alpha"]["fans"][0]["airflow"]["profiles"]["local_circulation"].update(edit)
+            with self.subTest(edit=edit), self.assertRaises(ValueError):
+                Config.from_dict(raw)
+        for edit in ({"calibration_key": None}, {"outlet": "automatic"}, {"outlet": "switchable"}):
+            raw = fixed_config()
+            raw["rooms"]["alpha"]["fans"][0]["airflow"].update(edit)
+            with self.subTest(edit=edit), self.assertRaises(ValueError):
+                Config.from_dict(raw)
+
+    def test_known_fixed_calibration_can_be_explicitly_rekeyed_after_recommissioning(self):
+        bindings = example_bindings()
+        overrides = {"entertainment": {"entertainment_circulation": {
+            "calibration_key": "synthetic_recommissioned_local_purifier"}}}
+        cfg = house_configuration(bindings=bindings, policy_settings={"purifiers": {"airflow_profiles": overrides}})
+        self.assertEqual(cfg.fan_controls[bindings.fans["entertainment"]].airflow.calibration_key,
+                         "synthetic_recommissioned_local_purifier")
+        self.assertEqual(editable_policy_settings(cfg, bindings)["purifiers"]["airflow_profiles"], overrides)
 
 
 if __name__ == "__main__":

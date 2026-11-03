@@ -104,6 +104,7 @@ class DirectedAirflow:
             plan.fans[entity] = minimum
             intent = {"profile": None, "destination": None, "mode": None, "reason": reason,
                       "last_selected_profile": self.selected.get(entity), "limitation": config.limitation,
+                      "outlet_control": config.outlet,
                       "physical_benefit_verified": False}
             if selected:
                 mode, reason, head, boost = choices[selected]

@@ -138,6 +138,8 @@ class NativeAPI:
         self._heartbeat_token = 0
         self.repair_gate = RepairGate([*config.heads.values(), *config.fans.values()])
         self._airflow_authorizations = {}
+        self._fixed_airflow_bindings = {}
+        self._airflow_calibration_error = None
         self._service_jobs = {}
         self._uncertain_service_entities = set()
         self.service_notify = None
@@ -763,6 +765,8 @@ class ControllerRuntime:
         self._shutdown_progress.set()
 
     async def async_setup_controls(self, entry_id):
+        from .airflow_calibration import async_load_calibrations
+        await async_load_calibrations(self.api, entry_id)
         from .comfort import RoomComfort
         self.comfort = RoomComfort(self.hass, self.config, entry_id,
                                    self._async_comfort_changed, self.wake_event)

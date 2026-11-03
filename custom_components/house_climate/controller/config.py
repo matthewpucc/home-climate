@@ -474,6 +474,7 @@ class Config:
                                     previous.seasonal_profiles != period.seasonal_profiles):
                                 raise ValueError("Schedules within a room must not overlap with conflicting profiles")
                         intervals.append((x, y, period))
+        fixed_calibrations = set()
         for fan in self.fan_controls.values():
             if fan.room not in self.zones or fan.entity_id not in self.fans.values():
                 raise ValueError("Invalid fan room/entity")
@@ -483,6 +484,10 @@ class Config:
                 raise ValueError("Directed fans require explicit per-device airflow profiles")
             if fan.airflow is not None:
                 fan.airflow.validate(self.zones)
+                if fan.airflow.calibration_key is not None:
+                    if fan.airflow.calibration_key in fixed_calibrations:
+                        raise ValueError("Fixed-outlet calibration keys must identify only one purifier")
+                    fixed_calibrations.add(fan.airflow.calibration_key)
             if fan.strategy == "transfer" and (fan.source_room not in self.zones or fan.source_room == fan.room):
                 raise ValueError("An airflow fan needs a different source room")
             if not 0 <= settings.value(fan.percentage) <= 100:

@@ -1,7 +1,7 @@
 """Narrow hass-dyson adapter: one bound purifier, existing native dispatch fences."""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import math
 import time
@@ -25,6 +25,8 @@ class AirflowAuthorization:
     calls: tuple
     targets: tuple
     percentage: int
+    profile_contract: tuple
+    features: int
     deadline: float
 
 
@@ -46,6 +48,19 @@ def target_signature(plan):
         for name, target in plan.room_targets.items()))
 
 
+def profile_contract(fan, name):
+    return fan.airflow.outlet, fan.airflow.calibration_key, tuple(sorted(asdict(fan.airflow.profiles[name]).items()))
+
+
+def check_calibration(api, fan, bound):
+    if fan.airflow.outlet != "calibrated_fixed":
+        return
+    if api._airflow_calibration_error:
+        raise HAError(api._airflow_calibration_error)
+    if api._fixed_airflow_bindings.get(fan.airflow.calibration_key) != bound[:4]:
+        raise HAError("Fixed-outlet physical identity is uncommissioned or changed; verify the sweep and use a new calibration_key")
+
+
 def authorize(api, entity, plan, states, now):
     if api.controls is None:
         raise HAError("Directional control requires native ownership controls")
@@ -57,16 +72,22 @@ def authorize(api, entity, plan, states, now):
     bound = tuple(state.get("airflow_identity") or ())
     if not bound or len(bound) < 4 or bound[3] != "hass_dyson":
         raise HAError("Bind an independently registered hass_dyson purifier with angle feedback")
-    check_report(api, state)
+    check_calibration(api, fan, bound)
+    profile = fan.airflow.profiles[intent["profile"]]
+    if intent.get("requested") != asdict(profile) or intent.get("outlet_control") != fan.airflow.outlet:
+        raise HAActivationDeferred("Airflow calibration/outlet contract changed since planning")
+    check_report(api, state, fan)
     calls = tuple((name, mode) for name, target in plan.room_targets.items()
                   for mode in ("heat", "cool") if target.get(f"{mode}_requested"))
     ticket = AirflowAuthorization(entity, intent["profile"], intent["mode"], bound, calls,
-                                 target_signature(plan), plan.fans[entity], now + min(30, api.config.poll_seconds))
+                                 target_signature(plan), plan.fans[entity],
+                                 profile_contract(fan, intent["profile"]), state["attributes"]["supported_features"],
+                                 now + min(30, api.config.poll_seconds))
     api._airflow_authorizations[entity] = ticket
     return ticket
 
 
-def check_report(api, state):
+def check_report(api, state, fan):
     """Required even when already at speed and no new command will be sent."""
     from .controller.airflow import TransferAirflow
     now = datetime.now(timezone.utc)
@@ -77,10 +98,14 @@ def check_report(api, state):
     if stamp is None or (now - stamp).total_seconds() > api.config.sensor_stale_seconds:
         raise HAError("Purifier settings report is stale; refresh device telemetry")
     features = state.get("attributes", {}).get("supported_features")
-    if (type(features) is not int or features & 7 != 7
-            or not api.hass.services.has_service("hass_dyson", "set_oscillation_angles")
-            or not api.hass.services.has_service("fan", "set_direction")):
-        raise HAError("Purifier needs speed, outlet direction and atomic hass_dyson angle services")
+    if (type(features) is not int or features & 3 != 3
+            or not api.hass.services.has_service("hass_dyson", "set_oscillation_angles")):
+        raise HAError("Purifier needs speed, oscillation and atomic hass_dyson angle services")
+    if fan.airflow.outlet == "calibrated_fixed":
+        if features & 4:
+            raise HAError("Outlet capability differs from its accepted fixed-outlet calibration; recommission this binding")
+    elif not features & 4 or not api.hass.services.has_service("fan", "set_direction"):
+        raise HAError("Switchable outlet requires direction capability and fan.set_direction; a default forward string is not proof")
 
 
 def validate_dispatch(api, ticket, service, body):
@@ -92,8 +117,11 @@ def validate_dispatch(api, ticket, service, body):
     fan = next((f for f in api.config.fan_controls.values() if f.entity_id == ticket.entity), None)
     if fan is None or fan.airflow is None or ticket.name not in fan.airflow.profiles:
         raise HAActivationDeferred("Airflow profile is no longer configured")
+    if profile_contract(fan, ticket.name) != ticket.profile_contract:
+        raise HAActivationDeferred("Airflow calibration/outlet contract changed before dispatch")
     if identity(api.hass, ticket.entity) != ticket.identity:
         raise HAActivationDeferred("Purifier physical identity or integration lifecycle changed")
+    check_calibration(api, fan, ticket.identity)
     registry = er.async_get(api.hass)
     entry = registry.async_get(ticket.entity)
     owner = api.hass.config_entries.async_get_entry(entry.config_entry_id)
@@ -109,7 +137,9 @@ def validate_dispatch(api, ticket, service, body):
     states = {state["entity_id"]: state for state in api._read_states()}
     state = states.get(ticket.entity, {})
     attrs = state.get("attributes", {})
-    check_report(api, state)
+    check_report(api, state, fan)
+    if attrs.get("supported_features") != ticket.features:
+        raise HAActivationDeferred("Purifier outlet/capability report changed before dispatch")
     now = datetime.now(timezone.utc)
     config = replace(api.config, timezone=api.hass.config.time_zone)
     settings = (api.settings_provider(states, config, now) if api.settings_provider
@@ -128,19 +158,21 @@ def validate_dispatch(api, ticket, service, body):
         if not at_minimum(state, fan.minimum_percentage):
             raise HAActivationDeferred("Reduce purifier to its minimum before changing aim")
         if service == "set_direction":
+            if fan.airflow.outlet == "calibrated_fixed":
+                raise HAError("Calibrated fixed outlet has no direction command")
             if set(body) != {"entity_id", "direction"} or body["direction"] != profile.direction:
                 raise HAError("Outlet request differs from the configured profile")
             return "fan", service, body
         if (set(body) != {"entity_id", "lower_angle", "upper_angle"}
                 or body["lower_angle"] != profile.lower_angle or body["upper_angle"] != profile.upper_angle
-                or attrs.get("direction") != profile.direction):
+                or (fan.airflow.outlet == "switchable" and attrs.get("direction") != profile.direction)):
             raise HAError("Sweep request/outlet differs from the configured profile")
         return "hass_dyson", "set_oscillation_angles", {
             "device_id": ticket.identity[0], "lower_angle": profile.lower_angle,
             "upper_angle": profile.upper_angle}
     if (service not in ("turn_on", "set_percentage")
             or set(body) != {"entity_id", "percentage"}
-            or not matches_profile(state, profile)):
+            or not matches_profile(state, profile, fan.airflow.outlet)):
         raise HAActivationDeferred("Directional boost requires matching reported sweep, oscillation and outlet")
     # A profile can remain useful for comfort while losing its transfer basis.
     # Recheck the speed entitlement too; matching angles alone is insufficient.

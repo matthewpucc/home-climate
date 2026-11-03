@@ -14,14 +14,14 @@ def reported(state):
         "angle_low", "angle_high", "oscillating", "oscillation_enabled", "direction", "percentage")}
 
 
-def matches_profile(state, profile):
+def matches_profile(state, profile, outlet="switchable"):
     attrs = state.get("attributes", {})
     return (state.get("state") in ("on", "off") and not attrs.get("restored")
             and not attrs.get("assumed_state") and not state.get("restored")
             and type(attrs.get("angle_low")) is int and type(attrs.get("angle_high")) is int
             and attrs.get("angle_low") == profile.lower_angle
             and attrs.get("angle_high") == profile.upper_angle
-            and attrs.get("direction") == profile.direction
+            and (outlet == "calibrated_fixed" or attrs.get("direction") == profile.direction)
             and attrs.get("oscillating") is True
             # hass-dyson's oscillating attribute can be optimistic. This extra
             # attribute comes from its reported product-state oson field.
@@ -75,11 +75,18 @@ class AirflowExecution:
         intent = plan.fan_airflow.get(entity, {})
         name = intent.get("profile")
         state = states.get(entity, {})
+        profile = fan.airflow.profiles.get(name)
         identity = (*tuple(state.get("airflow_identity") or ()),
-                    state.get("integration_repair", {}).get("epoch"))
+                    state.get("integration_repair", {}).get("epoch"),
+                    state.get("attributes", {}).get("supported_features"),
+                    fan.airflow.outlet, fan.airflow.calibration_key, profile)
         status = intent.setdefault("execution", {})
         status.update(reported=reported(state), requested_percentage=percentage,
                       physical_bearing_measured=False,
+                      outlet_control=fan.airflow.outlet,
+                      outlet_evidence=("Accepted per-device physical sweep calibration; outlet unmeasured at runtime"
+                          if fan.airflow.outlet == "calibrated_fixed" else "Requires fresh reported forward outlet"),
+                      direction_telemetry_applicable=fan.airflow.outlet == "switchable",
                       last_verified_command=self.verified.get(entity))
         pending = self.pending.get(entity)
         if name is None:
@@ -91,7 +98,6 @@ class AirflowExecution:
             if pending is not None and pending.identity != identity:
                 self.verified.pop(entity, None)
             pending = self.pending[entity] = ProfilePending(name, identity)
-        profile = fan.airflow.profiles[name]
         status.update(phase=pending.phase, error=pending.error,
                       last_verified_command=self.verified.get(entity), effective_percentage=minimum)
         api = self.executor.ha
@@ -105,12 +111,13 @@ class AirflowExecution:
         try:
             ticket = authorize(entity, plan, states, now)
             if pending.phase == "verified":
-                if matches_profile(state, profile):
+                if matches_profile(state, profile, fan.airflow.outlet):
                     status.update(phase="verified", effective_percentage=percentage,
                                   last_verified_command=self.verified.get(entity))
                     return percentage, ticket if percentage > minimum else None
                 pending.phase = "reduce"
                 pending.error = "Reported sweep/outlet no longer matches; boost withheld"
+                status.update(phase=pending.phase, error=pending.error)
             if now < pending.retry_at:
                 status.update(phase="retry", error=pending.error, retry_in_seconds=pending.retry_at - now)
                 return minimum, None
@@ -124,8 +131,12 @@ class AirflowExecution:
                 pending.baseline = max(report_marker(state) or datetime.min.replace(tzinfo=timezone.utc),
                                        datetime.now(timezone.utc))
                 pending.since = now
-                send(ticket, "set_direction", direction=profile.direction)
-                pending.phase = "outlet"
+                if fan.airflow.outlet == "calibrated_fixed":
+                    send(ticket, "set_airflow_profile", lower_angle=profile.lower_angle, upper_angle=profile.upper_angle)
+                    pending.phase = "angles"
+                else:
+                    send(ticket, "set_direction", direction=profile.direction)
+                    pending.phase = "outlet"
             elif pending.phase in ("outlet", "angles"):
                 marker = report_marker(state)
                 fresh = (marker is not None and pending.baseline is not None
@@ -137,14 +148,17 @@ class AirflowExecution:
                     send(ticket, "set_airflow_profile", lower_angle=profile.lower_angle, upper_angle=profile.upper_angle)
                     pending.phase = "angles"
                     pending.since = now
-                elif pending.phase == "angles" and fresh and matches_profile(state, profile):
+                elif pending.phase == "angles" and fresh and matches_profile(state, profile, fan.airflow.outlet):
                     pending.phase, pending.error, pending.attempts = "verified", None, 0
                     pending.verified_at = now
                     self.verified[entity] = {
                         "profile": name, "lower_angle": profile.lower_angle, "upper_angle": profile.upper_angle,
-                        "direction": profile.direction, "oscillating": profile.oscillating,
+                        "direction": profile.direction, "outlet_control": fan.airflow.outlet,
+                        "oscillating": profile.oscillating,
                         "verified_at": datetime.now(timezone.utc).isoformat(),
-                        "evidence": "Fresh matching HA settings; physical bearing unmeasured"}
+                        "evidence": ("Fresh matching bounds/oscillation; accepted fixed-outlet calibration; direction telemetry not applicable"
+                            if fan.airflow.outlet == "calibrated_fixed" else
+                            "Fresh matching HA settings; physical bearing unmeasured")}
                     # Boost on the next fresh plan tick, never in the completion
                     # callback of an old angle command.
             status.update(phase=pending.phase, error=pending.error,
