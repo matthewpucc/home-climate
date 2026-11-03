@@ -17,6 +17,7 @@ from homeassistant.helpers.storage import Store
 from .controller.ha import HAActivationDeferred, HAError
 from .controller.ha_package import watchdog_signature
 from .controller.sensors import probe_value
+from .auxiliary_diagnostics import AuxiliaryDiagnostics
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class NativeControls:
         self._task = None
         self._snapshot = {}
         self.power_guard = None
+        self.observations = AuxiliaryDiagnostics()
         self._publish()
 
     async def async_load(self):
@@ -517,6 +519,7 @@ class NativeControls:
         self._auxiliary_probe_stop_pending = False
         self.auxiliary_authorized_at = time.monotonic()
         self.auxiliary_authorized_wall = datetime.now(timezone.utc).timestamp()
+        self.observations.record(self, "authorization_renewed", at=self.auxiliary_authorized_wall)
         self._publish()
 
     async def _save(self, devices, pending, *, auxiliary=None):
@@ -740,6 +743,7 @@ class NativeControls:
             self._auxiliary_heartbeat_off_receipt = None
             self._auxiliary_heartbeat_off_ack = False
             self._auxiliary_stop_pending = True
+            self.observations.record(self, "authorization_expired")
             try:
                 _LOGGER.warning(
                     "Auxiliary heater heartbeat expired (age %.1fs; lease limit %.0fs); "
@@ -776,6 +780,11 @@ class NativeControls:
             and (isolated or native_off))
         if acknowledged and not self.auxiliary_heartbeat_blocked:
             self._auxiliary_heat_possible = False
+        if acknowledged:
+            self.observations.record(self, "off_acknowledged" if native_off else "off_isolated",
+                                     receipt=receipt if native_off else None,
+                                     report_at=state.last_reported.timestamp() if native_off else None,
+                                     proof="ha_report" if native_off else "power_isolation")
         if acknowledged != self._auxiliary_heartbeat_off_ack:
             self._auxiliary_heartbeat_off_ack = acknowledged
             self._publish()
@@ -834,9 +843,12 @@ class NativeControls:
             self._auxiliary_heartbeat_off_receipt = receipt
             self._ack_auxiliary_heartbeat_off()
         elif receipt is not None and self._auxiliary_stop_pending:
+            self.observations.record(self, "off_stale_callback", receipt=receipt)
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
             self._auxiliary_heartbeat_off_receipt = None
             self._auxiliary_heartbeat_off_ack = False
+        elif receipt is not None:
+            self.observations.record(self, "off_stale_callback", receipt=receipt)
 
     @callback
     def confirm_heartbeat(self, *, generation=None):
@@ -985,8 +997,11 @@ class NativeControls:
         generation = self.command_generation(entity)
         repair_epoch = self.repair_gate.capture(entity, activation=False) if self.repair_gate else None
         self.service_inflight += 1
+        observation = (self.observations.record(self, "off_requested", source="watchdog",
+                                                request_generation=generation)
+                       if entity == self.config.heater_entity else None)
         task = self.hass.async_create_background_task(
-            self._off_job(entity, generation, repair_epoch), "Home Climate watchdog device stop", eager_start=False)
+            self._off_job(entity, generation, repair_epoch, observation), "Home Climate watchdog device stop", eager_start=False)
 
         self._stop_jobs[task] = entity
 
@@ -996,6 +1011,8 @@ class NativeControls:
             if not job.cancelled():
                 job.exception()
             else:
+                if observation is not None:
+                    self.observations.record(self, "off_cancelled", command=observation)
                 self.activation_job_uncertain(entity)
             self._schedule_check()
 
@@ -1007,14 +1024,18 @@ class NativeControls:
         return tuple(task for task, entity in self._stop_jobs.items()
                      if entity in entities and not task.done())
 
-    async def _off_job(self, entity, generation, repair_epoch):
+    async def _off_job(self, entity, generation, repair_epoch, observation=None):
         if generation != self.command_generation(entity):
+            if observation is not None:
+                self.observations.record(self, "off_not_dispatched", command=observation)
             return False
         try:
             self.check_stop(entity)
             if self.repair_gate:
                 self.repair_gate.check(entity, repair_epoch, activation=False)
         except HAActivationDeferred:
+            if observation is not None:
+                self.observations.record(self, "off_not_dispatched", command=observation)
             return False
         receipt = self.auxiliary_off_started() if entity == self.config.heater_entity else None
         head_receipt = self.head_off_started(entity)
@@ -1025,21 +1046,29 @@ class NativeControls:
                     raise HAError(issue)
             if (entity == self.config.heater_entity and self.power_guard is not None
                     and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
+                observation = self.observations.record(self, "off_delegated", command=observation)
                 if not await self.power_guard.async_request_heater_off():
                     raise HAError("Heater shutdown remains unconfirmed")
+                self.observations.record(self, "off_delegate_completed", command=observation)
             else:
+                if observation is not None:
+                    observation = self.observations.record(self, "off_dispatched", command=observation)
                 await self.hass.services.async_call(
                     entity.split(".", 1)[0],
                     "set_hvac_mode" if entity.startswith("climate.") else "turn_off",
                     {"entity_id": entity, **({"hvac_mode": "off"} if entity.startswith("climate.") else {})},
                     blocking=True,
                 )
+                if observation is not None:
+                    self.observations.record(self, "off_completed", command=observation, receipt=receipt)
             if entity == self.config.heater_entity:
                 self.auxiliary_off_finished(receipt)
             if head_receipt is not None:
                 self.head_off_finished(entity, head_receipt)
             return True
         except Exception as exc:
+            if observation is not None:
+                self.observations.record(self, "off_failed", command=observation)
             message = f"Could not stop {entity}: {exc}"
             if entity.startswith("fan."):
                 if self._fan_problems.get(entity) != message:

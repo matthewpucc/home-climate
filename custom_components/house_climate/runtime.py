@@ -59,6 +59,7 @@ class ServiceOperation:
     activation: bool
     started: bool = False
     controls: object | None = None
+    observation: dict | None = None
 
 
 def controller_entity_ids(config):
@@ -438,6 +439,10 @@ class NativeAPI:
         # The actual service has a separate lifetime from this caller. A worker
         # timeout/cancellation must not erase a dispatched device operation.
         operation = ServiceOperation(body.get("entity_id"), activation, controls=controls)
+        if (controls and body.get("entity_id") == controls.config.heater_entity
+                and domain == "climate" and service == "set_hvac_mode" and body.get("hvac_mode") == "off"):
+            operation.observation = controls.observations.record(
+                controls, "off_requested", source="worker", request_generation=generation)
         task = self.hass.async_create_background_task(
             self._async_service_job(path, domain, service, body, deadline, activation,
                                     generation, dispatch, repair_epoch, operation),
@@ -461,6 +466,13 @@ class NativeAPI:
 
     def _service_job_done(self, task):
         operation = self._service_jobs.pop(task, None)
+        if operation is not None and operation.observation is not None:
+            if task.cancelled():
+                operation.controls.observations.record(
+                    operation.controls, "off_cancelled", command=operation.observation)
+            elif not operation.started:
+                operation.controls.observations.record(
+                    operation.controls, "off_not_dispatched", command=operation.observation)
         if operation is not None and operation.controls is not None:
             operation.controls.service_inflight -= 1
             operation.controls._schedule_check()
@@ -575,13 +587,26 @@ class NativeAPI:
             operation.started = True
             if (auxiliary_off and self.power_guard is not None
                     and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
+                operation.observation = controls.observations.record(
+                    controls, "off_delegated", command=operation.observation)
                 if not await self.power_guard.async_request_heater_off():
                     raise HAError("Heater shutdown remains unconfirmed")
+                controls.observations.record(controls, "off_delegate_completed", command=operation.observation)
             else:
+                if auxiliary_off:
+                    operation.observation = controls.observations.record(
+                        controls, "off_dispatched", command=operation.observation)
                 await self.hass.services.async_call(actual_domain, actual_service, actual_body, blocking=True)
+                if auxiliary_off:
+                    controls.observations.record(controls, "off_completed",
+                                                 command=operation.observation, receipt=off_receipt)
         except (HAError, TimeoutError):
+            if auxiliary_off:
+                controls.observations.record(controls, "off_failed", command=operation.observation)
             raise
         except Exception as exc:
+            if auxiliary_off:
+                controls.observations.record(controls, "off_failed", command=operation.observation)
             raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
         else:
             if activation and body.get("entity_id") == self.config.heater_entity:

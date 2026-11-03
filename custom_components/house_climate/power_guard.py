@@ -15,6 +15,11 @@ import math
 import time
 from typing import TYPE_CHECKING
 
+try:
+    from .controller.shutdown_diagnostics import ShutdownDiagnostics
+except ImportError:
+    from house_climate.shutdown_diagnostics import ShutdownDiagnostics
+
 if TYPE_CHECKING:
     from .controller.bindings import PowerBindings
 
@@ -337,6 +342,7 @@ class HeaterPowerGuard:
             "started_at": None, "finished_at": None,
             "restore_window_seconds": RESTORE_ACK_SECONDS,
             "maximum_seconds": COMMISSIONING_MAX_SECONDS}
+        self.shutdown_observations = ShutdownDiagnostics()
 
     def _state(self, entity):
         state = self.hass.states.get(entity) if entity is not None else None
@@ -693,6 +699,7 @@ class HeaterPowerGuard:
         self._update_alerts()
         self._publish_emergency_notice()
         current = self.diagnostics
+        self.shutdown_observations.capture(self, current)
         stable = {key: current[key] for key in (
             "blocked", "reason", "latched", "switch_cut_owned", "power_cut_confirmed",
             "restoring", "restore_attempts", "power_restore_inflight",
@@ -872,11 +879,13 @@ class HeaterPowerGuard:
         """Register inexpensive cached-state checks on HA's loop."""
         if self._active or self._closed:
             return
-        from homeassistant.core import callback
+        from homeassistant.core import EVENT_CALL_SERVICE, callback
         from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 
         @callback
         def changed(_event=None):
+            if _event is not None:
+                self.shutdown_observations.ha_state(_event, self.bindings)
             if _event and self._supervised_restore is not None:
                 self._supervised_restore_check(
                     entity=_event.data.get("entity_id"), state=_event.data.get("new_state"))
@@ -940,9 +949,14 @@ class HeaterPowerGuard:
             self._schedule_check()
 
         self._active = True
+        @callback
+        def service_observed(event):
+            self.shutdown_observations.ha_request(event, self.bindings)
+
         self._unsubscribers = [
             async_track_state_change_event(self.hass, self.entity_ids, changed),
             async_track_time_interval(self.hass, interval_elapsed, timedelta(seconds=CHECK_SECONDS)),
+            self.hass.bus.async_listen(EVENT_CALL_SERVICE, service_observed),
         ]
         self._schedule_check()
 
@@ -1743,6 +1757,8 @@ class HeaterPowerGuard:
             self._latched = True
             self._tripped_at = self._clock()
             self._trip_wall = self._wall_clock()
+            self.shutdown_observations.record('guard_trip', at=self._trip_wall,
+                                               reason=reason, trigger='guard_latch')
             self._restore_attempts = 0
             self._off_confirmed = False
             _LOGGER.warning("Living-room heater power guard: %s; heater Off requested", reason)
@@ -2072,13 +2088,15 @@ class HeaterPowerGuard:
         shared = entity == getattr(self.bindings, "emergency_ac_switch", None)
         if shared and (domain != "switch" or service != "turn_off"):
             raise RuntimeError("The emergency guard never turns shared AC On")
+        observation = self.shutdown_observations.request(self, domain, service, entity, data)
         async def dispatch():
             if _before_dispatch is not None:
                 _before_dispatch()
+            self.shutdown_observations.command('guard_dispatched', observation)
             return await self.hass.services.async_call(
                 domain, service, {"entity_id": entity, **data}, blocking=True)
 
-        call = (dispatch() if _before_dispatch is not None else
+        call = (dispatch() if _before_dispatch is not None or observation is not None else
                 self.hass.services.async_call(domain, service, {"entity_id": entity, **data}, blocking=True))
         task = self.hass.async_create_task(call, eager_start=False)
         self._service_tasks.add(task)
@@ -2089,6 +2107,9 @@ class HeaterPowerGuard:
             self._positive_tasks.add(task)
 
         def finished(done):
+            self.shutdown_observations.command(
+                'guard_cancelled' if done.cancelled() else
+                'guard_failed' if done.exception() else 'guard_completed', observation)
             self._service_tasks.discard(done)
             self._emergency_service_tasks.discard(done)
             self._positive_tasks.discard(done)
@@ -2182,6 +2203,7 @@ class HeaterPowerGuard:
                 self._observe_aggregate_stop()
                 if not contradictory and (not require_meter or meter_stop is True):
                     self._off_confirmed = True
+                    self.shutdown_observations.native_ack(self)
                     self._shutdown_confirmation = "state_only"
                     if self._aggregate_outcome and self._aggregate_outcome.status == "corroborated":
                         self._shutdown_confirmation = "aggregate_corroborated"
@@ -2200,6 +2222,7 @@ class HeaterPowerGuard:
                 and (watch is None or watch.get("off_clock") is not None)
                 and (not require_meter or self._heater_meter_stopped() is True)):
             self._off_confirmed = True
+            self.shutdown_observations.native_ack(self)
             self._shutdown_confirmation = "state_only"
             return True
         return False

@@ -6,6 +6,12 @@
 - Stage outlet and atomic sweep acknowledgement before direction-dependent boosts through a guarded native hass-dyson adapter. Retain purifier minimums and existing speed quantization; recheck identity, ownership, lifecycle, current demand and allowed speed at actual dispatch. Expose requested/reported settings and independent failures in Controller status. Generic/legacy rules remain opt-in; CLI/add-on directed configurations safely withhold unsupported boosts. See [directed airflow](docs/directed-airflow.md) for migration and later calibration. No deployment, live binding or protection-policy changes.
 - Distinguish switchable Office outlet feedback from Entertainment's explicitly accepted fixed-outlet local sweep. Pin fixed calibration privately to its registered device across reloads; never infer support from a default Forward string, issue unsupported direction writes, or command reverse. Both modes still require fresh matching sweep and enabled-oscillation feedback before boost.
 
+## 0.9.4
+
+- Extend native diagnostics with bounded guard trip/Off-job/electrical evidence and explicitly unattributed HA Off requests. Keep local guard execution separate from unknown external callers, service completion separate from feedback, and whole-supply drop corroboration separate from dedicated load. No control-policy or live configuration changes. See `docs/emergency-shutdown-diagnostics.md`.
+
+- Add native auxiliary authorization and Off-operation diagnostic sensors with cumulative event counts, precise event times, ownership/freshness evidence and bounded downloadable history. Export numeric states directly through Home Assistant Prometheus without helpers. Diagnostics are observational and reset on integration reload; control policy, safety timing and command behavior are unchanged. See `docs/auxiliary-diagnostics.md`.
+
 ## 0.9.3
 
 - Preserve saved purifier minimums when deciding whether a late fan report cancels a bounded recovery retry. A report below the saved floor or fallback target keeps the valid retry available instead of consuming it without dispatch.
