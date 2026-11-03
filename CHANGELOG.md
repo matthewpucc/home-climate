@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Accept Home Assistant's integer feature flags in native purifier airflow capability checks while rejecting boolean and malformed masks. Preserve required feature bits, services, outlet calibration and all existing dispatch/acknowledgement gates.
+
 ## 0.9.6
 
 - Extend bounded shutdown-recovery retries to heads which remain Off after a completed preset, including Off reports without target ranges. Require post-completion feedback, no intervening mode transition, current compatible shared-head states and no pending, uncertain or repair-held head work. Mode and range retries share three total attempts, 15-second spacing and the original feedback deadline; retain ownership, operator, persistence, restart and queued-dispatch safeguards.
