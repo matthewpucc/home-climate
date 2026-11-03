@@ -4,10 +4,14 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import math
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers.entity_component import DATA_INSTANCES
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 
@@ -75,7 +79,7 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
         self.responses.clear()
 
     def report(self, entity, mode="heat_cool", *, at=None, correct=False, attrs=None,
-               context=None, percentage=None):
+               context=None, percentage=None, force_update=True):
         attributes = {"hvac_modes": ["off", "heat", "cool", "heat_cool"],
                       "target_temp_low": 68 if correct else 70,
                       "target_temp_high": 73 if correct else 77}
@@ -85,7 +89,7 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
             if mode == "heat_cool":
                 mode = "on"
         attributes.update(attrs or {})
-        self.hass.states.async_set(entity, mode, attributes, force_update=True,
+        self.hass.states.async_set(entity, mode, attributes, force_update=force_update,
                                    context=context, timestamp=self.wall if at is None else at)
 
     async def handle(self, call):
@@ -99,6 +103,11 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
         self.wall += 1
         if response == "error":
             raise RuntimeError("Synthetic preset service failed")
+        if response == "rejected":
+            raise ServiceValidationError("Synthetic provider rejected Auto")
+        if response == "off":
+            self.fresh_off()
+            return
         if response != "no_report":
             self.report(entity, correct=response == "correct")
 
@@ -140,6 +149,222 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.controls.handoff)
         self.assertEqual(self.controls.owned, ())
         self.assertEqual(self.controls.service_inflight, 0)
+
+    async def first_off(self):
+        self.default_response = "off"
+        return await self.first()
+
+    def fresh_off(self, *, at=None, attrs=None, context=None):
+        self.report(self.head, "off", at=at, context=context, force_update=False, attrs={
+            "target_temp_low": None, "target_temp_high": None, **(attrs or {})})
+
+    async def test_mode_then_range_retry_share_budget_and_original_deadline(self):
+        self.responses[self.head] = ["off", "mismatch", "correct"]
+        first = await self.first()
+        self.wall = first["finished_at"] + 15
+        self.fresh_off()
+        await self.step()
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(self.calls[-1][1], "set_temperature")
+        self.assertEqual(self.calls[-1][2], {
+            "entity_id": self.head, "hvac_mode": "heat_cool",
+            "target_temp_low": 68, "target_temp_high": 73})
+        await self.step(self.request()["finished_at"] + 15)
+        self.assertEqual(self.count(), 3)
+        self.assertEqual(self.request()["first_at"], first["first_at"])
+        await self.step()
+        self.assertIsNone(self.controls.handoff)
+        self.assertFalse(self.controls.owned)
+
+    async def test_off_mode_retries_exhaust_at_three_but_late_success_can_complete(self):
+        first = await self.first_off()
+        for _ in range(4):
+            self.wall += 16
+            self.fresh_off()
+            await self.step()
+        self.assertEqual(self.count(), 3)
+        self.assertEqual(self.request()["first_at"], first["first_at"])
+        await self.step(first["first_at"] + 121)
+        self.assertIn("automatic retries exhausted", self.plan["problems"][self.head])
+        self.report(self.head, correct=True)
+        await self.step()
+        self.assertIsNone(self.controls.handoff)
+        self.assertEqual(self.count(), 3)
+
+    async def test_off_mode_retry_requires_report_after_handler_and_fifteen_second_spacing(self):
+        first = await self.first_off()
+        await self.step(first["finished_at"] + 15)
+        self.assertEqual(self.count(), 1)  # Handler's own Off report is insufficient.
+        self.wall = first["finished_at"] + 14
+        self.fresh_off()
+        await self.step()
+        self.assertEqual(self.count(), 1)
+        await self.step(first["finished_at"] + 15)
+        self.assertEqual(self.count(), 2)
+
+    async def test_off_mode_retry_rejects_untrusted_evidence_and_post_activation_off(self):
+        for case in ("old", "future", "restored", "assumed_state", "returned_off", "operator"):
+            with self.subTest(case=case):
+                self.wall += 200
+                self.reset()
+                first = await self.first_off()
+                self.wall = first["finished_at"] + 15
+                if case == "returned_off":
+                    self.report(self.head)
+                    self.wall += 1
+                self.fresh_off(at=first["at"] if case == "old" else self.wall + 1 if case == "future" else None,
+                               attrs={case: True} if case in ("restored", "assumed_state") else None,
+                               context=Context(user_id="synthetic_operator") if case == "operator" else None)
+                await self.step()
+                self.assertEqual(self.count(), 1)
+
+    async def test_off_mode_retry_preserves_uncertain_rejected_and_restart_vetoes(self):
+        for case in ("uncertain", "cancelled_before_dispatch", "rejected", "service_failed", "interrupted"):
+            with self.subTest(case=case):
+                self.wall += 200
+                self.reset()
+                first = await self.first_off()
+                self.wall = first["finished_at"] + 15
+                self.fresh_off()
+                if case == "interrupted":
+                    self.controls.handoff = handoff.restored(deepcopy(self.plan))
+                    self.plan = self.controls.handoff
+                else:
+                    first[case] = True
+                await self.step()
+                self.assertEqual(self.count(), 1)
+
+    async def test_off_mode_retry_requires_current_compatible_reports_from_all_configured_heads(self):
+        for mode, attrs, age in (
+            ("heat", {}, 0), ("cool", {}, 0), ("dry", {}, 0), ("fan_only", {}, 0),
+            ("unknown", {}, 0), ("unavailable", {}, 0), ("off", {"restored": True}, 0),
+            ("heat_cool", {"assumed_state": True}, 0), ("off", {}, 181), ("off", {}, -1),
+        ):
+            with self.subTest(mode=mode, attrs=attrs, age=age):
+                self.wall += 200
+                self.reset()
+                first = await self.first_off()
+                self.wall = first["finished_at"] + 15
+                self.fresh_off()
+                self.report(self.other, mode, at=self.wall - age, attrs=attrs)
+                await self.step()
+                self.assertEqual(self.count(), 1)
+                self.assertEqual(self.request()["attempts"], 1)
+        self.report(self.other, "heat_cool", correct=True)
+        await self.step()
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(self.count(self.other), 0)
+
+    async def test_off_mode_retry_waits_for_peer_jobs_uncertainty_and_repair(self):
+        first = await self.first_off()
+        self.wall = first["finished_at"] + 15
+        self.fresh_off()
+        self.controls.repair_gate = RepairGate(self.cfg.heads.values())
+        pending = self.hass.loop.create_future()
+        for case in ("stop", "pending", "handoff", "uncertain", "repair"):
+            with self.subTest(case=case):
+                if case == "stop":
+                    self.controls._stop_jobs[pending] = self.other
+                elif case == "pending":
+                    self.controls.pending_device_jobs = lambda entities: (pending,) if self.other in entities else ()
+                elif case == "handoff":
+                    self.controls._handoff_jobs[self.other] = pending
+                elif case == "uncertain":
+                    self.controls._uncertain_device_jobs.add(self.other)
+                else:
+                    lease = self.controls.repair_gate.begin("synthetic_owner", (self.other,))
+                await self.step()
+                self.assertEqual(self.count(), 1)
+                self.controls._stop_jobs.clear()
+                self.controls.pending_device_jobs = lambda entities: ()
+                self.controls._handoff_jobs.pop(self.other, None)
+                self.controls._uncertain_device_jobs.clear()
+                if case == "repair":
+                    self.controls.repair_gate.release(lease)
+        pending.set_result(None)
+        await self.step()
+        self.assertEqual(self.count(), 2)
+
+    def kumo_provider(self, profile):
+        cls = type("SyntheticKumo", (), {"__module__": "custom_components.kumo.climate"})
+        entity = cls()
+        entity.available = True
+        entity._pykumo = SimpleNamespace(_profile=profile)
+        self.hass.data[DATA_INSTANCES] = {"climate": SimpleNamespace(
+            get_entity=lambda entity_id: entity if entity_id == self.head else None)}
+        return entity
+
+    async def test_kumo_profile_rejection_blocks_initial_combined_write_despite_advertised_auto(self):
+        self.kumo_provider({"hasModeAuto": False})
+        await self.step()
+        self.assertEqual(self.count(), 0)
+        self.assertNotIn(self.head, self.plan["requests"])
+        self.assertIn("rejected by the current Kumo profile", self.plan["problems"][self.head])
+
+    async def test_unknown_kumo_profile_and_missing_native_entity_do_not_fall_back_to_cached_modes(self):
+        for profile in (None, [], {"hasModeAuto": "true"}, {"hasModeAuto": 1}):
+            with self.subTest(profile=profile):
+                self.kumo_provider(profile)
+                await self.step()
+                self.assertEqual(self.count(), 0)
+                self.assertIn("unverified", self.plan["problems"][self.head])
+        provider = self.kumo_provider({"hasModeAuto": True})
+        provider.available = False
+        await self.step()
+        self.assertEqual(self.count(), 0)
+        dr.async_setup(self.hass)
+        await dr.async_load(self.hass)
+        await er.async_load(self.hass)
+        registry = er.async_get(self.hass)
+        self.hass.states.async_remove(self.head)
+        registry.async_get_or_create("climate", "kumo", "synthetic-head", suggested_object_id=self.head.split(".")[1])
+        self.report(self.head, "off")
+        self.assertEqual(registry.async_get(self.head).platform, "kumo")
+        self.hass.data[DATA_INSTANCES].pop("climate")
+        await self.step()
+        self.assertEqual(self.count(), 0)
+        self.assertIn("unverified", self.plan["problems"][self.head])
+
+    async def test_provider_profile_loss_during_initial_persistence_blocks_all_writes(self):
+        provider = self.kumo_provider({"hasModeAuto": True})
+        original = self.controls.store.async_save
+
+        async def save(data):
+            await original(data)
+            provider._pykumo._profile = {"hasModeAuto": False}
+
+        with patch.object(self.controls.store, "async_save", side_effect=save):
+            await self.step()
+        self.assertEqual(self.count(), 0)
+        self.assertFalse(self.request().get("dispatched"))
+        self.assertIn("Kumo profile", self.plan["problems"][self.head])
+
+    async def test_kumo_profile_rejection_blocks_off_retry_until_support_returns_within_same_budget(self):
+        provider = self.kumo_provider({"hasModeAuto": True})
+        first = await self.first_off()
+        provider._pykumo._profile = {}  # Missing flag is rejection in pykumo too.
+        self.wall = first["finished_at"] + 15
+        self.fresh_off()
+        await self.step()
+        self.assertEqual(self.count(), 1)
+        self.assertIn("rejected by the current Kumo profile", self.plan["problems"][self.head])
+        provider._pykumo._profile = {"hasModeAuto": True}
+        self.default_response = "correct"
+        await self.step()
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(self.request()["first_at"], first["first_at"])
+        await self.step()
+        self.assertIsNone(self.controls.handoff)
+
+    async def test_explicit_validation_rejection_cannot_authorize_retry_from_fresh_off(self):
+        self.responses[self.head] = ["rejected"]
+        first = await self.first()
+        self.wall = first["finished_at"] + 15
+        self.fresh_off()
+        await self.step()
+        self.assertTrue(first["rejected"])
+        self.assertEqual(self.count(), 1)
+        self.assertIn("command was rejected", self.plan["problems"][self.head])
 
     async def test_fifteen_second_spacing_starts_after_actual_service_completion(self):
         request = await self.first()
@@ -496,9 +721,11 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.count(), 1)
         self.assertTrue(self.plan["interrupted"])
 
-    async def queued_retry(self, change):
-        first = await self.first()
+    async def queued_retry(self, change, *, off=False):
+        first = await (self.first_off() if off else self.first())
         self.wall = first["finished_at"] + 15
+        if off:
+            self.fresh_off()
         entered, release = asyncio.Event(), asyncio.Event()
         original = self.hass.async_create_background_task
 
@@ -530,6 +757,35 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_controller_on_revokes_a_retry_queued_under_disabled_ownership(self):
         await self.queued_retry(lambda: setattr(self.controls, "enabled", True))
+
+    async def test_peer_direction_change_revokes_queued_off_mode_retry(self):
+        await self.queued_retry(lambda: self.report(self.other, "heat"), off=True)
+
+    async def test_peer_repair_epoch_change_revokes_queued_off_mode_retry(self):
+        self.controls.repair_gate = RepairGate(self.cfg.heads.values())
+
+        def repaired():
+            lease = self.controls.repair_gate.begin("synthetic_owner", (self.other,))
+            self.controls.repair_gate.release(lease)
+
+        await self.queued_retry(repaired, off=True)
+
+    async def test_controller_on_revokes_queued_off_mode_retry(self):
+        await self.queued_retry(lambda: setattr(self.controls, "enabled", True), off=True)
+
+    async def test_new_uncertainty_revokes_queued_off_mode_retry(self):
+        await self.queued_retry(lambda: self.controls._uncertain_device_jobs.add(self.head), off=True)
+
+    async def test_provider_profile_change_revokes_queued_off_mode_retry(self):
+        provider = self.kumo_provider({"hasModeAuto": True})
+        await self.queued_retry(lambda: provider._pykumo._profile.update(hasModeAuto=False), off=True)
+        self.assertIn("Kumo profile", self.plan["problems"][self.head])
+
+    async def test_late_success_revokes_queued_off_mode_retry(self):
+        await self.queued_retry(lambda: self.report(self.head, correct=True), off=True)
+
+    async def test_original_deadline_revokes_queued_off_mode_retry(self):
+        await self.queued_retry(lambda: setattr(self, "wall", self.request()["first_at"] + 121), off=True)
 
     async def test_rotated_generation_revokes_queued_retry(self):
         await self.queued_retry(lambda: setattr(self.controls, "ownership_generation", 1))

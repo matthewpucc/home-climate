@@ -11,6 +11,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import math
 
+from homeassistant.exceptions import ServiceValidationError
+
+from .recovery_capability import mode_issue
+
 HANDOFF_MAX_ATTEMPTS = 3
 HANDOFF_RETRY_SECONDS = 15
 
@@ -76,6 +80,7 @@ def _retry_evidence(controls, plan, entity, request, state):
     if (not _valid_retry_record(request) or plan.get("interrupted")
             or not request.get("dispatched") or request.get("finished_at") is None
             or request.get("uncertain") or request.get("cancelled_before_dispatch")
+            or request.get("rejected")
             or entity in controls._uncertain_device_jobs
             or request.get("attempts", 1) >= HANDOFF_MAX_ATTEMPTS
             or _operator_changed(state, request)
@@ -83,12 +88,42 @@ def _retry_evidence(controls, plan, entity, request, state):
             or current >= request.get("first_at", request["at"]) + controls.config.head_activation_timeout_seconds
             or state is None or state.state in ("unknown", "unavailable")
             or state.attributes.get("restored") or state.attributes.get("assumed_state")
-            or not _reported_target_valid(state, fan=entity in plan["fans"])
             or state.last_reported.timestamp() <= _report_boundary(request)
             or state.last_reported.timestamp() > current
-            or (entity in plan["heads"] and state.state != "heat_cool")
             or controls.stop_jobs({entity}) or controls.pending_device_jobs({entity})):
         return False
+    if entity in plan["heads"]:
+        if state.state == "off":
+            return _mode_retry_evidence(controls, request, state, current)
+        if state.state != "heat_cool":
+            return False
+    return _reported_target_valid(state, fan=entity in plan["fans"])
+
+
+def _mode_retry_evidence(controls, request, state, current):
+    """Only reassert Auto on a head which stayed Off in a compatible group.
+
+    Off commonly has no range fields. Unlike range retries, require feedback
+    after the completed handler and refuse a return to Off after activation.
+    The original stop/settle barrier and first-attempt deadline still apply.
+    """
+    if (request.get("service_failed")
+            or state.last_reported.timestamp() <= request["finished_at"]
+            or state.last_changed.timestamp() > request.get("first_at", request["at"])):
+        return False
+    heads = set(controls.config.heads.values())
+    if (controls.stop_jobs(heads) or controls.pending_device_jobs(heads)
+            or heads.intersection(controls._uncertain_device_jobs)):
+        return False
+    for head in heads:
+        other = controls.hass.states.get(head)
+        job = controls._handoff_jobs.get(head)
+        if ((head != state.entity_id and job is not None and not job.done())
+                or (controls.repair_gate and controls.repair_gate.held(head))
+                or other is None or other.state not in ("off", "heat_cool")
+                or other.attributes.get("restored") or other.attributes.get("assumed_state")
+                or not 0 <= current - other.last_reported.timestamp() <= 180):
+            return False
     return True
 
 
@@ -159,6 +194,8 @@ def _desired(controls, plan, entity):
                 or state.attributes.get("restored") or state.attributes.get("assumed_state")
                 or "heat_cool" not in state.attributes.get("hvac_modes", ())):
             raise ValueError("Available dual-setpoint Auto capability is required")
+        if issue := mode_issue(controls.hass, entity):
+            raise ValueError(issue)
         celsius = controls.hass.config.units.temperature_unit in ("°C", "C")
         convert = (lambda f: (f - 32) * 5 / 9) if celsius else float
         return "climate", "set_temperature", {
@@ -319,6 +356,12 @@ async def step(controls):
                 request["operator_changed"] = True
                 plan["problems"][entity] = "Operator changed this device during recovery; no preset will be replayed"
                 continue
+            if request.get("rejected"):
+                plan["problems"][entity] = "Recovery command was rejected; inspect this device before retrying"
+                continue
+            if entity in plan["heads"] and (issue := mode_issue(controls.hass, entity)):
+                plan["problems"][entity] = issue
+                continue
             if plan.get("interrupted") or now() - request.get("first_at", request["at"]) >= controls.config.head_activation_timeout_seconds:
                 exhausted = "; automatic retries exhausted" if request.get("attempts", 1) >= HANDOFF_MAX_ATTEMPTS else ""
                 plan["problems"][entity] = f"Recovery outcome is unconfirmed{exhausted}; inspect this device before retrying"
@@ -331,11 +374,15 @@ async def step(controls):
             continue
         try:
             domain, service, data = _desired(controls, plan, entity)
+            mode_epochs = {}
             if retry is not None and data != retry["data"]:
                 raise ValueError("Recovery targets changed; automatic retry is inhibited")
             if controls.repair_gate:
                 epoch = controls.repair_gate.capture(entity, activation=True)
                 controls.repair_gate.check(entity, epoch, activation=True)
+                if retry is not None and entity in plan["heads"] and state.state == "off":
+                    mode_epochs = {head: controls.repair_gate.capture(head, activation=True)
+                                   for head in controls.config.heads.values()}
         except (ValueError, RuntimeError) as exc:
             plan["problems"][entity] = str(exc)
             continue
@@ -349,7 +396,7 @@ async def step(controls):
         controls.service_inflight += 1
         async def dispatch(entity=entity, domain=domain, service=service, data=data,
                            epoch=epoch if controls.repair_gate else None,
-                           generation=generation, request=request, retry=retry):
+                           generation=generation, request=request, retry=retry, mode_epochs=mode_epochs):
             started = False
             try:
                 if (controls.handoff is not plan or controls.takeover_pending
@@ -377,8 +424,14 @@ async def step(controls):
                             or _desired(controls, plan, entity) != (domain, service, data)):
                         plan["problems"][entity] = "Recovery retry no longer has valid reported-state evidence; inspect this device"
                         return
+                # Initial writes also recheck effective provider capability after
+                # persistence, before any service (including range writes).
+                if domain == "climate" and _desired(controls, plan, entity) != (domain, service, data):
+                    raise ValueError("Recovery targets changed before dispatch")
                 if controls.repair_gate:
                     controls.repair_gate.check(entity, epoch, activation=True)
+                    for head, head_epoch in mode_epochs.items():
+                        controls.repair_gate.check(head, head_epoch, activation=True)
                 if controls.pending_device_jobs({entity}) or controls.stop_jobs({entity}):
                     plan["problems"][entity] = "Previous device command remains unresolved; recovery activation blocked"
                     return
@@ -395,6 +448,10 @@ async def step(controls):
                 started = True
                 await controls.hass.services.async_call(domain, service, {"entity_id": entity, **data}, blocking=True)
             except Exception as exc:
+                if started:
+                    request["service_failed"] = True
+                    if isinstance(exc, ServiceValidationError):
+                        request["rejected"] = True
                 plan["problems"][entity] = f"Recovery command failed: {exc}"
             finally:
                 if started:

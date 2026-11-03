@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Extend bounded shutdown-recovery retries to heads which remain Off after a completed preset, including Off reports without target ranges. Require post-completion feedback, no intervening mode transition, current compatible shared-head states and no pending, uncertain or repair-held head work. Mode and range retries share three total attempts, 15-second spacing and the original feedback deadline; retain ownership, operator, persistence, restart and queued-dispatch safeguards.
+- Check Kumo's current cached Auto profile before recovery writes, independently of its advertised HA modes. Report rejected or unverified support without repeating unsupported commands; explicit service validation rejections also inhibit retries. This reads provider evidence only and does not repair, reload or modify an integration. No deployment or live configuration changes.
+
 ## 0.9.5
 
 - Add demand-directed per-device purifier sweeps with explicit room intent, provisional calibration metadata, direction confirmation/dwell, and stable minimum-speed baseline. Office can use its accepted Entertainment-facing sweep or provisionally accepted Office-facing sweep; Entertainment retains only its known local circulation profile. Comfort aim does not create or satisfy HVAC demand, and limits-only periods do not invent comfort demand from nominal targets.
