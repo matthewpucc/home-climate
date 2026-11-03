@@ -994,6 +994,10 @@ class NativeControls:
         receipt = self.auxiliary_off_started() if entity == self.config.heater_entity else None
         head_receipt = self.head_off_started(entity)
         try:
+            if entity.startswith("fan."):
+                from .configuration import purifier_identity_issue
+                if issue := purifier_identity_issue(self.hass, self.config, entity, activation=False, controls=self):
+                    raise HAError(issue)
             if (entity == self.config.heater_entity and self.power_guard is not None
                     and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
                 if not await self.power_guard.async_request_heater_off():

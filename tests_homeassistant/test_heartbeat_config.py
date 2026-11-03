@@ -40,7 +40,7 @@ class FixedHeartbeatTests(unittest.TestCase):
         self.assertEqual(strings, json.loads((root / "translations/en.json").read_text()))
         actual = {field["name"] for field in probatio.to_field_list(_schema(), custom_serializer=cv.custom_serializer)}
         self.assertEqual(actual, {"live", *ProtectionTemperatures().to_dict(),
-                                 "rooms", "auxiliary_policy", "seasonal_policy", "fallback",
+                                 "rooms", "auxiliary_policy", "seasonal_policy", "purifiers", "fallback",
                                  "heartbeat_timeout_seconds", "auxiliary_heartbeat_timeout_seconds"})
         for section, step in (("config", "user"), ("options", "init")):
             self.assertEqual(set(strings[section]["step"]), {step})

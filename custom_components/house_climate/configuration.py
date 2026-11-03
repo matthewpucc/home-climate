@@ -60,6 +60,38 @@ def validate_actuators(hass, config):
     if any((entry := registry.async_get(entity)) and entry.platform == DOMAIN
            for entity in config.climate_entities):
         raise ValueError("Select physical heat-pump and auxiliary heater entities")
+    for entity in config.fans.values():
+        if issue := purifier_identity_issue(hass, config, entity, activation=False):
+            raise ValueError(issue)
+
+
+def purifier_identity_issue(hass, config, entity, *, activation=True, require_identity=False, controls=None):
+    """Never treat an auxiliary heater's fan alias as an independent purifier.
+
+    Registry device association is configuration evidence, not physical device
+    telemetry. New always-running floors require explicit distinct identities;
+    legacy fan rules retain their existing behavior when identity is unknown.
+    A known alias also blocks fan Off, which could interrupt manual heating.
+    """
+    heaters = {value for value in (config.heater_entity,
+        getattr(controls, "auxiliary_manual_entity", None),
+        *getattr(controls, "pending_auxiliaries", ())) if value}
+    if not heaters or not isinstance(entity, str) or not entity.startswith("fan."):
+        return None
+    from homeassistant.helpers import entity_registry as er
+
+    registry = er.async_get(hass)
+    heater_devices = {entry.device_id if (entry := registry.async_get(heater)) else None
+                      for heater in heaters}
+    fan_entry = registry.async_get(entity)
+    fan_device = fan_entry.device_id if fan_entry else None
+    if fan_device and fan_device in heater_devices:
+        return "Purifier binding is an auxiliary heater fan alias; use a separate physical purifier"
+    explicit_floor = any(fan.entity_id == entity and fan.minimum_percentage > 0
+                         for fan in config.fan_controls.values())
+    if activation and (explicit_floor or require_identity) and (None in heater_devices or not fan_device):
+        return "Purifier device identity is unverified; a separate device from the auxiliary heater is required"
+    return None
 
 
 def entry_policy_settings(config_dir, values):

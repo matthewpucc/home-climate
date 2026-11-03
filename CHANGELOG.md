@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Keep ordinary house purifiers at a configurable 20% minimum while preserving higher scheduled and thermal-assist speeds. Thermal transfer vetoes remove the boost, not the independent purification floor. Add an optional explicitly bound separate Living purifier, default 100%; no auxiliary-heater fan alias is inferred or controlled. Generic configurations retain zero minimum unless selected.
+- Preserve saved purifier minimums during safe recovery handoff, above the configured fallback fan speed, while retaining mandatory Off cleanup and fault/ownership gates. Reject registered heater aliases before setup and every native fan dispatch; explicit minimums require distinct registered fan/heater device identities before activation. Add purifier policy fields to Configure; existing four-fan bindings remain valid, and the optional fifth purifier requires an explicit private binding. No live configuration, auxiliary policy or equipment timing changes.
+
 ## 0.9.2
 
 - Let explicit native Controller On supersede incomplete fallback preset confirmation, retaining real command lifetimes, uncertain-job ownership and fresh shared-head Off before normal acquisition. Fence queued fallback writes and invalidate earlier stop evidence after late head activation. Preserve independent auxiliary shutdown, cutoff and manual ownership.

@@ -18,6 +18,7 @@ LEGACY_BINDINGS_FILENAME = "house_climate_bindings.json"
 HEAD_ROLES = frozenset({"bonus", "guest", "primary", "living"})
 ROOM_ROLES = frozenset({"office", "entertainment", "guest", "primary", "living"})
 FAN_ROLES = frozenset({"primary", "guest", "office", "entertainment"})
+OPTIONAL_FAN_ROLES = frozenset({"living"})
 POWER_ROLES = frozenset({
     "heater_switch", "battery", "circuit_power", "input_power", "output_power",
     "heater_current", "wall_phase_a_voltage", "wall_phase_b_voltage",
@@ -137,7 +138,7 @@ class HouseBindings:
         heads, selected_rooms, fans = dict(self.heads), dict(self.rooms), dict(self.fans)
         _keys(heads, HEAD_ROLES, "heads")
         _keys(selected_rooms, ROOM_ROLES, "rooms")
-        _keys(fans, FAN_ROLES, "fans")
+        _keys(fans, FAN_ROLES, "fans", optional=OPTIONAL_FAN_ROLES)
         heads = {role: _entity(value, "climate", f"heads.{role}") for role, value in heads.items()}
         heater = _entity(self.heater, "climate", "heater")
         if len(set(heads.values()) | {heater}) != len(heads) + 1:
@@ -220,7 +221,7 @@ class HouseBindings:
         _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings", optional={"windows", "outdoor", "notifications"})
         _keys(raw["heads"], HEAD_ROLES, "heads")
         _keys(raw["rooms"], ROOM_ROLES, "rooms")
-        _keys(raw["fans"], FAN_ROLES, "fans")
+        _keys(raw["fans"], FAN_ROLES, "fans", optional=OPTIONAL_FAN_ROLES)
         _keys(raw["power"], POWER_ROLES, "power",
               optional={"emergency_ac_switch", "emergency_ac_fallback_enabled",
                         "aggregate_stop_confirmation", "emergency_notify_service", "heater_power", "ac_output_switch"})

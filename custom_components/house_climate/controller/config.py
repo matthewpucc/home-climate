@@ -153,6 +153,13 @@ class FanControl:
     strategy: str = "cooling"
     percentage: Value = 50
     source_room: str | None = None
+    minimum_percentage: float = 0
+
+
+@dataclass(frozen=True)
+class PurifierPolicy:
+    minimum_percentage: float = 0
+    living_percentage: float = 100
 
 
 @dataclass(frozen=True)
@@ -231,13 +238,14 @@ class Config:
     auxiliary_policy: AuxiliaryPolicy = field(default_factory=AuxiliaryPolicy)
     fallback: FallbackPolicy | None = None
     seasonal_policy: SeasonalPolicy = field(default_factory=SeasonalPolicy)
+    purifiers: PurifierPolicy = field(default_factory=PurifierPolicy)
 
     def __post_init__(self):
         object.__setattr__(self, "outdoor_probes", parse_outdoor_probes(self.outdoor_probes))
         if self.protection is not None and not isinstance(self.protection, ProtectionTemperatures):
             raise ValueError("Protection must be a ProtectionTemperatures object or absent")
         for name, kind in (("auxiliary_policy", AuxiliaryPolicy), ("fallback", FallbackPolicy),
-                           ("seasonal_policy", SeasonalPolicy)):
+                           ("seasonal_policy", SeasonalPolicy), ("purifiers", PurifierPolicy)):
             value = getattr(self, name)
             if name == "fallback" and value is None:
                 continue
@@ -466,6 +474,11 @@ class Config:
                 raise ValueError("An airflow fan needs a different source room")
             if not 0 <= settings.value(fan.percentage) <= 100:
                 raise ValueError("Invalid fan percentage")
+            if (isinstance(fan.minimum_percentage, bool)
+                    or not isinstance(fan.minimum_percentage, (int, float))
+                    or not math.isfinite(fan.minimum_percentage)
+                    or not 0 <= fan.minimum_percentage <= 100):
+                raise ValueError("Fan minimum percentage must be a finite number from 0 to 100")
         if set(self.fans.values()) != {f.entity_id for f in self.fan_controls.values()}:
             raise ValueError("Every fan must have a control rule")
         for name in ("poll_seconds", "sensor_stale_seconds", "sensor_confirmation_seconds",
@@ -524,6 +537,10 @@ class Config:
         def finite(value, name, minimum, maximum):
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not minimum <= value <= maximum:
                 raise ValueError(f"{name} must be a finite number from {minimum} to {maximum}")
+        finite(self.purifiers.minimum_percentage, "Purifier minimum percentage", 0, 100)
+        finite(self.purifiers.living_percentage, "Living purifier percentage", 0, 100)
+        if self.purifiers.living_percentage < self.purifiers.minimum_percentage:
+            raise ValueError("Living purifier percentage cannot be below the purifier minimum")
         auxiliary = self.auxiliary_policy
         if settings.clock(auxiliary.peak_start) == settings.clock(auxiliary.peak_end):
             raise ValueError("Peak hours must have distinct start and end times")

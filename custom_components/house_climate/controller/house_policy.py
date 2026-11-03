@@ -184,18 +184,19 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
         "auxiliary_fan_enabled": True, "auxiliary_dynamic_stop": True, "heater_high_setpoint_f": 80,
         "heater_cutoff_f": 70, "heater_setpoint_confirmed": True,
         "auxiliary_policy": {}, "seasonal_policy": {"enabled": True},
+        "purifiers": {"minimum_percentage": 20, "living_percentage": 100},
         "fallback": {"heat_low_f": 68, "cool_high_f": 73, "fan_percentage": 40},
     }
     if policy_settings is not None:
         if not isinstance(policy_settings, dict):
             raise ValueError("Policy settings must be an object")
-        allowed = {"rooms", "auxiliary_policy", "seasonal_policy", "fallback",
+        allowed = {"rooms", "auxiliary_policy", "seasonal_policy", "purifiers", "fallback",
                    "heartbeat_timeout_seconds", "auxiliary_heartbeat_timeout_seconds"}
         if set(policy_settings) - allowed:
             raise ValueError("Policy settings cannot replace device wiring or protection settings")
         for name, value in policy_settings.items():
             if name != "rooms":
-                if name in {"auxiliary_policy", "seasonal_policy", "fallback"}:
+                if name in {"auxiliary_policy", "seasonal_policy", "purifiers", "fallback"}:
                     if not isinstance(value, dict):
                         raise ValueError(f"{name} must be an object")
                     data[name] = {**data[name], **deepcopy(value)}
@@ -214,6 +215,16 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
                     rooms[identities[name]][field] = {**rooms[identities[name]][field], **deepcopy(value)}
                 else:
                     rooms[identities[name]][field] = deepcopy(value)
+    purifiers = data["purifiers"]
+    for room in rooms.values():
+        for fan in room.get("fans", ()):
+            fan["minimum_percentage"] = purifiers["minimum_percentage"]
+    if "living" in bindings.fans:
+        rooms[identities["living"]]["fans"] = [{
+            "entity_id": bindings.fans["living"], "strategy": "always",
+            "percentage": purifiers["living_percentage"],
+            "minimum_percentage": purifiers["living_percentage"],
+        }]
     return Config.from_dict(data)
 
 
@@ -244,6 +255,7 @@ def editable_policy_settings(config, bindings):
             rooms[canonical]["seasonal_profiles"] = {
                 name: asdict(profile) for name, profile in selected.seasonal_profiles.items()}
     return {"rooms": rooms, "auxiliary_policy": asdict(config.auxiliary_policy),
+            "purifiers": asdict(config.purifiers),
             "fallback": asdict(config.fallback), "seasonal_policy": asdict(config.seasonal_policy),
             "heartbeat_timeout_seconds": config.heartbeat_timeout_seconds,
             "auxiliary_heartbeat_timeout_seconds": config.auxiliary_heartbeat_timeout_seconds}

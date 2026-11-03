@@ -111,8 +111,10 @@ class HousePolicyTests(unittest.TestCase):
         decision = Policy(self.cfg).decide(data, now, self.settings)
         self.assertNotIn("bonus", decision.head_targets_f)
         self.assertIn("primary", decision.head_targets_f)
-        self.assertEqual(decision.fans[self.bindings.fans["office"]], 0)
-        self.assertEqual(decision.fans[self.bindings.fans["entertainment"]], 0)
+        # Missing room evidence inhibits conditioning, not independent air
+        # purification. Neither transfer fan may retain its 60% thermal boost.
+        self.assertEqual(decision.fans[self.bindings.fans["office"]], 20)
+        self.assertEqual(decision.fans[self.bindings.fans["entertainment"]], 20)
 
     def test_old_tuning_cannot_override_rules_but_room_identity_is_preserved(self):
         old = self.cfg.to_dict()
