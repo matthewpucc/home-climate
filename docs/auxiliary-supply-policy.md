@@ -30,6 +30,8 @@ Native target readback and HA report timestamps remain integration-reported evid
 
 ## Shutdown evidence
 
+[Native auxiliary diagnostics](auxiliary-diagnostics.md) provide direct Recorder/Prometheus values for authorization, command lifetimes and accepted stop evidence without helpers.
+
 The existing **five-second native-Off deadline** and state-only confirmation behavior remain. There is no new five-second requirement to receive both native Off and low watts. Dedicated low load means below **100 W**, or below **1 A** when an explicitly bound current meter is used. These are evidence thresholds, not a watt-to-amp conversion or manufacturer rating.
 
 Diagnostics distinguish:
