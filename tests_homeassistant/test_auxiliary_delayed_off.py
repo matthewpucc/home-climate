@@ -22,13 +22,19 @@ class AuxiliaryDelayedOffTests(unittest.IsolatedAsyncioTestCase):
     controlled_clock = heartbeat.HeartbeatDeliveryTests.controlled_clock
     set_device_mode = heartbeat.HeartbeatDeliveryTests.set_device_mode
 
-    async def delayed_off(self):
+    async def delayed_off(self, *, automatic_checks=False):
         runtime, _ = await self.timed_runtime()
         clock = self.controlled_clock()
         await self.claim(runtime)
         c = runtime.controls
         await self.settle_watchdog(c)
-        c._schedule_check = lambda *_: None
+        if not automatic_checks:
+            # HA subscriptions retain the original bound callback. Remove them
+            # before publishing feedback so each test controls its read order.
+            for unsubscribe in c._unsubscribers:
+                unsubscribe()
+            c._unsubscribers = []
+            c._schedule_check = lambda *_: None
         heater = runtime.config.heater_entity
         await asyncio.to_thread(
             runtime.api.service, "climate", "set_temperature",
@@ -406,3 +412,17 @@ class AuxiliaryDelayedOffTests(unittest.IsolatedAsyncioTestCase):
         c.confirm_auxiliary_authorization()
         self.assertFalse(c.auxiliary_heartbeat_blocked)
         self.assertEqual(c.auxiliary_authorized_at, 221)
+
+    async def test_delayed_report_event_schedules_reconciliation(self):
+        runtime, clock = await self.delayed_off(automatic_checks=True)
+        c = runtime.controls
+        authorized = (c.auxiliary_authorized_at, c.auxiliary_authorized_wall)
+        clock.value = 151
+        self.set_device_mode(runtime.config.heater_entity, "off")
+        await self.settle_watchdog(c)
+        self.assertFalse(c._auxiliary_heat_possible)
+        self.assertTrue(c._auxiliary_heartbeat_off_ack)
+        clock.value = 221
+        await c.async_check()
+        self.assertFalse(c.auxiliary_heartbeat_blocked)
+        self.assertEqual((c.auxiliary_authorized_at, c.auxiliary_authorized_wall), authorized)
