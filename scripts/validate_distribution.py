@@ -1,4 +1,5 @@
 """Validate the install ZIP and run tests from the actual public-source ZIP."""
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -20,6 +21,17 @@ with ZipFile(ROOT / "dist/home-climate-integration.zip") as archive:
                    for name in names)
     manifest = json.loads(archive.read("custom_components/house_climate/manifest.json"))
     assert manifest["version"] == version
+    native_files = {name for name in names if name.startswith("custom_components/house_climate/")}
+    expected_files = {path.relative_to(ROOT).as_posix()
+                      for path in (ROOT / "custom_components/house_climate").rglob("*")
+                      if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+                      and path.name not in ("home_climate_bindings.json", "house_climate_bindings.json", "bindings.local.json")}
+    assert native_files == expected_files, "Native integration archive file set differs from checkout"
+    for name in sorted(native_files):
+        assert archive.read(name) == (ROOT / name).read_bytes(), name
+    print(f"Verified native integration version {version}: {len(native_files)} files match checkout", flush=True)
+    digest = hashlib.sha256((ROOT / "dist/home-climate-integration.zip").read_bytes()).hexdigest()
+    print(f"Native integration ZIP SHA256: {digest}", flush=True)
 
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)

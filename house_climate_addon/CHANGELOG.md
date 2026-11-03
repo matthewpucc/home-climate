@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.3
+
+- Align distribution metadata with the native integration release and package the shared controller's configurable purifier minimums.
+- The native integration release also fixes bounded fallback retries, unload lifecycle timing, delayed auxiliary Off reconciliation, and saved-floor acknowledgement during recovery retries. These native lifecycle and lease fixes require updating the integration; the add-on does not install them or the native electrical guard.
+
 ## 0.8.3
 
 - Align distribution metadata with the native integration release. The optional shared AC cutoff, aggregate corroboration and emergency notifications are native-integration features; the add-on does not install that independent guard.
