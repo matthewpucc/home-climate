@@ -16,6 +16,7 @@ from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 
 PRESET_SCHEDULE = "Schedule"
 PRESET_TEMPORARY = "Temporary"
+PRESET_HOLD = "Hold"
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -75,6 +76,7 @@ class RoomControl:
             "room_id": self.room_id,
             "comfort_enabled": comfort["comfort_enabled"],
             "override_expires_at": comfort["expires_at"],
+            "comfort_mode": comfort["mode"],
             "control_enabled": status.get("control_enabled", status.get("event") == "live"),
             "shadow_mode": status.get("event") == "shadow" or not self.runtime.live,
             "head_entity_id": config.heads[room.head],
@@ -94,7 +96,7 @@ class RoomClimate(RoomControl, ClimateEntity):
     _attr_hvac_modes = [HVACMode.HEAT_COOL]
     _attr_hvac_mode = HVACMode.HEAT_COOL
     _attr_target_temperature_step = .5
-    _attr_preset_modes = [PRESET_SCHEDULE, PRESET_TEMPORARY]
+    _attr_preset_modes = [PRESET_SCHEDULE, PRESET_TEMPORARY, PRESET_HOLD]
 
     def __init__(self, entry, room_id):
         super().__init__(entry, room_id, f"climate_{room_id}")
@@ -146,7 +148,8 @@ class RoomClimate(RoomControl, ClimateEntity):
 
     @property
     def preset_mode(self):
-        return PRESET_TEMPORARY if self.comfort["hold"] else PRESET_SCHEDULE
+        return {"schedule": PRESET_SCHEDULE, "temporary": PRESET_TEMPORARY,
+                "hold": PRESET_HOLD}[self.comfort["mode"]]
 
     @property
     def hvac_action(self):
@@ -200,8 +203,10 @@ class RoomClimate(RoomControl, ClimateEntity):
             await self.runtime.comfort.async_resume(self.room_id)
         elif preset_mode == PRESET_TEMPORARY:
             await self.runtime.comfort.async_hold(self.room_id)
+        elif preset_mode == PRESET_HOLD:
+            await self.runtime.comfort.async_hold(self.room_id, persistent=True)
         else:
-            raise ServiceValidationError("Choose Schedule or Temporary")
+            raise ServiceValidationError("Choose Schedule, Temporary or Hold")
 
     async def async_set_hvac_mode(self, hvac_mode):
         if hvac_mode != HVACMode.HEAT_COOL:

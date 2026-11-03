@@ -86,11 +86,13 @@ class ComfortRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_hard_upper_guard_still_cools_when_desired_target_is_at_limit(self):
         runtime, switch = await self.start_live()
+        await runtime.comfort.async_hold("guest", persistent=True)
         await runtime.comfort.async_set_range("guest", 74, 75)
         await runtime.comfort.async_set_target("guest", 75)
         await self.until(lambda: runtime.status.get("room_targets", {}).get("guest", {}).get("target_f") == 75)
         target = runtime.status["room_targets"]["guest"]
         self.assertEqual(target["high_f"], runtime.config.high_f)
+        self.assertEqual(runtime.comfort.effective("guest")["mode"], "hold")
         self.assertTrue(target["cool_requested"])
         self.assertEqual(runtime.status["head_targets_f"]["guest"], 73.5)
         self.assertEqual(self.hass.states.get(runtime.config.heads["guest"]).state, "cool")

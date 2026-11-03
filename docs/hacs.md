@@ -19,7 +19,7 @@ First place your private device map at `/config/home_climate_bindings.json`. Do 
 
 The comfort policy is fixed. Update the private bindings file when equipment entities change; update the source when schedules or comfort priorities change. There is no room/schedule editor.
 
-Configure contains the live-command opt-in and separate [protection settings](protection-temperatures.md). Room temperature/range changes belong on the dashboard cards and hold until the next schedule change. Upgrades preserve existing entity identities and compatible temporary holds.
+Configure contains the live-command opt-in and separate [protection settings](protection-temperatures.md). Room temperature/range changes belong on the dashboard cards. Temporary lasts until that room's next schedule change; explicit Hold survives boundaries and normal restarts until Schedule is selected. Upgrades preserve existing entity identities and compatible holds. See [room holds](room-holds.md) for the scoped MCP release button and readback sensor.
 
 The living-room heater power guard is independent of the comfort switch once live commands are permitted. It can cut a manually operated heater for overload, low battery, or missing safety telemetry. A separately bound shared AC emergency cutoff requires explicit opt-in and manual recovery; it is not enabled by binding a dedicated heater meter. See [meter selection and recovery](heater-emergency-cutoff.md#dedicated-load-meter).
 

@@ -1,9 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.9.2
 
 - Let explicit native Controller On supersede incomplete fallback preset confirmation, retaining real command lifetimes, uncertain-job ownership and fresh shared-head Off before normal acquisition. Fence queued fallback writes and invalidate earlier stop evidence after late head activation. Preserve independent auxiliary shutdown, cutoff and manual ownership.
 - Persist explicit Controller On/Off intent separately from temporary execution state. Resume after graceful restart only with saved On and Allow Live; operational faults inhibit resumption. Legacy storage without saved intent starts Off. Expose takeover progress without claiming the abandoned fallback matched. No new positive fallback retries, equipment timers, watt limits or live configuration changes.
+- Add explicit per-room Hold alongside Schedule and Temporary. Persist the desired temperature, range and Hold mode across schedule boundaries and normal restarts; edits retain the active mode. Keep existing Temporary expiry, room validation, protection and independent auxiliary manual ownership. Save before publishing changes, including release. Add a per-room Resume schedule button and comfort-mode sensor for narrow Assist/MCP release with readback; exposure remains an explicit HA setup step. No live enablement, new equipment commands or private bindings migration.
 
 ## 0.9.1
 

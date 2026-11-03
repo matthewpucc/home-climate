@@ -387,7 +387,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
     if getattr(entry.runtime_data, "power_guard", None) is not None:
         entities.append(HeaterPowerStatus(entry))
     for key in entry.runtime_data.config.zones:
-        entities.extend((RoomTemperature(entry, key), RoomPlan(entry, key)))
+        entities.extend((RoomTemperature(entry, key), RoomPlan(entry, key),
+                         RoomComfortMode(entry, key)))
     for fan in entry.runtime_data.config.fan_controls.values():
         state = hass.states.get(fan.entity_id)
         label = state.name if state else fan.entity_id.split(".", 1)[1].replace("_", " ").title()
@@ -400,7 +401,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     registry = er.async_get(hass)
     current = {entity.unique_id for entity in entities}
     prefixes = tuple(f"{entry.entry_id}_{kind}" for kind in
-                     ("room_", "plan_room_", "plan_fan_", "plan_auxiliary"))
+                     ("room_", "plan_room_", "plan_fan_", "plan_auxiliary", "comfort_mode_"))
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (entity.domain == "sensor" and entity.platform == DOMAIN
                 and entity.unique_id.startswith(prefixes) and entity.unique_id not in current):
@@ -700,6 +701,33 @@ class RoomEntity(ControllerEntity):
         area = self.runtime.config.zones[self.room_id].area_id
         if area:
             er.async_get(self.hass).async_update_entity(self.entity_id, area_id=area)
+
+
+class RoomComfortMode(RoomEntity):
+    """Plain state readback usable even when MCP omits climate attributes."""
+    _attr_icon = "mdi:calendar-clock"
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["Schedule", "Temporary", "Hold"]
+
+    def __init__(self, entry, room_id):
+        super().__init__(entry, room_id, f"comfort_mode_{room_id}")
+        room = self.runtime.config.zones[room_id]
+        self._attr_name = f"{room.name or room_id} comfort mode"
+
+    @property
+    def available(self):
+        return not self.runtime.stop_event.is_set()
+
+    @property
+    def native_value(self):
+        return self.runtime.comfort.effective(self.room_id)["mode"].title()
+
+    @property
+    def extra_state_attributes(self):
+        comfort = self.runtime.comfort.effective(self.room_id)
+        return {"room_id": self.room_id, "override_expires_at": comfort["expires_at"],
+                "desired_temperature_f": comfort["target_f"],
+                "low_f": comfort["low_f"], "high_f": comfort["high_f"]}
 
 
 class RoomTemperature(RoomEntity):

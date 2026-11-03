@@ -34,10 +34,11 @@ class RecoveryButtonTests(unittest.IsolatedAsyncioTestCase):
         entry = self.entry()
         added = []
         await async_setup_entry(self.hass, entry, added.extend)
-        self.assertEqual(len(added), 2)
+        self.assertEqual(len(added), 5)
         by_name = {button.name: button for button in added}
         self.assertEqual(set(by_name), {
-            "North alcove, South nook reload integration", "Quiet space reload integration"})
+            "North alcove, South nook reload integration", "Quiet space reload integration",
+            "North alcove resume schedule", "South nook resume schedule", "Quiet space resume schedule"})
         shared = by_name["North alcove, South nook reload integration"]
         self.assertEqual(shared.unique_id, "recovery_buttons_reload_shared")
         self.assertEqual(shared.device_info["identifiers"],
@@ -116,5 +117,9 @@ class RecoveryButtonTests(unittest.IsolatedAsyncioTestCase):
             "button", "house_climate", "recovery_buttons_reload_shared"),
             old["recovery_buttons_reload_shared"])
         self.assertIsNone(registry.async_get(old["recovery_buttons_reload_second"]))
+        self.assertIsNone(registry.async_get(old["recovery_buttons_resume_schedule_gamma"]))
+        self.assertEqual(registry.async_get_entity_id(
+            "button", "house_climate", "recovery_buttons_resume_schedule_alpha"),
+            old["recovery_buttons_resume_schedule_alpha"])
         self.assertIsNotNone(registry.async_get(unrelated.entity_id))
         self.assertEqual(refreshed[0].name, "Renamed alcove, South nook reload integration")

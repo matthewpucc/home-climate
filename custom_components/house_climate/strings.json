@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Home Climate",
-        "description": "Copy your private home_climate_bindings.json into Home Assistant’s configuration directory before saving. Edit room profiles, weekly schedules, peak hours and recovery settings below; all settings are validated and saved together. Protection thresholds remain separate from comfort bands. Room cards create temporary holds. Live permission and Controller enabled are both required for automated comfort.\n\n{detail}",
+        "description": "Copy your private home_climate_bindings.json into Home Assistant’s configuration directory before saving. Edit room profiles, weekly schedules, peak hours and recovery settings below; all settings are validated and saved together. Protection thresholds remain separate from comfort bands. Room cards support Schedule, Temporary and persistent Hold presets. Live permission and Controller enabled are both required for automated comfort.\n\n{detail}",
         "data": {
           "live": "Allow live equipment commands",
           "normal_heating_floor_f": "Normal heating protection floor (°F)",
@@ -54,7 +54,7 @@
     "step": {
       "init": {
         "title": "Home Climate",
-        "description": "Copy your private home_climate_bindings.json into Home Assistant’s configuration directory before saving. Edit room profiles, weekly schedules, peak hours and recovery settings below; all settings are validated and saved together. Protection thresholds remain separate from comfort bands. Room cards create temporary holds. Live permission and Controller enabled are both required for automated comfort.\n\n{detail}",
+        "description": "Copy your private home_climate_bindings.json into Home Assistant’s configuration directory before saving. Edit room profiles, weekly schedules, peak hours and recovery settings below; all settings are validated and saved together. Protection thresholds remain separate from comfort bands. Room cards support Schedule, Temporary and persistent Hold presets. Live permission and Controller enabled are both required for automated comfort.\n\n{detail}",
         "data": {
           "live": "Allow live equipment commands",
           "normal_heating_floor_f": "Normal heating protection floor (°F)",

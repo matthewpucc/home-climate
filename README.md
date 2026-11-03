@@ -61,7 +61,7 @@ Configure normal and critical notification routes explicitly. HA service accepta
 
 The [release acceptance checklist](docs/release-baseline-acceptance.md) separates software checks, artifact/installation verification and supervised equipment evidence. The [thermal experiment series](docs/thermal-experiment-series.md) starts with passive observations and prepares later controlled runs. It does not arm overnight experiments. New learned coast/recovery predictions remain advisory until validated; analysis does not automatically deploy policy changes.
 
-The canonical pure controller is in [`custom_components/house_climate/controller`](custom_components/house_climate/controller). Private wiring is separate from explicit policy edits, and upgrades retain registered room identities and valid temporary holds where possible.
+The canonical pure controller is in [`custom_components/house_climate/controller`](custom_components/house_climate/controller). Private wiring is separate from explicit policy edits, and upgrades retain registered room identities and valid holds where possible. Room cards support Schedule, Temporary and explicit persistent [Hold](docs/room-holds.md), with a per-room Resume schedule button for scoped automation access.
 
 Run core tests with `python -m unittest discover -s tests -v`. Native tests use Python 3.14 and Home Assistant 2026.10.4: `python -m unittest discover -s tests_homeassistant -v`. Follow [CONTRIBUTING](CONTRIBUTING.md) for the complete release and packaged-source checks. Synthetic tests establish software behavior, not field capacity, sensor representativeness, network reliability or physical compressor operation. This documentation does not assert that live acceptance has passed.
 
