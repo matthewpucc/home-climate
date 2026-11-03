@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .protection import ProtectionTemperatures
+from .airflow_config import AirflowConfig
 
 # Kept as import aliases for version-1 configuration and its migration tests.
 from .legacy import LOW, HIGH, NUMBERS, TIMES, TOGGLES, helper
@@ -154,12 +155,20 @@ class FanControl:
     percentage: Value = 50
     source_room: str | None = None
     minimum_percentage: float = 0
+    airflow: AirflowConfig | None = None
+
+    def __post_init__(self):
+        if isinstance(self.airflow, dict):
+            object.__setattr__(self, "airflow", AirflowConfig.from_dict(self.airflow))
+        elif self.airflow is not None and not isinstance(self.airflow, AirflowConfig):
+            raise ValueError("Fan airflow must be a settings object")
 
 
 @dataclass(frozen=True)
 class PurifierPolicy:
     minimum_percentage: float = 0
     living_percentage: float = 100
+    airflow_profiles: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -465,11 +474,20 @@ class Config:
                                     previous.seasonal_profiles != period.seasonal_profiles):
                                 raise ValueError("Schedules within a room must not overlap with conflicting profiles")
                         intervals.append((x, y, period))
+        fixed_calibrations = set()
         for fan in self.fan_controls.values():
             if fan.room not in self.zones or fan.entity_id not in self.fans.values():
                 raise ValueError("Invalid fan room/entity")
-            if fan.strategy not in ("cooling", "conditioning", "always", "schedule", "transfer"):
+            if fan.strategy not in ("cooling", "conditioning", "always", "schedule", "transfer", "directed"):
                 raise ValueError("Invalid fan strategy")
+            if (fan.strategy == "directed") != (fan.airflow is not None):
+                raise ValueError("Directed fans require explicit per-device airflow profiles")
+            if fan.airflow is not None:
+                fan.airflow.validate(self.zones)
+                if fan.airflow.calibration_key is not None:
+                    if fan.airflow.calibration_key in fixed_calibrations:
+                        raise ValueError("Fixed-outlet calibration keys must identify only one purifier")
+                    fixed_calibrations.add(fan.airflow.calibration_key)
             if fan.strategy == "transfer" and (fan.source_room not in self.zones or fan.source_room == fan.room):
                 raise ValueError("An airflow fan needs a different source room")
             if not 0 <= settings.value(fan.percentage) <= 100:
@@ -541,6 +559,8 @@ class Config:
         finite(self.purifiers.living_percentage, "Living purifier percentage", 0, 100)
         if self.purifiers.living_percentage < self.purifiers.minimum_percentage:
             raise ValueError("Living purifier percentage cannot be below the purifier minimum")
+        from .airflow_defaults import validate_overrides
+        validate_overrides(self.purifiers.airflow_profiles)
         auxiliary = self.auxiliary_policy
         if settings.clock(auxiliary.peak_start) == settings.clock(auxiliary.peak_end):
             raise ValueError("Peak hours must have distinct start and end times")

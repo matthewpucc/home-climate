@@ -550,7 +550,7 @@ class ControllerStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("mode", "phase", "reasons", "warnings", "head_targets_f", "head_call_targets_f",
-                 "heater_on", "auxiliary_fan_only", "fans", "room_targets", "window_states", "error",
+                 "heater_on", "auxiliary_fan_only", "fans", "fan_airflow", "room_targets", "window_states", "error",
                  "last_error", "last_fault_at", "fault_count",
                  "control_enabled", "control_block_reason", "pending_fans",
                  "configuration_reload_pending", "configuration_reload_reason", "unload",

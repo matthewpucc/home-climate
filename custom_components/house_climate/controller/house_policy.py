@@ -157,11 +157,14 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
         "entity_id": bindings.fans["guest"], "strategy": "conditioning",
         "percentage": 60,
     }]
-    # Both fans move the shared head's conditioned air into the staggered office.
+    # Aim is device-specific. The Entertainment sweep establishes local
+    # circulation only; it is not evidence for a paired route into Office.
     rooms[identities["office"]]["fans"] = [{
-        "entity_id": entity, "strategy": "transfer", "percentage": 60,
-        "source_room": identities["entertainment"],
-    } for entity in (bindings.fans["office"], bindings.fans["entertainment"])]
+        "entity_id": bindings.fans["office"], "strategy": "directed", "percentage": 60,
+    }]
+    rooms[identities["entertainment"]]["fans"] = [{
+        "entity_id": bindings.fans["entertainment"], "strategy": "directed", "percentage": 60,
+    }]
 
     data = {
         "schema_version": 2, "timezone": HOUSE_TIMEZONE,
@@ -216,6 +219,10 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
                 else:
                     rooms[identities[name]][field] = deepcopy(value)
     purifiers = data["purifiers"]
+    from .airflow_defaults import house_airflow
+    for device in ("office", "entertainment"):
+        rooms[identities[device]]["fans"][0]["airflow"] = house_airflow(
+            device, identities, purifiers.get("airflow_profiles", {}))
     for room in rooms.values():
         for fan in room.get("fans", ()):
             fan["minimum_percentage"] = purifiers["minimum_percentage"]
@@ -254,8 +261,11 @@ def editable_policy_settings(config, bindings):
         if selected.seasonal_profiles:
             rooms[canonical]["seasonal_profiles"] = {
                 name: asdict(profile) for name, profile in selected.seasonal_profiles.items()}
+    purifiers = asdict(config.purifiers)
+    if not purifiers["airflow_profiles"]:
+        purifiers.pop("airflow_profiles")
     return {"rooms": rooms, "auxiliary_policy": asdict(config.auxiliary_policy),
-            "purifiers": asdict(config.purifiers),
+            "purifiers": purifiers,
             "fallback": asdict(config.fallback), "seasonal_policy": asdict(config.seasonal_policy),
             "heartbeat_timeout_seconds": config.heartbeat_timeout_seconds,
             "auxiliary_heartbeat_timeout_seconds": config.auxiliary_heartbeat_timeout_seconds}

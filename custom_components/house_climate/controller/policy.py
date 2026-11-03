@@ -93,6 +93,7 @@ class Plan:
     seasonal: dict = field(default_factory=dict)
     fans: dict[str, int] = field(default_factory=dict)
     fan_head_assists: dict[str, str] = field(default_factory=dict)
+    fan_airflow: dict[str, dict] = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
     room_targets: dict = field(default_factory=dict)
     window_states: dict = field(default_factory=dict)
@@ -128,6 +129,8 @@ class Policy:
         self.seasonal_status = None
         self.transfer_on: dict[str, bool] = {}
         self.transfer_airflow = TransferAirflow(config)
+        from .directed_airflow import DirectedAirflow
+        self.directed_airflow = DirectedAirflow(self)
         self.operating = OperatingState(config, clock=clock)
         self.context = initial_context(config)
         self._profiles = {name: zone.profile for name, zone in config.zones.items()}
@@ -603,6 +606,8 @@ class Policy:
                     plan.fan_head_assists[fan.entity_id] = head
                 self.transfer_on[key] = True
         self.trim_transfer_fans(plan, states, rooms, now)
+        self._airflow_settings = settings
+        self.directed_airflow.update(plan, rooms, now)
         if winner != "off":
             plan.reasons.append(f"{winner}: " + ", ".join(plan.head_targets_f))
         else:
