@@ -190,6 +190,17 @@ def _desired(controls, plan, entity):
     raise ValueError("Entity is not part of the saved recovery handoff")
 
 
+def _meets_saved_minimum(plan, entity, state):
+    """A tolerant device match cannot acknowledge less than its saved floor."""
+    minimum = plan.get("fan_minimum_percentages", {}).get(entity, 0)
+    if not minimum:
+        return True
+    minimum = max(minimum, plan["fan_percentage"])
+    percentage = state.attributes.get("percentage") if state is not None else None
+    return (isinstance(percentage, (int, float)) and not isinstance(percentage, bool)
+            and math.isfinite(percentage) and percentage >= minimum)
+
+
 def _matches(state, data, *, fan=False):
     if (state is None or state.state in ("unknown", "unavailable")
             or state.attributes.get("restored") or state.attributes.get("assumed_state")):
@@ -297,15 +308,9 @@ async def step(controls):
             if request.get("uncertain") or request.get("cancelled_before_dispatch") or entity in controls._uncertain_device_jobs:
                 plan["problems"][entity] = "Recovery command completion is uncertain; ownership is retained"
                 continue
-            minimum = plan.get("fan_minimum_percentages", {}).get(entity, 0)
-            if minimum:
-                minimum = max(minimum, plan["fan_percentage"])
-            meets_minimum = (not minimum or (state is not None
-                and isinstance(state.attributes.get("percentage"), (int, float))
-                and not isinstance(state.attributes.get("percentage"), bool)
-                and state.attributes["percentage"] >= minimum))
             if (state is not None and state.last_reported.timestamp() > max(_report_boundary(request), plan.get("resume_after", 0))
-                    and meets_minimum and _matches(state, request["data"], fan=entity in plan["fans"])):
+                    and _meets_saved_minimum(plan, entity, state)
+                    and _matches(state, request["data"], fan=entity in plan["fans"])):
                 plan["completed"].append(entity)
                 plan["problems"].pop(entity, None)
                 await _save(controls)
@@ -365,6 +370,7 @@ async def step(controls):
                     # saved. Consume the reservation, but do not reapply it.
                     if (current_state is not None
                             and current_state.last_reported.timestamp() > _report_boundary(retry)
+                            and _meets_saved_minimum(plan, entity, current_state)
                             and _matches(current_state, data, fan=entity in plan["fans"])):
                         return
                     if (not _retry_evidence(controls, plan, entity, retry, current_state)
