@@ -17,6 +17,8 @@ PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.CLIMATE
 
 
 async def async_setup_entry(hass, entry):
+    if hass.is_stopping:
+        raise ConfigEntryNotReady("Home Assistant is stopping; controller setup is deferred")
     if DOMAIN in hass.data:
         raise ConfigEntryError("Another home climate controller is already loaded")
     values = {**entry.data, **entry.options}
@@ -50,6 +52,8 @@ async def async_setup_entry(hass, entry):
     # Refresh only the old default title; user-assigned titles remain theirs.
     if getattr(entry, "title", None) in {"House Climate", "House climate", "House climate controller"}:
         hass.config_entries.async_update_entry(entry, title=NAME)
+    if hass.is_stopping:
+        raise ConfigEntryNotReady("Home Assistant stopped while loading controller configuration")
     runtime = ControllerRuntime(
         hass, config, live, house_policy=values.get("policy") == "house",
         power_bindings=bindings.power if bindings is not None else None,
@@ -106,15 +110,32 @@ async def async_setup_entry(hass, entry):
 
 async def async_unload_entry(hass, entry):
     runtime = entry.runtime_data
-    if not await runtime.async_stop(wait_for_ack=True):
-        return False
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        hass.services.async_remove(DOMAIN, "generate_package")
-        hass.services.async_remove(DOMAIN, "commission_heater_relay")
-        hass.services.async_remove(DOMAIN, "approve_heater_restore")
-        hass.data.pop(DOMAIN, None)
-    return unloaded
+
+    async def unload(caller):
+        while not await runtime.async_stop(wait_for_ack=True, _unload_caller=caller):
+            remaining = runtime._unload_deadline - hass.loop.time()
+            if remaining <= 0:
+                return False
+            # Guard compensation, actual service completion and integration
+            # recovery may finish after the first check. Use this same deadline
+            # rather than failing HA's unload early or granting a new budget.
+            runtime._shutdown_progress.clear()
+            await runtime._async_wait_shutdown_progress(min(remaining, 1))
+            if hass.loop.time() >= runtime._unload_deadline:
+                return False
+        runtime._set_unload_phase("platforms")
+        unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        if unloaded:
+            hass.services.async_remove(DOMAIN, "generate_package")
+            hass.services.async_remove(DOMAIN, "commission_heater_relay")
+            hass.services.async_remove(DOMAIN, "approve_heater_restore")
+            # A timed-out caller still owns this retained runtime until its
+            # actual operation completes. Never remove a replacement runtime.
+            if hass.data.get(DOMAIN) is runtime:
+                hass.data.pop(DOMAIN, None)
+        return unloaded
+
+    return await runtime.async_wait_for_unload(unload)
 
 
 async def async_update_options(hass, entry):

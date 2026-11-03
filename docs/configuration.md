@@ -11,6 +11,7 @@ Open Home Climate under **Settings → Devices & services → Configure**. The s
 | Room profiles and weekly schedules | `rooms` | Base profiles, weekly periods and seasonal alternatives |
 | Auxiliary comfort and peak hours | `auxiliary_policy` | Peak window, deficit/progress qualification and inside-band stop margin |
 | Seasonal comfort selection | `seasonal_policy` | Outdoor averaging, warm/cool hysteresis and initial profile |
+| Purifier minimum and Living speed | `purifiers` | Ordinary purifier baseline and optional separate Living purifier speed |
 | Recovery state after active control | `fallback` | Head range and circulation-fan setting when active control ends |
 | Controller health lease (seconds) | `heartbeat_timeout_seconds` | Independently renewed controller-health deadline; default 300 |
 | Auxiliary heat authorization lease (seconds) | `auxiliary_heartbeat_timeout_seconds` | Independently renewed automated-heat deadline; default 120 |
@@ -65,7 +66,7 @@ These are defaults, not a reading of the installed configuration. High comfort u
 | Guest, other times | 68–74 | Limits-only, including Saturday 01:00–10:00 and Sunday overnight through Monday 10:00 |
 | Primary, 22:00–05:00 | 68; 67–69 | Sleep comfort, fan 60% |
 | Primary, 05:00–09:00 | 69; 67–70 | Morning comfort, fan 60% |
-| Primary, 09:00–22:00 | 67–70 | Limits-only, scheduled fan 0% |
+| Primary, 09:00–22:00 | 67–70 | Limits-only; scheduled fan 0%, raised to the purifier minimum (default 20%) |
 | Living, cool-season 07:00–22:00 | 69; 68–72 | Comfort |
 | Living, cool-season 22:00–07:00 | 66–75 | Limits-only |
 | Living, warm-season 07:00–22:00 | 71; 69–73 | Comfort |
@@ -74,6 +75,24 @@ These are defaults, not a reading of the installed configuration. High comfort u
 Use a room climate card and its desired-temperature number for a target/range adjustment. Edits normally create **Temporary**, ending at that room's next scheduled profile change. Select **Hold** to retain the current desired temperature and range across schedule boundaries and normal restarts until explicitly selecting **Schedule**. Edits made in Hold stay in Hold. Selecting Temporary instead restores its ordinary room-specific expiry. A room with no scheduled transitions has no Temporary expiry; this legacy behavior does not silently become the new Hold mode.
 
 Protection, shared-head arbitration, equipment timers and auxiliary manual ownership still apply. Hold enables comfort in that room; it does not freeze the scheduled priority or fan policy and does not turn the controller or Live permission on. The mode is independent of equipment operation. Valid existing holds and registered room identities are preserved where migration can match them safely. A displayed room range is that room's active comfort/hold range, not the heat-pump equipment's allowable setpoint range. See [persistent holds and MCP release](room-holds.md) for persistence limits and scoped restoration.
+
+## Purifier baseline and boosts
+
+The **Purifier minimum and Living speed** object defaults to:
+
+```json
+{"minimum_percentage": 20, "living_percentage": 100}
+```
+
+During active automated control, the ordinary Primary, Guest, Office and Entertainment purifiers run at least `minimum_percentage`. Their existing scheduled, conditioning and transfer rules can request a higher speed. Primary therefore retains 60% from 22:00 through 09:00; a zero scheduled speed during the day becomes the default 20% minimum. Both values must be finite numbers from 0 through 100, and `living_percentage` must be at least `minimum_percentage`. A zero minimum preserves ordinary strategy-driven Off behavior. A partial edit retains the other saved value.
+
+The optional, separately bound Living purifier uses `living_percentage` throughout active automated control; its default is 100%. Saving that setting does not create a device binding. It remains saved even when no Living purifier is bound. These settings apply to ordinary purifiers only: they never authorize the auxiliary heater or its fan alias and do not change auxiliary reserve, manual-ownership or shutdown checks.
+
+**Allow live commands** and **Controller enabled** still gate ordinary activation. When active control ends, each purifier's safe recovery target is the higher of its saved minimum and the saved recovery fan percentage. With the defaults, ordinary purifiers recover to 40% and a bound Living purifier to 100%. Required initial Off cleanup may still stop a fan, and actual faults or unverified device identity can block activation. Completing recovery does not make Controller Off or Preview continuously enforce purifier speeds. Saving policy uses the integration's normal reload, which can trigger an existing ownership handoff before resumed control; it is not a command to keep a fan running through that transition. Confirm the new resolved policy and controller/recovery state after reload.
+
+Generic room configurations keep a zero `minimum_percentage` on each fan control unless explicitly configured. The 20% baseline is a house-policy default, and existing room schedules and higher-speed requests are unchanged.
+
+Existing unfinished recovery plans retain their saved targets; upgrading does not rewrite them. The native integration checks HA registry identities before dispatch. The standalone HTTP/CLI controller cannot establish those device associations, so its operator must verify that ordinary fan bindings are independent purifiers and never heater aliases.
 
 ## Seasonal and auxiliary defaults
 
@@ -120,6 +139,8 @@ Protection settings are independent. The default 60°F normal heating floor, 65�
 
 Private wiring lives at `/config/home_climate_bindings.json`, outside `custom_components`, and survives HACS updates. Required sections are `heads`, `rooms`, `fans`, `heater` and `power`; optional sections are `windows`, `outdoor` and `notifications`. The old filename `house_climate_bindings.json` is used only when the current filename is absent. An invalid current file does not silently select an older map. Unknown fields, missing roles and invalid domains are rejected.
 
+The `fans` section still requires `primary`, `guest`, `office` and `entertainment`. It optionally accepts `living`, which must identify a separate ordinary purifier. For example, merge `"living": "fan.living_purifier"` into that section while retaining its four existing roles. This is a synthetic entity ID: use the verified device's actual ID. Do not bind a fan alias of the auxiliary heater or another configured climate device. Entity names alone cannot establish physical independence. Native setup rejects a known shared device identity with the auxiliary. Activating a configured positive purifier minimum also requires both entities to have distinct HA device-registry identities when an auxiliary heater is configured; missing identity evidence inhibits that fan's activation. Verify the actual registry mapping rather than inventing one. Missing `living` leaves that purifier unmanaged; no ID is inferred. A wiring change requires the integration's normal reload and readiness checks before ordinary control resumes.
+
 Existing room sensor-ID lists still work. Explicit descriptors support source identity, attribute-based temperatures and qualified observations. This synthetic example assigns a head's external room probe to Office:
 
 ```json
@@ -157,11 +178,15 @@ The **Recovery state after active control** object defaults to:
 {"heat_low_f": 68, "cool_high_f": 73, "fan_percentage": 40}
 ```
 
-It applies whenever active ownership ends: requested disable, graceful restart or fault. The intended result is supported dual-setpoint head operation at the configured range, auxiliary Off and circulation fans at the configured percentage. Manual auxiliary ownership is excluded. Unsafe devices do not receive positive activation merely to make the preset appear complete; partial failures remain visible and require attention. A crash cannot send commands while HA is down; unfinished obligations are reconciled after startup, without blindly overwriting later manual intervention. A clean Preview startup does not activate the preset.
+It applies whenever active ownership ends: requested disable, graceful restart or fault. The intended result is supported dual-setpoint head operation at the configured range, auxiliary Off and circulation fans at the higher of the saved recovery percentage and each fan's saved purifier minimum. The default recovery setting remains 40%; a bound Living purifier with its default 100% minimum therefore retains a 100% recovery target. Required initial Off cleanup and safe activation checks still apply. Manual auxiliary ownership is excluded. Unsafe devices do not receive positive activation merely to make the preset appear complete; partial failures remain visible and require attention. A crash cannot send commands while HA is down; unfinished obligations are reconciled after startup, without blindly overwriting later manual intervention. A clean Preview startup does not activate the preset, and completed recovery does not continuously enforce fan speeds while ordinary control is Off.
 
 Heads must support HA's `heat_cool` dual-setpoint mode; an unrelated `auto` mode is not a substitute. The handoff requires fresh device confirmation and waits through existing Off, minimum-Off and settling barriers. Confirmed preset completion releases routine head/fan ownership and leaves **Controller enabled** Off for an explicit disable or active-control fault. Explicit On, or startup with saved On and Allow Live, supersedes remaining preset confirmation through safe takeover.
 
-For an incomplete handoff, **Retry recovery settings** is an explicit retry of the **whole saved head/fan plan**, not just its failed devices. Review the saved targets and scope first: retry can reapply every saved head and fan. It requires:
+During an uninterrupted handoff, a completed preset command with a fresh mismatched HA report can be retried automatically, up to three total attempts per device. Each retry waits at least 15 seconds after the prior service handler finishes and keeps the original feedback deadline (120 seconds by default). Completed devices are skipped. No retry overlaps an actual command, crosses an ownership change or restart, overwrites an observed operator change, or changes a head out of its reported dual-setpoint Auto mode. Missing, stale, restored, assumed or uncertain evidence inhibits retries. Retry progress is visible in each saved handoff request's `attempts`, `first_at`, `dispatched_at` and `finished_at` fields. HA handler completion and HA reports do not establish physical acquisition times.
+
+A fresh matching report can complete recovery after a reported mismatch or exhausted retry budget. For example, an operator can correct a synthetic head's Auto range to its saved requested range; the existing handoff accepts that report once actual command work has finished and no uncertainty remains. It does not need another Controller toggle. Exhausted or inhibited retries retain ownership and the critical recovery notice; they do not guarantee that an already-failed HA reload will resume.
+
+For an incomplete handoff, **Retry recovery settings** remains an explicit retry of the **whole saved head/fan plan**, not just its failed devices. Review the saved targets and scope first: this button can reapply every saved head and fan. It requires:
 
 - Controller Off and a saved, authorized recovery plan.
 - No actual pending head/fan service work.

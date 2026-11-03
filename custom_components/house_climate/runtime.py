@@ -31,6 +31,7 @@ from .repair_gate import RepairGate
 _LOGGER = logging.getLogger(__name__)
 
 UNLOAD_ACK_TIMEOUT_SECONDS = 120
+WORKER_STOP_TIMEOUT_SECONDS = 45
 SHUTDOWN_RECHECK_SECONDS = 15
 NATIVE_HEARTBEAT_DISPATCH_SECONDS = 5
 HEARTBEAT_WAIT_REASON = "Waiting for Home Assistant to confirm the controller heartbeat; new activations are deferred"
@@ -479,6 +480,11 @@ class NativeAPI:
                 raise HAActivationDeferred("Head service expired before actual dispatch")
             raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
         controls = self.controls
+        if domain == "fan":
+            from .configuration import purifier_identity_issue
+            if issue := purifier_identity_issue(self.hass, self.config, body.get("entity_id"),
+                                                activation=activation, controls=controls):
+                raise HAError(issue)
         if domain in ("climate", "fan"):
             self.repair_gate.check(body.get("entity_id"), repair_epoch, activation=activation)
             if (controls is not None and generation is not None
@@ -709,6 +715,10 @@ class ControllerRuntime:
         self._shutdown_progress = asyncio.Event()
         self.api.service_notify = self._async_service_jobs_changed
         self._options_reload_task = None
+        self._unload_task = None
+        self._unload_deadline = None
+        self._unload_phase = None
+        self._unload_timed_out = False
         self._configuration_reload_pending = False
         self._configuration_reload_reason = None
         self.recovery = RecoveryManager(hass, self)
@@ -889,6 +899,7 @@ class ControllerRuntime:
         if previous != self.controls.enabled or ready != self._controls_ready:
             self.wake_event.set()
         self._controls_ready = ready
+        self._update_reload_status()
         self._update_heartbeat_status()
         if self.notifications is not None:
             self.notifications.observe_status(self.status)
@@ -940,7 +951,7 @@ class ControllerRuntime:
 
     @callback
     def async_start(self, _hass=None):
-        if self.thread is not None or self.stop_event.is_set():
+        if self.thread is not None or self.stop_event.is_set() or self.hass.is_stopping:
             return
         if self.controls:
             self.controls.async_start()
@@ -1080,6 +1091,12 @@ class ControllerRuntime:
     def _update_reload_status(self):
         self.status["configuration_reload_pending"] = self._configuration_reload_pending
         self.status["configuration_reload_reason"] = self._configuration_reload_reason
+        if self._unload_task is not None:
+            self.status["unload"] = {
+                "phase": self._unload_phase, "timed_out": self._unload_timed_out,
+                "remaining_seconds": max(0, self._unload_deadline - self.hass.loop.time()),
+                "sampled_at": datetime.now(timezone.utc).isoformat(),
+            }
 
     @callback
     def async_schedule_options_reload(self, entry_id):
@@ -1141,7 +1158,8 @@ class ControllerRuntime:
             return closed
         # Only wait for acknowledgement here. Cleanup services retain their own
         # bounds and are never cancelled by an acknowledgement-wait timeout.
-        deadline = self.hass.loop.time() + UNLOAD_ACK_TIMEOUT_SECONDS
+        deadline = (self._unload_deadline if self._unload_deadline is not None
+                    else self.hass.loop.time() + UNLOAD_ACK_TIMEOUT_SECONDS)
         while not closed:
             remaining = deadline - self.hass.loop.time()
             if remaining <= 0:
@@ -1151,11 +1169,94 @@ class ControllerRuntime:
             closed = await self.controls.async_close()
         return True
 
-    async def async_stop(self, _event=None, *, wait_for_ack=False):
+    def _unload_budget_seconds(self):
+        """Allow the existing physical settle/feedback windows before failure."""
+        if self.config.fallback is None:
+            return UNLOAD_ACK_TIMEOUT_SECONDS
+        devices = len(set((*self.config.climate_entities, *self.config.fans.values())))
+        return max(UNLOAD_ACK_TIMEOUT_SECONDS,
+                   WORKER_STOP_TIMEOUT_SECONDS + self.config.command_timeout_seconds
+                   + max(self.config.head_minimum_off_seconds, self.config.off_settle_seconds)
+                   + self.config.head_activation_timeout_seconds + 5 * devices + 20)
+
+    def _set_unload_phase(self, phase):
+        if self._unload_task is None:
+            return
+        self._unload_phase = phase
+        self._update_reload_status()
+        async_dispatcher_send(self.hass, SIGNAL_STATUS)
+
+    async def async_wait_for_unload(self, operation):
+        """Retain one whole unload through caller cancellation and deadline expiry.
+
+        ``operation`` receives the original caller so a saved-options reload
+        never cancels its own parent when the retained task invokes async_stop.
+        The deadline bounds the caller, not actual storage/device operations.
+        A timeout retains this runtime and all unresolved cleanup authority.
+        """
+        task = self._unload_task
+        if task is not None and task.done():
+            try:
+                completed = not task.cancelled() and task.result() is True
+            except Exception:
+                completed = False
+            if completed:
+                return True
+            # A later explicit unload can recheck evidence after a terminal
+            # failed attempt. Never replace an operation which is still running.
+            task = None
+        if task is None:
+            caller = asyncio.current_task()
+            self._unload_deadline = self.hass.loop.time() + self._unload_budget_seconds()
+            self._unload_timed_out = False
+            self.stop_event.set()
+            self.wake_event.set()
+
+            async def unload():
+                try:
+                    result = await operation(caller)
+                    self._set_unload_phase("complete" if result else "blocked")
+                    return result
+                except Exception:
+                    self._set_unload_phase("failed")
+                    raise
+
+            self._unload_task = self.hass.async_create_background_task(
+                unload(), "Home Climate retained unload", eager_start=False)
+            # A deadline may release the HA caller before a failed operation
+            # returns. Retrieve its exception without cancelling the operation.
+            self._unload_task.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None)
+            self._set_unload_phase("starting")
+        task = self._unload_task
+        while not task.done():
+            remaining = self._unload_deadline - self.hass.loop.time()
+            if remaining <= 0:
+                self._unload_timed_out = True
+                self._set_unload_phase(self._unload_phase)
+                _LOGGER.error("Controller unload deadline expired during %s; actual cleanup is retained",
+                              self._unload_phase)
+                return False
+            try:
+                await asyncio.wait({task}, timeout=remaining)
+            except asyncio.CancelledError:
+                # Propagating cancellation here strands HA in its nonrecoverable
+                # UNLOAD_IN_PROGRESS state. Finish the same bounded operation;
+                # never cancel a physical command merely to cancel its waiter.
+                _LOGGER.warning("Controller unload caller was cancelled; completing retained cleanup")
+        if task.cancelled():
+            # HA shutdown can cancel background tasks independently of the
+            # caller. No completed cleanup can be claimed in that case.
+            self._set_unload_phase("cancelled")
+            return False
+        return task.result()
+
+    async def async_stop(self, _event=None, *, wait_for_ack=False, _unload_caller=None):
         # An external unload supersedes a pending options reload. The managed
         # reload itself re-enters this method from HA and must not cancel itself.
         task = self._options_reload_task
-        if wait_for_ack and task and task is not asyncio.current_task() and not task.done():
+        if (wait_for_ack and task and task is not asyncio.current_task()
+                and task is not _unload_caller and not task.done()):
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         async with self._stop_lock:
@@ -1164,28 +1265,34 @@ class ControllerRuntime:
     async def _async_stop(self, wait_for_ack):
         self.stop_event.set()
         self.wake_event.set()
+        self._set_unload_phase("comfort_storage")
         if self.comfort:
             await self.comfort.async_close()
+        self._set_unload_phase("integration_recovery")
         recovery_closed = await self.recovery.async_close()
+        self._set_unload_phase("ownership_storage")
         if self.controls:
             await self.controls.async_set_enabled(False, preserve_intent=True)
+        self._set_unload_phase("worker_stop")
         if self.finished is None:
             self._async_report("stopped", {})
         else:
             try:
-                await asyncio.wait_for(asyncio.shield(self.finished), timeout=45)
+                await asyncio.wait_for(asyncio.shield(self.finished), timeout=WORKER_STOP_TIMEOUT_SECONDS)
             except TimeoutError:
                 # Keep the runtime registered; a reload must never start a second worker.
                 self._warn_unload_deferred(worker_pending=True, recovery_pending=not recovery_closed)
                 self._async_report("worker_failed", {"error": "Controller shutdown timed out"})
                 return False
             await self.hass.async_add_executor_job(self.thread.join)
+        self._set_unload_phase("device_handoff")
         controls_closed = await self._async_close_controls(wait_for_ack)
         devices = (*self.config.climate_entities, *self.config.fans.values())
         jobs_closed = not self.api.service_jobs(devices) and not self.api.uncertain_service_jobs(devices)
         closed = controls_closed and recovery_closed and jobs_closed
         if closed:
             if self.power_guard is not None:
+                self._set_unload_phase("heater_guard")
                 guard_closed = await self.power_guard.async_close()
                 if guard_closed is False:
                     # A delayed outlet-On is an activation, even if an older Off
@@ -1196,6 +1303,7 @@ class ControllerRuntime:
             if closed:
                 self._logged_unload_blockers = None
                 if self.seasonal_state is not None:
+                    self._set_unload_phase("seasonal_storage")
                     await self.seasonal_state.async_close()
                 if self.notifications is not None:
                     await self.notifications.async_close()

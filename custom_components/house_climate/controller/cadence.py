@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import math
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -182,12 +183,14 @@ class DecisionCadence:
             if fan.strategy == "transfer":
                 unsafe = unsafe or fan.source_room not in rooms
             assist_head = plan.fan_head_assists.get(fan.entity_id)
-            if unsafe and plan.fans.get(fan.entity_id, 0):
-                plan.fans[fan.entity_id] = 0
+            minimum = math.ceil(fan.minimum_percentage)
+            if unsafe and plan.fans.get(fan.entity_id, 0) > minimum:
+                plan.fans[fan.entity_id] = minimum
                 if assist_head:
                     plan.fan_head_assists.pop(fan.entity_id, None)
                     self.policy.transfer_on[key] = False
-                self._warning(f"Circulation fan {fan.entity_id}: stopped by fresh room temperature/probe check; waiting for next comfort decision")
+                self._warning(f"Circulation fan {fan.entity_id}: thermal boost stopped by fresh room temperature/probe check; "
+                              + (f"purification minimum {minimum}% retained" if minimum else "waiting for next comfort decision"))
                 continue
             if assist_head and assist_head not in plan.head_targets_f:
                 # Assistance depends on its selected head. Ambient transfer
@@ -201,10 +204,11 @@ class DecisionCadence:
                                or (room.temperature < target and delta < 0))
                               and abs(delta) > .25)
                 plan.fan_head_assists.pop(fan.entity_id, None)
-                if not useful and plan.fans.get(fan.entity_id, 0):
-                    plan.fans[fan.entity_id] = 0
+                if not useful and plan.fans.get(fan.entity_id, 0) > minimum:
+                    plan.fans[fan.entity_id] = minimum
                     self.policy.transfer_on[key] = False
-                    self._warning(f"Circulation fan {fan.entity_id}: assisted head is inhibited and ambient transfer is not useful; waiting for next comfort decision")
+                    self._warning(f"Circulation fan {fan.entity_id}: assisted head is inhibited and ambient transfer is not useful; "
+                                  + (f"purification minimum {minimum}% retained" if minimum else "waiting for next comfort decision"))
         # Fresh head feedback can reveal conditioned air even when the ambient
         # gradient still looks useful. Maintenance only removes cached fan calls.
         prior_warnings = set(plan.warnings)

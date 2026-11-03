@@ -1147,7 +1147,7 @@ class Executor:
             self._auxiliary_startup = None
         return acknowledged
 
-    def fan(self, entity, percentage, plan, states, now):
+    def fan(self, entity, percentage, plan, states, now, *, minimum_percentage=0):
         """Circulation is optional: retain a visible issue and retry one fan."""
         failure = self.fan_failures.get(entity)
         command = None
@@ -1168,6 +1168,10 @@ class Executor:
                 # HA's ordered/ranged speed converters use floored integer
                 # percentages. E.g. a 3-speed fan's middle speed is 66, not 67.
                 rung = max(1, round(percentage / step))
+                if minimum_percentage:
+                    # HA reports integer percentages; choose a supported rung
+                    # whose floored value still meets the configured minimum.
+                    rung = max(rung, math.ceil((math.ceil(minimum_percentage) - 1e-7) / step))
                 target = min(100, max(1, math.floor(rung * step + 1e-7)))
                 tolerance = min(1.0, step / 2)
                 # Dyson integrations treat set_percentage as speed-only.
@@ -1180,7 +1184,8 @@ class Executor:
                     value = observed.get("attributes", {}).get("percentage")
                     return (observed.get("state") == "on"
                             and isinstance(value, (int, float)) and not isinstance(value, bool)
-                            and math.isfinite(value) and abs(value - target) <= tolerance)
+                            and math.isfinite(value) and value >= minimum_percentage
+                            and abs(value - target) <= tolerance)
             else:
                 service, data = "turn_off", {}
                 def matches(observed):
@@ -1266,7 +1271,9 @@ class Executor:
             if message not in plan.reasons:
                 plan.reasons.append(message)
         for entity, percentage in plan.fans.items():
-            self.fan(entity, percentage, plan, self._states, now)
+            minimum = max((fan.minimum_percentage for fan in self.config.fan_controls.values()
+                           if fan.entity_id == entity), default=0)
+            self.fan(entity, percentage, plan, self._states, now, minimum_percentage=minimum)
         for entity, issue in self.device_issues.items():
             warning = f"Climate device {entity}: {issue}; retrying independently"
             if warning not in plan.warnings:

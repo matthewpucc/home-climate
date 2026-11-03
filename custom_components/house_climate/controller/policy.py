@@ -205,13 +205,16 @@ class Policy:
             direction = self.transfer_airflow.opposing_direction(
                 source_head, destination.temperature, target)
             if direction:
-                if plan.fans.get(fan.entity_id, 0):
+                minimum = math.ceil(fan.minimum_percentage)
+                if plan.fans.get(fan.entity_id, 0) > minimum:
                     label = self.config.zones[fan.room].name or fan.room
                     warning = (f"Transfer fan {fan.entity_id}: {direction} at its source could move "
-                               f"{label} away from its {target:g}°F target; fan stopped")
+                               f"{label} away from its {target:g}°F target; "
+                               + (f"transfer boost stopped; purification minimum {minimum}% retained"
+                                  if minimum else "fan stopped"))
                     if warning not in plan.warnings:
                         plan.warnings.append(warning)
-                plan.fans[fan.entity_id] = 0
+                plan.fans[fan.entity_id] = minimum
                 plan.fan_head_assists.pop(fan.entity_id, None)
                 self.transfer_on[key] = False
 
@@ -368,7 +371,10 @@ class Policy:
         plan.protection_context = self.context.as_dict()
         plan.decision_valid_until_monotonic = self.context.valid_until_monotonic
         plan.warnings.extend(self.context.warnings)
-        plan.fans = {entity: 0 for entity in self.config.fans.values()}
+        # Purification is independent of thermal demand/probe availability.
+        # Thermal transfer may boost this floor but cannot remove it.
+        plan.fans = {fan.entity_id: math.ceil(fan.minimum_percentage)
+                     for fan in self.config.fan_controls.values()}
         demands = {name: self.demand(name, reading, bands[name], profiles[name].priority,
                                     running_modes={states.get(self.config.heads[self.config.zones[name].head], {}).get("state")})
                    for name, reading in rooms.items()}
@@ -448,7 +454,8 @@ class Policy:
                     useful = (room.temperature > target and delta > 0) or (room.temperature < target and delta < 0)
                     active = useful and abs(delta) > (.25 if self.transfer_on.get(key) else .75)
                 self.transfer_on[key] = active
-            plan.fans[fan.entity_id] = round(percentage) if active else 0
+            plan.fans[fan.entity_id] = max(math.ceil(fan.minimum_percentage),
+                                         round(percentage) if active else 0)
 
         eligible = {"heat": {}, "cool": {}}
         scores = {"heat": (0., 0., 0., 0.), "cool": (0., 0., 0., 0.)}
@@ -590,7 +597,8 @@ class Policy:
             assists = ((winner == "cool" and destination.temperature > target)
                        or (winner == "heat" and destination.temperature < target))
             if assists:
-                plan.fans[fan.entity_id] = round(settings.value(fan.percentage))
+                plan.fans[fan.entity_id] = max(math.ceil(fan.minimum_percentage),
+                                             round(settings.value(fan.percentage)))
                 if plan.fans[fan.entity_id]:
                     plan.fan_head_assists[fan.entity_id] = head
                 self.transfer_on[key] = True

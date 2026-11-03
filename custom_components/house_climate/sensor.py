@@ -453,7 +453,7 @@ class ControllerStatus(ControllerEntity):
                  "heater_on", "auxiliary_fan_only", "fans", "room_targets", "window_states", "error",
                  "last_error", "last_fault_at", "fault_count",
                  "control_enabled", "control_block_reason", "pending_fans",
-                 "configuration_reload_pending", "configuration_reload_reason",
+                 "configuration_reload_pending", "configuration_reload_reason", "unload",
                  "device_issues", "waiting_devices", "recovery_details",
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
@@ -639,7 +639,7 @@ class RecoveryStatus(ControllerEntity):
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
                  "integration_recovery", "cycle_holds", "head_stop_reasons", "head_transition_history", "pending_head_commands",
                  "head_constraints", "head_protections", "unavailable_mode_requests", "mode_scores",
-                 "shared_stop", "handoff", "auxiliary_manual", "notifications") if key in status} | heartbeat_attributes(status)
+                 "shared_stop", "handoff", "unload", "auxiliary_manual", "notifications") if key in status} | heartbeat_attributes(status)
 
 
 class CurrentIssues(ControllerEntity):
