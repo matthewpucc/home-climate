@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Reconcile delayed auxiliary Off feedback before evaluating its authorization deadline. Retain the completed stop's command ownership, stop epoch and dispatch time; require ordered fresh native feedback and drained, certain heater jobs. Reject restored, assumed, precommand and future reports. Confirmed power isolation remains independent stop proof. This neither renews authorization on Off nor clears an already latched expiry, and leaves shared-head cooling independent.
+
 ## 0.9.2
 
 - Let explicit native Controller On supersede incomplete fallback preset confirmation, retaining real command lifetimes, uncertain-job ownership and fresh shared-head Off before normal acquisition. Fence queued fallback writes and invalidate earlier stop evidence after late head activation. Preserve independent auxiliary shutdown, cutoff and manual ownership.

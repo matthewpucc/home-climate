@@ -63,7 +63,7 @@ class NativeControls:
         self._auxiliary_heat_possible = False
         self.auxiliary_heartbeat_blocked = False
         self._auxiliary_heartbeat_baseline = None
-        self._auxiliary_heartbeat_off_receipt = False
+        self._auxiliary_heartbeat_off_receipt = None
         self._auxiliary_heartbeat_off_ack = False
         self._auxiliary_stop_pending = False
         self._auxiliary_stop_epoch = 0
@@ -641,7 +641,7 @@ class NativeControls:
         self._auxiliary_heat_possible = False
         self.auxiliary_heartbeat_blocked = False
         self._auxiliary_heartbeat_baseline = None
-        self._auxiliary_heartbeat_off_receipt = False
+        self._auxiliary_heartbeat_off_receipt = None
         self._auxiliary_heartbeat_off_ack = False
         self._auxiliary_stop_pending = False
 
@@ -725,6 +725,10 @@ class NativeControls:
         if (not self.config.heater_entity or self.config.heater_entity not in self.owned
                 or not self.enabled or self.recovering or not self.live or self.auxiliary_manual):
             return
+        # A completed stop may report Off after its handler returns. Settle
+        # that evidence before expiry can replace its receipt and stop epoch.
+        # This does not grant a lease or clear an already latched expiry.
+        self._ack_auxiliary_heartbeat_off()
         age = instant - self.auxiliary_authorized_at
         if (not self.auxiliary_heartbeat_blocked
                 and not 0 <= age <= self.config.auxiliary_heartbeat_timeout_seconds
@@ -733,7 +737,7 @@ class NativeControls:
             self.auxiliary_heartbeat_blocked = True
             self._auxiliary_stop_epoch += 1
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
-            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_receipt = None
             self._auxiliary_heartbeat_off_ack = False
             self._auxiliary_stop_pending = True
             try:
@@ -749,11 +753,27 @@ class NativeControls:
     def _ack_auxiliary_heartbeat_off(self):
         if not (self.auxiliary_heartbeat_blocked or self._auxiliary_heat_possible):
             return False
+        heater = self.config.heater_entity
+        receipt = self._auxiliary_heartbeat_off_receipt
+        state = self.hass.states.get(heater)
+        # Keep the completed command's provenance until its delayed feedback is
+        # checked. Marker inequality alone accepts old or restored snapshots.
+        native_off = bool(
+            receipt and receipt[:2] == (self.command_generation(heater), self._auxiliary_stop_epoch)
+            and self._auxiliary_stop_pending
+            and state is not None and state.state == "off"
+            and not state.attributes.get("restored") and not state.attributes.get("assumed_state")
+            and state.attributes.get("hvac_action") not in ("heating", "cooling")
+            and state.last_reported > receipt[2]
+            and 0 <= (datetime.now(timezone.utc) - state.last_reported).total_seconds() <= 180
+            and self._is_off(heater))
+        # Confirmed power isolation remains independent proof when an unpowered
+        # native device cannot report. Neither path erases unresolved commands.
         isolated = bool(self.power_guard is not None and self.power_guard.power_cut_confirmed)
-        acknowledged = bool(not self.auxiliary_inflight and (
-            isolated or (self._auxiliary_heartbeat_off_receipt
-                         and self._is_off(self.config.heater_entity)
-                         and self._auxiliary_marker() != self._auxiliary_heartbeat_baseline)))
+        acknowledged = bool(
+            not self.auxiliary_inflight and heater not in self._uncertain_device_jobs
+            and not self.stop_jobs({heater}) and not self.pending_device_jobs({heater})
+            and (isolated or native_off))
         if acknowledged and not self.auxiliary_heartbeat_blocked:
             self._auxiliary_heat_possible = False
         if acknowledged != self._auxiliary_heartbeat_off_ack:
@@ -771,7 +791,7 @@ class NativeControls:
         if self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked:
             self._auxiliary_stop_epoch += 1
             self._auxiliary_stop_pending = False
-            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_receipt = None
             self._auxiliary_heartbeat_off_ack = False
 
     @callback
@@ -783,7 +803,7 @@ class NativeControls:
             # completed later. Require another Off and a fresh report after it.
             self._auxiliary_stop_epoch += 1
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
-            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_receipt = None
             self._auxiliary_heartbeat_off_ack = False
             self._auxiliary_stop_pending = True
             self._publish()
@@ -798,22 +818,24 @@ class NativeControls:
         if not self._auxiliary_stop_pending:
             self._auxiliary_stop_epoch += 1
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
-            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_receipt = None
             self._auxiliary_heartbeat_off_ack = False
             self._auxiliary_stop_pending = True
-        return (self.ownership_generation, self._auxiliary_stop_epoch)
+        return (self.command_generation(self.config.heater_entity),
+                self._auxiliary_stop_epoch, datetime.now(timezone.utc))
 
     @callback
     def auxiliary_off_finished(self, receipt):
         # A stop dispatched before the last positive completion cannot prove
         # that the newly uncertain heater has been superseded.
         if (receipt is not None and self._auxiliary_stop_pending
-                and receipt == (self.ownership_generation, self._auxiliary_stop_epoch)):
-            self._auxiliary_heartbeat_off_receipt = True
+                and receipt[:2] == (self.command_generation(self.config.heater_entity),
+                                    self._auxiliary_stop_epoch)):
+            self._auxiliary_heartbeat_off_receipt = receipt
             self._ack_auxiliary_heartbeat_off()
         elif receipt is not None and self._auxiliary_stop_pending:
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
-            self._auxiliary_heartbeat_off_receipt = False
+            self._auxiliary_heartbeat_off_receipt = None
             self._auxiliary_heartbeat_off_ack = False
 
     @callback
