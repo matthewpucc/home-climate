@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.6
 
 - Extend bounded shutdown-recovery retries to heads which remain Off after a completed preset, including Off reports without target ranges. Require post-completion feedback, no intervening mode transition, current compatible shared-head states and no pending, uncertain or repair-held head work. Mode and range retries share three total attempts, 15-second spacing and the original feedback deadline; retain ownership, operator, persistence, restart and queued-dispatch safeguards.
 - Check Kumo's current cached Auto profile before recovery writes, independently of its advertised HA modes. Report rejected or unverified support without repeating unsupported commands; explicit service validation rejections also inhibit retries. This reads provider evidence only and does not repair, reload or modify an integration. No deployment or live configuration changes.
