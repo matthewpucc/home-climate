@@ -123,3 +123,13 @@ Transitions away from active control use the configured recovery handoff, includ
 A timed-out or cancelled caller does not prove that its actuator service has finished. Actual jobs remain tracked through completion, including queued and delayed Off jobs. A late positive completion requires new superseding Off evidence, and stops from a previous ownership or repair generation cannot stop a later call.
 
 No automated integration reload, fallback outlet operation, or software timer can repair a failing heat-pump Wi-Fi adapter. Recovery retries isolate those failures and report the remaining block.
+
+### Taking control after fallback
+
+Native Controller On supersedes an unfinished fallback preset. An incorrect reported Auto range does not have to be corrected to 68–73°F before takeover. Ownership is retained while actual old calls finish; queued fallback writes are fenced, and fresh shared-head Off must be confirmed before ordinary acquisition and its equipment timers. Unavailable heads or uncertain dispatched commands still block admission. The auxiliary retains its independent fault, cut-ownership, stop and manual-control protections.
+
+The native controller persists explicit On/Off intent. With saved On and Allow Live enabled, startup uses this same reconciliation path. Graceful stop, unload and options reload preserve intent; explicit Off, active-control faults, unexpected worker exit and heartbeat expiry inhibit automatic resumption. Preflight/readiness errors before a lease is acquired remain retryable under existing behavior. Legacy storage without this field starts Off; the first explicit On establishes it. Shadow startup does not grant control. A completed fallback followed by On is also acquired through normal startup reconciliation.
+
+Status exposes `enabled_intent` and `takeover_pending`. While takeover waits, the internal worker admission remains Off even if the requested Controller switch is On. A delayed worker release from that cleanup overlay cannot cancel the newer request. Turning Controller Off during takeover cancels admission and retains the terminal fallback obligation.
+
+This change adds no positive fallback retry. Off cleanup continues under the existing supervisor; each fallback preset is sent once, with the existing 120-second feedback window and explicit recovery review on failure. No shutdown-event ordering or timeout changes are included.

@@ -49,7 +49,7 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.controls.recovering)
         self.assertEqual(runtime.controls.pending_fans, (old_fan,))
         self.assertEqual(await store.async_load(),
-                         {"devices": [], "pending_fans": [old_fan]})
+                         {"devices": [], "enabled_intent": False, "pending_fans": [old_fan]})
         self.assertIn("Turn on Controller enabled", runtime.controls.hint)
         runtime.async_start()
         await switch.async_turn_on()
@@ -88,7 +88,7 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.hass.states.async_set(old_fan, "off", {})
         await self.settle_watchdog(runtime.controls)
         self.assertFalse(runtime.controls.pending_fans)
-        self.assertEqual(await store.async_load(), {"devices": []})
+        self.assertEqual(await store.async_load(), {"devices": [], "enabled_intent": False})
 
     async def test_critical_off_failure_still_blocks_enable_and_unload(self):
         old_head, old_fan = "climate.previous_head", "fan.previous_purifier"
@@ -109,8 +109,9 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime.controls.recovering)
         self.assertIn(old_head, runtime.controls.owned)
         self.assertFalse(runtime.controls.pending_fans)
-        with self.assertRaisesRegex(HomeAssistantError, "Waiting for previously owned"):
-            await switch.async_turn_on()
+        await switch.async_turn_on()
+        self.assertFalse(runtime.controls._snapshot["enabled"])
+        self.assertTrue(runtime.controls.takeover_pending)
         self.assertFalse(await runtime.async_stop())
         self.assertTrue(runtime.controls.active)
         self.hass.services.async_register("climate", "set_hvac_mode", self.handle)
@@ -138,11 +139,13 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_register("fan", "turn_off", delayed)
         runtime, _ = await self.runtime(entry_id="reclaim")
         await asyncio.wait_for(started.wait(), 2)
-        with self.assertRaisesRegex(HAError, "previously owned devices"):
-            await runtime.controls.async_set_enabled(True)
+        await runtime.controls.async_set_enabled(True)
+        self.assertFalse(runtime.controls._snapshot["enabled"])
+        self.assertTrue(runtime.controls.takeover_pending)
         self.assertFalse(runtime.controls.owned)
         finish.set()
         await self.until(lambda: runtime.controls.service_inflight == 0)
+        await runtime.controls.async_check()
         await runtime.controls.async_set_enabled(True)
         await asyncio.to_thread(
             runtime.api.service, "input_boolean", "turn_on",
@@ -219,7 +222,7 @@ class FanRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.controls.active)
         self.assertFalse(runtime.controls._unsubscribers)
         self.assertEqual(await store.async_load(),
-                         {"devices": [], "pending_fans": [fan]})
+                         {"devices": [], "enabled_intent": False, "pending_fans": [fan]})
         before = len(self.calls)
         self.hass.states.async_set(fan, "on", {})
         await asyncio.sleep(.02)

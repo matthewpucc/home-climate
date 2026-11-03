@@ -680,8 +680,9 @@ class HeartbeatDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(heater, runtime.controls.owned)
         self.assertTrue(runtime.controls.recovering)
         self.assertFalse(runtime.controls.enabled)
-        with self.assertRaises(HAError):
-            await runtime.controls.async_set_enabled(True)
+        await runtime.controls.async_set_enabled(True)
+        self.assertFalse(runtime.controls._snapshot["enabled"])
+        self.assertTrue(runtime.controls.takeover_pending)
         self.hass.services.async_register("climate", "set_hvac_mode", self.handle)
         await runtime.controls.async_check()
         await self.settle_watchdog(runtime.controls)

@@ -99,7 +99,7 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
             await original(data)
         with patch.object(runtime.controls.store, "async_save", side_effect=save):
             await self.claim(runtime)
-        self.assertEqual(set(saved[0]["devices"]),
+        self.assertEqual(set(saved[-1]["devices"]),
                          set(runtime.config.climate_entities) | set(runtime.config.fans.values()))
         await asyncio.to_thread(runtime.api.service, "climate", "set_temperature",
                                 entity_id=self.cfg.heater_entity, hvac_mode="heat", temperature=86)
@@ -193,7 +193,7 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         await self.settle_watchdog(runtime.controls)
         self.assertEqual(self.hass.states.get(old_head).state, "off")
         self.assertFalse(runtime.controls.owned)
-        self.assertEqual(await store.async_load(), {"devices": []})
+        self.assertEqual(await store.async_load(), {"devices": [], "enabled_intent": False})
         self.assertFalse(runtime.controls.enabled)
 
     async def test_failed_shutdown_retains_watchdog_and_blocks_unload_until_acknowledged(self):
@@ -206,12 +206,13 @@ class NativeControlTests(unittest.IsolatedAsyncioTestCase):
         self.hass.services.async_register("climate", "set_hvac_mode", offline)
         with self.assertLogs("custom_components.house_climate.controls", level="ERROR"):
             self.assertFalse(await runtime.async_stop())
-        self.hass.services.async_register("climate", "set_hvac_mode", self.handle)
         self.assertTrue(runtime.controls.active)
         self.assertTrue(runtime.controls.owned)
-        with self.assertRaises(HAError):
-            await runtime.controls.async_set_enabled(True)
+        await runtime.controls.async_set_enabled(True)
+        self.assertFalse(runtime.controls._snapshot["enabled"])
+        self.assertTrue(runtime.controls.takeover_pending)
         # On a subsequent unload attempt the device acknowledges off.
+        self.hass.services.async_register("climate", "set_hvac_mode", self.handle)
         self.assertTrue(await runtime.async_stop())
         self.assertFalse(runtime.controls.active)
         self.assertFalse(runtime.controls.owned)

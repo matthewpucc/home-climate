@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from .cadence import DecisionCadence
 from .config import Config, Probe, Settings, Zone, helper
 from .executor import ControlFault, Executor
-from .ha import HomeAssistant
+from .ha import HomeAssistant, HAStopping
 from .ha_package import watchdog_signature, write_dashboard, write_package
 from .locking import live_lock
 from .policy import Policy
@@ -201,6 +201,8 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                        **cadence.status(), **plan.as_dict())
                 faults = 0
             except Exception as exc:
+                if isinstance(exc, HAStopping) and quit_event.is_set():
+                    break  # Intentional shutdown is not a new operational fault.
                 report("fault", error=str(exc), shutdown_requested=active)
                 if active:
                     release(ha, executor, event_callback=report,

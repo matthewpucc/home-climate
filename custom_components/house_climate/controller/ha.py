@@ -14,6 +14,10 @@ class HAActivationDeferred(HAError):
     """Native interlock rejected activation before dispatch; retry without recovery."""
 
 
+class HAStopping(HAActivationDeferred):
+    """An intentional runtime shutdown rejected new work before dispatch."""
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Do not forward a bearer token to another origin.

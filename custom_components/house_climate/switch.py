@@ -74,7 +74,7 @@ class ControllerEnabled(SwitchEntity):
                     {"entity_id": entity}, blocking=True,
                 )
             self.runtime.wake_event.set()
-        except (RuntimeError, ValueError) as exc:
+        except (RuntimeError, ValueError, OSError) as exc:
             raise HomeAssistantError(str(exc)) from exc
 
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Let explicit native Controller On supersede incomplete fallback preset confirmation, retaining real command lifetimes, uncertain-job ownership and fresh shared-head Off before normal acquisition. Fence queued fallback writes and invalidate earlier stop evidence after late head activation. Preserve independent auxiliary shutdown, cutoff and manual ownership.
+- Persist explicit Controller On/Off intent separately from temporary execution state. Resume after graceful restart only with saved On and Allow Live; operational faults inhibit resumption. Legacy storage without saved intent starts Off. Expose takeover progress without claiming the abandoned fallback matched. No new positive fallback retries, equipment timers, watt limits or live configuration changes.
+
 ## 0.9.1
 
 - Normalize automated auxiliary targets against the actual native climate unit, range and step, rounding down to preserve the configured Fahrenheit ceiling. Match HA's exact rendered target plus native target readback instead of confusing a native Celsius step with a Fahrenheit display step. For a whole-Celsius heater, an 80°F ceiling selects 26°C (78.8°F, displayed 79°F); 81°F does not acknowledge it. Recheck the native capability contract before both startup commands, retaining explicit Heat, fresh feedback, deadlines and uncertain-command cleanup. Missing native metadata inhibits auxiliary use locally. No configuration migration or watt-limit change.

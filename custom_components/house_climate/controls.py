@@ -1,6 +1,6 @@
 """Native control interlocks and an HA-loop watchdog independent of the worker.
 
-Only ownership is persisted. Enabling control is an explicit, per-load action.
+User enable intent and cleanup ownership are persisted independently.
 The worker sees an internal adapter snapshot; no fake HA helper entities are made.
 """
 from __future__ import annotations
@@ -27,6 +27,10 @@ class NativeControls:
         self.hass, self.config, self.live, self.notify = hass, config, live, notify
         self.store = Store(hass, 1, f"house_climate.{entry_id}.ownership")
         self.enabled = False
+        self.enabled_intent = False
+        self._intent_dirty = False
+        self._resume_requested = False
+        self.takeover_pending = False
         self.active = False
         self.owned = ()
         self.pending_fans = ()
@@ -88,6 +92,10 @@ class NativeControls:
     async def async_load(self):
         data = await self.store.async_load()
         if data:
+            # Legacy storage never implied permission to resume control.
+            self.enabled_intent = data.get("enabled_intent") is True
+            self._resume_requested = self.enabled_intent and self.live
+            self.takeover_pending = data.get("takeover_pending") is True
             manual = data.get("manual_auxiliary")
             if manual is not None and (not isinstance(manual, str) or not manual.startswith("climate.")):
                 raise HAError("Invalid saved auxiliary manual ownership")
@@ -120,8 +128,15 @@ class NativeControls:
             self.pending_fans = tuple(entity for entity in dict.fromkeys(pending)
                                       if entity not in self.owned)
             self.recovering = bool(self.owned)
-            if self.handoff is not None:
-                self._head_possible.update(entity for entity in self.owned if entity in self.config.heads.values())
+            for entity in self.owned:
+                if entity.startswith("climate.") and entity != self.config.heater_entity:
+                    self._head_inflight.setdefault(entity, 0)
+                    self._head_stop_epochs.setdefault(entity, 0)
+                    self._head_possible.add(entity)
+            uncertain = data.get("uncertain_devices", [])
+            if not isinstance(uncertain, list) or any(e not in (*devices, *pending, *auxiliary) for e in uncertain):
+                raise HAError("Invalid saved uncertain device commands")
+            self._uncertain_device_jobs.update(uncertain)
             # A prior process may have dispatched heat while HA still cached Off.
             # Restored auxiliary ownership needs a fresh superseding stop.
             self._auxiliary_heat_possible = bool(self.config.heater_entity in (*self.owned, *self.pending_auxiliaries))
@@ -148,7 +163,7 @@ class NativeControls:
     def _publish(self):
         # Assignment publishes a coherent snapshot for synchronous worker reads.
         self._snapshot = {
-            "enabled": self.enabled and not self.recovering and not self._claiming,
+            "enabled": self.enabled and not self.recovering and not self._claiming and not self.takeover_pending,
             "owned": bool(self.owned) and not self.recovering, "active": self.active,
             "heartbeat": self.heartbeat,
             "heartbeat_monotonic": self.heartbeat_monotonic,
@@ -232,6 +247,8 @@ class NativeControls:
     def hint(self):
         if self.problem:
             return self.problem
+        if self.takeover_pending:
+            return "Taking control: waiting for prior commands and fresh shared-head Off"
         if self.recovering:
             return "Waiting for previously owned devices to stop"
         if not self.live:
@@ -273,6 +290,9 @@ class NativeControls:
     def pause(self, reason=None):
         self._log_stop(logging.WARNING, reason or "Controller pause requested")
         self.enabled = False
+        self.enabled_intent = False
+        self._intent_dirty = True
+        self._resume_requested = False
         self.ownership_generation += 1
         self.recovering = bool(self.owned)
         if reason:
@@ -280,7 +300,13 @@ class NativeControls:
         self._publish()
         self._schedule_check()
 
-    async def async_set_enabled(self, enabled):
+    async def async_set_enabled(self, enabled, *, preserve_intent=False):
+        async with self._check_lock:
+            async with self._lock:
+                await self._set_enabled(enabled, preserve_intent=preserve_intent)
+
+    async def _set_enabled(self, enabled, *, preserve_intent=False):
+        self._resume_requested = False
         if enabled:
             if (self.power_guard is not None
                     and getattr(self.power_guard, "commissioning_busy",
@@ -293,9 +319,14 @@ class NativeControls:
             if not self.live:
                 raise HAError("Enable live commands in Configure → System settings first")
             self.config.validate(live=True)
-            if (self.recovering or (self.owned and not self.enabled)
-                    or (not self.enabled and self._comfort_jobs_pending())):
-                raise HAError("Waiting for previously owned devices to acknowledge off")
+            if self.enabled:
+                return
+            if self.recovering or self.owned or self.takeover_pending or self._comfort_jobs_pending():
+                self.takeover_pending = True
+                if self.handoff is not None:
+                    self.handoff["stage"] = "superseded"
+                    self.handoff["problems"] = {}
+                self._head_possible.update(e for e in self.owned if e in self.config.heads.values())
             self.problem = None
             self._stop_log_reason = None
             self._shutdown_save_error = None
@@ -303,9 +334,29 @@ class NativeControls:
             self._log_stop(logging.INFO, "Controller disabled")
         if enabled != self.enabled:
             self.ownership_generation += 1
-        self.enabled = enabled
-        if not enabled and self.owned:
-            self.recovering = True
+        generation = self.ownership_generation
+        # Revoke queued writes before the persistence await. Never roll this
+        # generation backwards if storage fails.
+        self.enabled = False
+        if not preserve_intent:
+            self.enabled_intent = enabled
+        try:
+            await self._save(self.owned, self.pending_fans)
+        except Exception:
+            self.enabled_intent = False
+            self._intent_dirty = True
+            self.recovering = bool(self.owned)
+            self.problem = "Could not save controller enable intent; control remains stopped"
+            self._publish()
+            self._schedule_check()
+            if enabled:
+                raise
+            return  # Persistence failure must never withhold safety Off.
+        self.enabled = bool(enabled and self.enabled_intent and self.live and self.active
+                            and not self._closing and generation == self.ownership_generation)
+        self.recovering = bool(self.owned) and (not self.enabled or self.takeover_pending)
+        if self._intent_dirty:
+            await self._save(self.owned, self.pending_fans)
         self._publish()
         self._schedule_check()
 
@@ -322,7 +373,8 @@ class NativeControls:
         devices = set(self.config.climate_entities) | set(self.config.fans.values()) | set(self.owned)
         devices.discard(self.config.heater_entity)
         return (self.inflight > self.auxiliary_inflight or self.stop_jobs(devices)
-                or self.pending_device_jobs(devices) or bool(self._uncertain_device_jobs & devices))
+                or self.pending_device_jobs(devices) or bool(self._uncertain_device_jobs & devices)
+                or any(not job.done() for entity, job in self._handoff_jobs.items() if entity in devices))
 
     def command_generation(self, entity):
         """Manual auxiliary ownership fences its queued commands independently."""
@@ -468,7 +520,12 @@ class NativeControls:
         self._publish()
 
     async def _save(self, devices, pending, *, auxiliary=None):
-        data = {"devices": list(devices)}
+        intent = self.enabled_intent
+        data = {"devices": list(devices), "enabled_intent": intent}
+        if self.takeover_pending:
+            data["takeover_pending"] = True
+        if self._uncertain_device_jobs:
+            data["uncertain_devices"] = sorted(self._uncertain_device_jobs)
         if self.auxiliary_manual:
             data["manual_auxiliary"] = self.auxiliary_manual_entity
         if self.handoff is not None:
@@ -480,6 +537,8 @@ class NativeControls:
         if auxiliary:
             data["pending_auxiliaries"] = list(auxiliary)
         await self.store.async_save(data)
+        if self.enabled_intent == intent:
+            self._intent_dirty = False
 
     async def async_service(self, domain, service, data):
         if domain == "input_boolean":
@@ -494,7 +553,7 @@ class NativeControls:
                     async with self._check_lock:
                         async with self._lock:
                             if (not self.active or not self.enabled or not self.live
-                                    or self.recovering or self._closing):
+                                    or self.recovering or self.takeover_pending or self._closing):
                                 raise HAError("Control is disabled or still stopping")
                             if not self.owned:
                                 if self._comfort_jobs_pending():
@@ -528,6 +587,13 @@ class NativeControls:
                     self._publish()
                     self._schedule_check()
             else:
+                # The worker sees a disabled overlay during takeover cleanup;
+                # its prior release cannot revoke a newer explicit On request.
+                if data.get("cause") in ("disabled", "ownership_recovery") and self.enabled:
+                    return
+                if data.get("cause") == "fault":
+                    self.enabled_intent = False
+                    self._intent_dirty = True
                 # Repeated release requests must not invalidate an Off receipt
                 # that is already completing for this same ownership exit.
                 if self.enabled or (self.owned and not self.recovering):
@@ -591,6 +657,7 @@ class NativeControls:
             and self._head_off_receipts.get(entity)
                 == (self.ownership_generation, self._head_stop_epochs.get(entity))
             and state is not None and state.state == "off"
+            and not state.attributes.get("restored") and not state.attributes.get("assumed_state")
             and state.attributes.get("hvac_action") not in ("heating", "cooling")
             and self._head_marker(entity) != self._head_off_baselines.get(entity))
         if acknowledged:
@@ -647,7 +714,7 @@ class NativeControls:
 
     @callback
     def activation_job_uncertain(self, entity):
-        if entity not in self.config.climate_entities:
+        if entity not in (*self.config.climate_entities, *self.config.fans.values()):
             return
         self._uncertain_device_jobs.add(entity)
         self.problem = f"Device service cancelled after dispatch; completion remains uncertain: {entity}"
@@ -773,7 +840,7 @@ class NativeControls:
             raise HAActivationDeferred("Command belongs to an earlier controller lease")
         if entity == self.config.heater_entity and (self.auxiliary_manual or self._manual_transition):
             raise HAActivationDeferred("Auxiliary heater is under explicit manual control")
-        if (not self.active or not self.live or not self.enabled or self.recovering
+        if (not self.active or not self.live or not self.enabled or self.recovering or self.takeover_pending
                 or self._claiming or self._closing
                 or entity not in self.owned):
             raise HAError("Controller is disabled or stopping; activation blocked")
@@ -961,9 +1028,22 @@ class NativeControls:
 
     async def async_check(self):
         """Run on HA's loop even when the control worker stalls or exits."""
+        if self._resume_requested:
+            self._resume_requested = False
+            try:
+                if self.enabled_intent and self.live:
+                    await self.async_set_enabled(True)
+            except Exception as exc:
+                self.pause(f"Could not resume saved Controller On: {exc}")
         async with self._check_lock:
             if self._claiming:
                 return
+            if self._intent_dirty:
+                try:
+                    await self._save(self.owned, self.pending_fans)
+                except Exception as exc:
+                    self.problem = f"Could not save controller shutdown: {exc}"
+                    self._log_shutdown_save_error(self.problem)
             heater = self.hass.states.get(self.config.heater_entity) if self.config.heater_entity else None
             safely_idle = bool(heater and heater.state in ("off", "fan_only")
                                and heater.attributes.get("hvac_action") != "heating")
@@ -974,7 +1054,13 @@ class NativeControls:
                     self._publish()
                 self._auxiliary_off_error = None
             attempted = set()
-            if self.owned and self.handoff is not None and (self.recovering or not self.enabled):
+            if self.takeover_pending:
+                try:
+                    await self._takeover_cleanup()
+                except Exception as exc:
+                    self.problem = f"Could not save controller takeover: {exc}"
+                    self._publish()
+            elif self.owned and self.handoff is not None and (self.recovering or not self.enabled):
                 from .handoff import step
                 try:
                     await step(self)
@@ -997,6 +1083,8 @@ class NativeControls:
                             f"lease limit {self.config.heartbeat_timeout_seconds:g}s); disabling control",
                         )
                         self.enabled = False
+                        self.enabled_intent = False
+                        self._intent_dirty = True
                         self.ownership_generation += 1
                         self.problem = "Control paused: controller heartbeat expired"
                     self.recovering = True
@@ -1063,6 +1151,75 @@ class NativeControls:
                     self._log_shutdown_save_error(self.problem)
                     self._publish()
 
+            # A heartbeat fault can be detected after the entry save above.
+            # Persist its inhibition before this check returns, not one timer
+            # interval later. Off attempts have already been allowed to run.
+            if self._intent_dirty:
+                try:
+                    await self._save(self.owned, self.pending_fans)
+                except Exception as exc:
+                    self.problem = f"Could not save controller shutdown: {exc}"
+                    self._log_shutdown_save_error(self.problem)
+                    self._publish()
+
+    async def _takeover_cleanup(self):
+        """Supersede a preset, never its real jobs or independent stop obligations."""
+        heater = self.config.heater_entity
+        # An uncertain dispatched handler remains a fault even after a cached
+        # Off or matching preset. Persist it across an interrupted takeover.
+        for entity, request in (self.handoff or {}).get("requests", {}).items():
+            job = self._handoff_jobs.get(entity)
+            if request.get("uncertain") or (job is not None and job.cancelled() and request.get("dispatched")):
+                self._uncertain_device_jobs.add(entity)
+        for entity in self.owned:
+            if (self.stop_jobs({entity}) or self.pending_device_jobs({entity})
+                    or (entity in self._handoff_jobs and not self._handoff_jobs[entity].done())):
+                continue
+            if (not self._is_off(entity) or (entity == heater
+                    and (self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked)
+                    and not self._ack_auxiliary_heartbeat_off())):
+                await self._off(entity)
+        if (self._comfort_jobs_pending()
+                or any(not self._is_off(e) for e in self.owned if e.startswith("climate.") and e != heater)):
+            await self._save(self.owned, self.pending_fans)
+            self._publish()
+            return
+        auxiliary = self.pending_auxiliaries
+        if heater in self.owned and (
+                self.auxiliary_inflight or self.stop_jobs({heater}) or self.pending_device_jobs({heater})
+                or heater in self._uncertain_device_jobs or not self._is_off(heater)
+                or ((self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked)
+                    and not self._ack_auxiliary_heartbeat_off())):
+            auxiliary = tuple(dict.fromkeys((*auxiliary, heater)))
+        previous = self.handoff, self.takeover_pending
+        self.takeover_pending = False
+        if not self.enabled and self.owned:
+            # Off during takeover (or a shadow restart) still owes the terminal
+            # fallback. Start a new intent only after old calls and heads stop.
+            from .handoff import arm
+            self.handoff = arm(self, self.owned)
+            if self.handoff is not None and previous[0] is not None:
+                self.handoff["authorized"] = previous[0]["authorized"]
+            owned, pending = self.owned, self.pending_fans
+        else:
+            self.handoff = None
+            owned = ()
+            pending = tuple(dict.fromkeys((*self.pending_fans,
+                *(e for e in self.owned if e.startswith("fan.") and not self._is_off(e)))))
+        try:
+            await self._save(owned, pending, auxiliary=auxiliary)
+        except BaseException:
+            self.handoff, self.takeover_pending = previous
+            raise
+        self.owned, self.pending_fans, self.pending_auxiliaries = owned, pending, auxiliary
+        self.recovering = bool(owned)
+        self.ownership_generation += 1
+        if heater not in auxiliary:
+            self._reset_auxiliary_heartbeat()
+        if self.problem and self.problem.startswith("Could not save controller takeover:"):
+            self.problem = None
+        self._publish()
+
     async def async_close(self):
         if (not self.active and self._closing and not self.owned and not self.pending_auxiliaries
                 and not self.inflight and not self.service_inflight):
@@ -1070,7 +1227,7 @@ class NativeControls:
         self._closing = True
         closed = False
         try:
-            await self.async_set_enabled(False)
+            await self.async_set_enabled(False, preserve_intent=True)
             if self._task:
                 # Cancelling a pending configuration reload must not cancel the
                 # independently scheduled watchdog it happens to be awaiting.

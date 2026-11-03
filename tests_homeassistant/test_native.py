@@ -25,6 +25,7 @@ from custom_components.house_climate.controller.__main__ import preflight
 from custom_components.house_climate.controller.executor import Executor
 from custom_components.house_climate.controller.ha_package import watchdog_signature
 from custom_components.house_climate.controller.policy import Policy
+from custom_components.house_climate.controller.auxiliary_dispatch import AuxiliaryDispatch
 from custom_components.house_climate.controller.protection import ProtectionTemperatures
 from custom_components.house_climate.sensor import ControllerStatus
 from tests.test_controller import config, fixture, add_helpers
@@ -54,6 +55,12 @@ class FixtureClimateCapabilities(ClimateEntity):
 
 class NativeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Worker/service tests expect ordinary auxiliary admission. Using the
+        # real tariff clock makes them change behavior at 17:00; peak dispatch
+        # has separate fixed-time policy tests. Keep only this fixture off-peak.
+        off_peak = patch.object(AuxiliaryDispatch, "peak", return_value=False)
+        off_peak.start()
+        self.addCleanup(off_peak.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.directory.name)
         self.hass.config.units = US_CUSTOMARY_SYSTEM

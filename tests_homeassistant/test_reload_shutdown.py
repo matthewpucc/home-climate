@@ -103,7 +103,7 @@ class ReloadShutdownTests(unittest.IsolatedAsyncioTestCase):
             setup.assert_awaited_once()
             self.assertFalse(runtime.controls.owned)
             self.assertFalse(runtime.controls.active)
-            self.assertEqual(await runtime.controls.store.async_load(), {"devices": []})
+            self.assertEqual(await runtime.controls.store.async_load(), {"devices": [], "enabled_intent": True})
 
     async def test_options_save_stays_loaded_through_wifi_outage_and_reloads_after_off(self):
         runtime, _ = await self.runtime(entry_id="offline_saved_options")
@@ -218,7 +218,7 @@ class ReloadShutdownTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.wait_for(task, 2)
             setup.assert_awaited_once()
             self.assertFalse(runtime.controls.owned)
-            self.assertEqual(await runtime.controls.store.async_load(), {"devices": []})
+            self.assertEqual(await runtime.controls.store.async_load(), {"devices": [], "enabled_intent": True})
 
     async def test_external_reload_cancels_pending_saved_reload_without_cancelling_itself(self):
         runtime, _ = await self.runtime(entry_id="superseded_saved_reload")
@@ -270,7 +270,7 @@ class ReloadShutdownTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(task, 2)
             setup.assert_awaited_once()
             self.assertFalse(runtime.controls.owned)
-            self.assertEqual(await store.async_load(), {"devices": []})
+            self.assertEqual(await store.async_load(), {"devices": [], "enabled_intent": False})
 
     async def test_core_shutdown_cancels_reload_intent_already_waiting_for_off(self):
         runtime, _ = await self.runtime(entry_id="pending_reload_core_stop")

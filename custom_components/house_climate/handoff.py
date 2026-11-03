@@ -34,7 +34,7 @@ def arm(controls, devices):
 def validate(plan):
     if (not isinstance(plan, dict) or plan.get("version") != 1
             or type(plan.get("authorized")) is not bool
-            or plan.get("stage") not in ("armed", "stopping", "settling", "applying", "blocked")
+            or plan.get("stage") not in ("armed", "stopping", "settling", "applying", "blocked", "superseded")
             or not isinstance(plan.get("heads"), list) or not isinstance(plan.get("fans"), list)
             or any(not isinstance(e, str) or not e.startswith("climate.") for e in plan["heads"])
             or any(not isinstance(e, str) or not e.startswith("fan.") for e in plan["fans"])
@@ -107,7 +107,7 @@ async def _save(controls):
 async def step(controls):
     """Run under the native ownership/check lock; retain all actual jobs."""
     plan = controls.handoff
-    if plan is None:
+    if plan is None or controls.takeover_pending:
         return
     current = set(controls.config.heads.values()) | set(controls.config.fans.values())
     expected = set(plan["heads"]) | set(plan["fans"])
@@ -214,8 +214,13 @@ async def step(controls):
         await _save(controls)
         controls.service_inflight += 1
         async def dispatch(entity=entity, domain=domain, service=service, data=data,
-                           epoch=epoch if controls.repair_gate else None):
+                           epoch=epoch if controls.repair_gate else None,
+                           generation=controls.ownership_generation):
+            started = False
             try:
+                if (controls.handoff is not plan or controls.takeover_pending
+                        or controls.enabled or generation != controls.ownership_generation):
+                    return
                 current_state = controls.hass.states.get(entity)
                 if (current_state is not None and current_state.context.user_id is not None
                         and current_state.last_updated.timestamp() > plan["requests"][entity]["at"]):
@@ -227,9 +232,14 @@ async def step(controls):
                     plan["problems"][entity] = "Previous device command remains unresolved; recovery activation blocked"
                     return
                 plan["requests"][entity]["dispatched"] = True
+                controls.head_activation_started(entity)
+                started = True
                 await controls.hass.services.async_call(domain, service, {"entity_id": entity, **data}, blocking=True)
             except Exception as exc:
                 plan["problems"][entity] = f"Recovery command failed: {exc}"
+            finally:
+                if started:
+                    controls.head_activation_finished(entity)
         task = controls.hass.async_create_background_task(dispatch(), "Home Climate recovery setting", eager_start=False)
         controls._handoff_jobs[entity] = task
         def finished(job, entity=entity):

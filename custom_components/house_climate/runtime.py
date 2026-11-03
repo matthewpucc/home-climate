@@ -21,7 +21,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import SIGNAL_STATUS
 from .controller.__main__ import run_loop
-from .controller.ha import HAActivationDeferred, HAError
+from .controller.ha import HAActivationDeferred, HAError, HAStopping
 from .controller.config import Settings
 from .controller.auxiliary_target import AuxiliaryTarget, trusted_auxiliary_state
 from .controller.window_authorization import WindowAuthorization, check_window_authorization
@@ -160,7 +160,7 @@ class NativeAPI:
             if (path == "services/input_datetime/set_datetime"
                     and body.get("entity_id") == self.heartbeat_entity):
                 if self.stop_event.is_set():
-                    raise HAError("Controller is stopping; heartbeat ignored")
+                    raise HAStopping("Controller is stopping; heartbeat ignored")
                 self._queue_heartbeat()
                 return []
         activation = self._is_activation(path, body)
@@ -407,7 +407,7 @@ class NativeAPI:
                     and body.get("entity_id") == self.ownership_entity)
             )
             if not safe_stop:
-                raise HAError("Controller is stopping; only shutdown commands are allowed")
+                raise HAStopping("Controller is stopping; only shutdown commands are allowed")
         controls = self.controls
         if controls and controls.accepts(domain, service, body.get("entity_id")):
             async with asyncio.timeout(remaining):
@@ -472,6 +472,8 @@ class NativeAPI:
 
     async def _async_service_job(self, path, domain, service, body, deadline, activation,
                                   generation, dispatch, repair_epoch, operation):
+        if activation and self.stop_event.is_set():
+            raise HAStopping("Controller is stopping; activation was not dispatched")
         if time.monotonic() >= deadline:
             if dispatch is not None and dispatch.abandon_if_queued():
                 raise HAActivationDeferred("Head service expired before actual dispatch")
@@ -528,7 +530,7 @@ class NativeAPI:
                 if state is None or not current.matches({"attributes": state.attributes}):
                     raise HAActivationDeferred("Auxiliary target changed before explicit Heat dispatch")
         if activation and self.stop_event.is_set():
-            raise HAActivationDeferred("Controller is stopping; activation was not dispatched")
+            raise HAStopping("Controller is stopping; activation was not dispatched")
         if dispatch is not None:
             dispatch.begin()
         if controls and activation:
@@ -877,6 +879,8 @@ class ControllerRuntime:
             self.status = {"event": "stopping", **self.last_fault}
         self.status.update(control_enabled=self.controls.enabled,
                            control_block_reason=self.controls.hint,
+                           enabled_intent=self.controls.enabled_intent,
+                           takeover_pending=self.controls.takeover_pending,
                            pending_fans=list(self.controls.pending_fans),
                            auxiliary_manual=self.controls.auxiliary_manual,
                            auxiliary_manual_entity=self.controls.auxiliary_manual_entity,
@@ -976,6 +980,8 @@ class ControllerRuntime:
         if self.controls:
             self.status.update(control_enabled=self.controls.enabled,
                                control_block_reason=self.controls.hint,
+                               enabled_intent=self.controls.enabled_intent,
+                               takeover_pending=self.controls.takeover_pending,
                                pending_fans=list(self.controls.pending_fans),
                                auxiliary_manual=self.controls.auxiliary_manual,
                                auxiliary_manual_entity=self.controls.auxiliary_manual_entity,
@@ -1033,6 +1039,8 @@ class ControllerRuntime:
 
     @callback
     def _async_finished(self, error):
+        if error is None and not self.stop_event.is_set():
+            error = "Controller worker exited without a shutdown request"
         if self.controls and error:
             self.controls.pause(f"Control paused: controller worker stopped: {error}")
         self._async_report("worker_failed" if error else "stopped",
@@ -1160,7 +1168,7 @@ class ControllerRuntime:
             await self.comfort.async_close()
         recovery_closed = await self.recovery.async_close()
         if self.controls:
-            await self.controls.async_set_enabled(False)
+            await self.controls.async_set_enabled(False, preserve_intent=True)
         if self.finished is None:
             self._async_report("stopped", {})
         else:

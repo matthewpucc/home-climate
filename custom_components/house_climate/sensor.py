@@ -146,6 +146,7 @@ def handoff_message(status):
         "stopping": "Recovery handoff: confirming owned devices Off",
         "settling": "Recovery handoff: waiting for equipment off-time",
         "applying": "Recovery handoff: verifying fallback settings",
+        "superseded": "Taking control: reconciling prior commands and shared-head Off",
         "blocked": "Recovery handoff incomplete; operator attention required",
     }.get(stage, "Recovery handoff in progress")
 
@@ -458,6 +459,7 @@ class ControllerStatus(ControllerEntity):
                  "head_stop_reasons", "head_transition_history", "pending_head_commands", "head_constraints",
                  "head_protections", "unavailable_mode_requests", "mode_scores", "protection_context",
                  "auxiliary_manual", "auxiliary_manual_entity", "handoff", "notifications",
+                 "enabled_intent", "takeover_pending",
                  "auxiliary_decision", "auxiliary_policy", "shared_stop", "seasonal",
                  "seasonal_policy", "shutdown_evidence") if key in status} | heartbeat_attributes(status)
 

@@ -157,7 +157,7 @@ The **Recovery state after active control** object defaults to:
 
 It applies whenever active ownership ends: requested disable, graceful restart or fault. The intended result is supported dual-setpoint head operation at the configured range, auxiliary Off and circulation fans at the configured percentage. Manual auxiliary ownership is excluded. Unsafe devices do not receive positive activation merely to make the preset appear complete; partial failures remain visible and require attention. A crash cannot send commands while HA is down; unfinished obligations are reconciled after startup, without blindly overwriting later manual intervention. A clean Preview startup does not activate the preset.
 
-Heads must support HA's `heat_cool` dual-setpoint mode; an unrelated `auto` mode is not a substitute. The handoff requires fresh device confirmation and waits through existing Off, minimum-Off and settling barriers. Confirmed preset completion releases routine head/fan ownership and leaves **Controller enabled** Off, including after a fault. Resuming automated comfort requires explicit enable.
+Heads must support HA's `heat_cool` dual-setpoint mode; an unrelated `auto` mode is not a substitute. The handoff requires fresh device confirmation and waits through existing Off, minimum-Off and settling barriers. Confirmed preset completion releases routine head/fan ownership and leaves **Controller enabled** Off for an explicit disable or active-control fault. Explicit On, or startup with saved On and Allow Live, supersedes remaining preset confirmation through safe takeover.
 
 For an incomplete handoff, **Retry recovery settings** is an explicit retry of the **whole saved head/fan plan**, not just its failed devices. Review the saved targets and scope first: retry can reapply every saved head and fan. It requires:
 
@@ -166,7 +166,7 @@ For an incomplete handoff, **Retry recovery settings** is an explicit retry of t
 - Every involved head reporting native Off without active heating/cooling, restored or assumed state; each report must be no older than 180 seconds and newer than the failed-request/restart boundary.
 - A successful durable save of retry intent before proceeding through normal Off/settling timing again.
 
-Failed persistence retains the prior blocked plan. This button does not clear auxiliary shutdown faults, cutoff ownership or pending auxiliary cleanup, and it does not reclaim a manually owned auxiliary. An unconfirmed dispatched preset after restart remains an explicit recovery matter rather than permission for blind repetition.
+Failed persistence retains the prior blocked plan. This button does not clear auxiliary shutdown faults, cutoff ownership or pending auxiliary cleanup, and it does not reclaim a manually owned auxiliary. An unconfirmed dispatched preset is not permission for blind repetition. Controller On may instead supersede that preset and reconcile actual jobs and fresh shared-head Off before ordinary control. Saved On plus Allow Live does the same on restart; it never clears uncertain commands or auxiliary fault ownership. Legacy storage without saved On remains Off until explicitly enabled.
 
 ## Notification routes
 
