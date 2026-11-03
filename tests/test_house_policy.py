@@ -75,11 +75,15 @@ class HousePolicyTests(unittest.TestCase):
         self.assertEqual(self.cfg.head_cool_min_f, {entity: 65 for entity in self.bindings.heads.values()})
         self.assertEqual((self.cfg.poll_seconds, self.cfg.decision_interval_seconds), (15, 90))
 
-    def test_two_office_fans_distribute_shared_entertainment_head_air(self):
+    def test_each_purifier_has_only_its_supported_room_profiles(self):
         fans = self.cfg.fan_controls
-        for entity in (self.bindings.fans["office"], self.bindings.fans["entertainment"]):
-            self.assertEqual((fans[entity].room, fans[entity].source_room, fans[entity].strategy,
-                              fans[entity].percentage), ("office", "entertainment", "transfer", 60))
+        for room in ("office", "entertainment"):
+            fan = fans[self.bindings.fans[room]]
+            self.assertEqual((fan.room, fan.strategy, fan.percentage), (room, "directed", 60))
+        office = fans[self.bindings.fans["office"]].airflow
+        self.assertEqual({p.destination for p in office.profiles.values()}, {"office", "entertainment"})
+        entertainment = fans[self.bindings.fans["entertainment"]].airflow
+        self.assertEqual({p.destination for p in entertainment.profiles.values()}, {"entertainment"})
         primary = fans[self.bindings.fans["primary"]]
         self.assertEqual(primary.strategy, "schedule")
 
@@ -129,7 +133,7 @@ class HousePolicyTests(unittest.TestCase):
         self.assertEqual(fixed.zones[aliases["office"]].profile.target_f, 71)
         self.assertEqual(fixed.zones[aliases["office"]].area_id, "bonus_floor")
         self.assertEqual(fixed.auxiliary_room, aliases["living"])
-        self.assertEqual(fixed.fan_controls[self.bindings.fans["office"]].source_room,
+        self.assertEqual(fixed.fan_controls[self.bindings.fans["office"]].airflow.profiles["toward_office"].source,
                          aliases["entertainment"])
         self.assertEqual((fixed.low_f, fixed.high_f), (66, 75))
         self.assertEqual(fixed.head_cool_min_f, self.cfg.head_cool_min_f)

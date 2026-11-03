@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add demand-directed per-device purifier sweeps with explicit room intent, provisional calibration metadata, direction confirmation/dwell, and stable minimum-speed baseline. Office can use its accepted Entertainment-facing sweep or provisionally accepted Office-facing sweep; Entertainment retains only its known local circulation profile. Comfort aim does not create or satisfy HVAC demand, and limits-only periods do not invent comfort demand from nominal targets.
+- Stage outlet and atomic sweep acknowledgement before direction-dependent boosts through a guarded native hass-dyson adapter. Retain purifier minimums and existing speed quantization; recheck identity, ownership, lifecycle, current demand and allowed speed at actual dispatch. Expose requested/reported settings and independent failures in Controller status. Generic/legacy rules remain opt-in; CLI/add-on directed configurations safely withhold unsupported boosts. See [directed airflow](docs/directed-airflow.md) for migration and later calibration. No deployment, live binding or protection-policy changes.
+
 ## 0.9.3
 
 - Preserve saved purifier minimums when deciding whether a late fan report cancels a bounded recovery retry. A report below the saved floor or fallback target keeps the valid retry available instead of consuming it without dispatch.

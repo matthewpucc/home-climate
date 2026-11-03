@@ -17,6 +17,8 @@ Existing installs update in place. The old private filename `house_climate_bindi
 
 See the [configuration guide](docs/configuration.md) for the editor, default schedules, source descriptors, manual takeover and notification routing.
 
+Supported purifiers can use [demand-directed room airflow](docs/directed-airflow.md), with named per-device sweeps, provisional calibration metadata and fresh settings acknowledgement before directional boosts. Comfort airflow does not replace HVAC demand.
+
 ## Configurable comfort
 
 Office and Entertainment share the Bonus head; Guest, Primary and Living have their own heads. Living participates in normal shared-system arbitration. The auxiliary can supplement Living heat or provide it while the shared heat pump cools other rooms; it does not replace Living's head unconditionally.

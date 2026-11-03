@@ -100,6 +100,9 @@ class Executor:
         self.pending: dict[str, Pending] = {}
         self.stop_started: float | None = None
         self.fan_failures: dict[str, FanRetry] = {}
+        from .airflow_execution import AirflowExecution
+        self.airflow = AirflowExecution(self)
+        self._fan_airflow_ticket = None
         self.device_issues: dict[str, str] = {}
         self.recoveries: dict[str, ClimateRecovery] = {}
         self.capability_blocks: dict[str, dict] = {}
@@ -219,7 +222,9 @@ class Executor:
                 guarded_service(entity.split(".")[0], service, ticket=ticket,
                                 entity_id=entity, **data)
             else:
-                if deadline is not None:
+                if self._fan_airflow_ticket is not None and entity.startswith("fan."):
+                    self.ha.airflow_service(self._fan_airflow_ticket, service, **data)
+                elif deadline is not None:
                     bounded = getattr(self.ha, "service_before", None)
                     if not callable(bounded):
                         raise HAActivationDeferred("Auxiliary startup requires bounded adapter dispatch")
@@ -1194,7 +1199,9 @@ class Executor:
             command = (service, tuple(sorted(data.items())))
             pending = self.pending.get(entity)
             # Supersede even a timed-out activation whose old snapshot says off.
-            urgent_off = failure and service == "turn_off" and failure.command != command
+            urgent_off = bool(failure and failure.command != command and (
+                service == "turn_off" or (failure.command is not None and percentage
+                < dict(failure.command[1]).get("percentage", 0))))
             if not urgent_off and matches(state) and (pending is None or pending.command == command):
                 self.pending.pop(entity, None)
                 self.fan_failures.pop(entity, None)
@@ -1233,6 +1240,9 @@ class Executor:
 
     def step(self, plan: Plan, states: dict, now: float):
         self._diagnostic_plan = plan
+        reset_airflow = getattr(self.ha, "reset_airflow_authorizations", None)
+        if callable(reset_airflow):
+            reset_airflow()
         self._observe_repair_epochs(states, now)
         self._observe_head_stops(plan, states)
         self.cycle_holds.clear()
@@ -1271,9 +1281,16 @@ class Executor:
             if message not in plan.reasons:
                 plan.reasons.append(message)
         for entity, percentage in plan.fans.items():
-            minimum = max((fan.minimum_percentage for fan in self.config.fan_controls.values()
-                           if fan.entity_id == entity), default=0)
-            self.fan(entity, percentage, plan, self._states, now, minimum_percentage=minimum)
+            fan = next((fan for fan in self.config.fan_controls.values() if fan.entity_id == entity), None)
+            minimum = fan.minimum_percentage if fan else 0
+            ticket = None
+            if fan and fan.airflow is not None:
+                percentage, ticket = self.airflow.apply(fan, percentage, plan, self._states, now)
+            self._fan_airflow_ticket = ticket
+            try:
+                self.fan(entity, percentage, plan, self._states, now, minimum_percentage=minimum)
+            finally:
+                self._fan_airflow_ticket = None
         for entity, issue in self.device_issues.items():
             warning = f"Climate device {entity}: {issue}; retrying independently"
             if warning not in plan.warnings:
@@ -1367,6 +1384,9 @@ class Executor:
 
     def shutdown(self, states=None, *, reason="Controller shutdown") -> list[str]:
         """Best effort across every device even when one service call fails."""
+        reset_airflow = getattr(self.ha, "reset_airflow_authorizations", None)
+        if callable(reset_airflow):
+            reset_airflow()
         failures = []
         snapshot = self._states if states is None else states
         old_pending = dict(self.pending)
@@ -1411,6 +1431,7 @@ class Executor:
         self.cycle_holds.clear()
         self.pending.clear()
         self.fan_failures.clear()
+        self.airflow.pending.clear()
         self.device_issues.clear()
         self.recoveries.clear()
         self.capability_blocks.clear()

@@ -91,10 +91,11 @@ def controller_entity_ids(config):
 class NativeActivationDispatch:
     """Serialize worker abandonment with HA-loop dispatch for one positive call."""
 
-    def __init__(self, deadline, window_authorization=None, auxiliary_target=None):
+    def __init__(self, deadline, window_authorization=None, auxiliary_target=None, airflow_authorization=None):
         self.deadline = deadline
         self.window_authorization = window_authorization
         self.auxiliary_target = auxiliary_target
+        self.airflow_authorization = airflow_authorization
         self._lock = threading.Lock()
         self._dispatched = False
         self._abandoned = False
@@ -135,7 +136,8 @@ class NativeAPI:
         self._heartbeat_lock = threading.Lock()
         self._heartbeat = HeartbeatState()
         self._heartbeat_token = 0
-        self.repair_gate = RepairGate(config.heads.values())
+        self.repair_gate = RepairGate([*config.heads.values(), *config.fans.values()])
+        self._airflow_authorizations = {}
         self._service_jobs = {}
         self._uncertain_service_entities = set()
         self.service_notify = None
@@ -146,7 +148,7 @@ class NativeAPI:
         self._auxiliary_target_snapshot = None
 
     def request(self, path, body=None, *, window_authorization=None,
-                activation_deadline=None, auxiliary_target=None):
+                activation_deadline=None, auxiliary_target=None, airflow_authorization=None):
         if body is not None and not self.live:
             raise HAError("Shadow mode forbids all service calls")
         if threading.get_ident() == self.hass.loop_thread_id:
@@ -181,9 +183,10 @@ class NativeAPI:
             deadline = min(deadline, self._activation_deadline(activation_deadline))
             if deadline <= time.monotonic():
                 raise HAActivationDeferred("Activation deadline expired before dispatch")
-        dispatch = (NativeActivationDispatch(deadline, window_authorization, auxiliary_target)
+        dispatch = (NativeActivationDispatch(deadline, window_authorization, auxiliary_target, airflow_authorization)
                     if activation and (self.controls is not None or window_authorization is not None
-                                       or bounded_activation or auxiliary_target is not None) else None)
+                                       or bounded_activation or auxiliary_target is not None
+                                       or airflow_authorization is not None) else None)
         future = asyncio.run_coroutine_threadsafe(
             self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
                                 repair_epoch=repair_epoch), self.hass.loop
@@ -351,6 +354,10 @@ class NativeAPI:
         for entity_id in self.entity_ids:
             state = self.hass.states.get(entity_id)
             if state is not None:
+                airflow_identity = ()
+                if any(f.entity_id == entity_id and f.airflow for f in self.config.fan_controls.values()):
+                    from .airflow_adapter import identity
+                    airflow_identity = identity(self.hass, entity_id)
                 result.append({
                     "entity_id": state.entity_id, "state": state.state,
                     "attributes": dict(state.attributes),
@@ -358,6 +365,7 @@ class NativeAPI:
                     "last_updated": state.last_updated.isoformat(),
                     "last_reported": state.last_reported.isoformat(),
                     **({"integration_repair": repair} if (repair := self.repair_gate.overlay(entity_id)) else {}),
+                    **({"airflow_identity": airflow_identity} if airflow_identity else {}),
                 })
         return result
 
@@ -400,6 +408,11 @@ class NativeAPI:
         if not self.live:
             raise HAError("Shadow mode forbids all service calls")
         _, domain, service = pieces
+        if domain == "hass_dyson":
+            raise HAError("Device-targeted airflow must use the typed bound-purifier adapter")
+        if service == "set_airflow_profile" and (domain != "fan" or dispatch is None
+                                                 or dispatch.airflow_authorization is None):
+            raise HAError("Airflow profile requires a typed current authorization")
         if self.stop_event.is_set():
             safe_stop = (
                 (domain == "climate" and service == "set_hvac_mode" and body.get("hvac_mode") == "off")
@@ -493,7 +506,7 @@ class NativeAPI:
             if controls is not None and not activation:
                 controls.check_stop(body.get("entity_id"))
         if activation:
-            if self.repair_gate.manages(body.get("entity_id")):
+            if body.get("entity_id") in self.config.heads.values():
                 state = self.hass.states.get(body["entity_id"])
                 mode = body.get("hvac_mode") or (state.state if state is not None else None)
                 if (state is None or state.state in ("unknown", "unavailable")
@@ -537,6 +550,11 @@ class NativeAPI:
                     raise HAActivationDeferred("Auxiliary target changed before explicit Heat dispatch")
         if activation and self.stop_event.is_set():
             raise HAStopping("Controller is stopping; activation was not dispatched")
+        actual_domain, actual_service, actual_body = domain, service, body
+        if dispatch is not None and dispatch.airflow_authorization is not None:
+            from .airflow_adapter import validate_dispatch
+            actual_domain, actual_service, actual_body = validate_dispatch(
+                self, dispatch.airflow_authorization, service, body)
         if dispatch is not None:
             dispatch.begin()
         if controls and activation:
@@ -558,7 +576,7 @@ class NativeAPI:
                 if not await self.power_guard.async_request_heater_off():
                     raise HAError("Heater shutdown remains unconfirmed")
             else:
-                await self.hass.services.async_call(domain, service, body, blocking=True)
+                await self.hass.services.async_call(actual_domain, actual_service, actual_body, blocking=True)
         except (HAError, TimeoutError):
             raise
         except Exception as exc:
@@ -584,6 +602,23 @@ class NativeAPI:
 
     def service(self, domain, service, *, auxiliary_target=None, **data):
         return self.request(f"services/{domain}/{service}", data, auxiliary_target=auxiliary_target)
+
+    def reset_airflow_authorizations(self):
+        self._airflow_authorizations = {}
+
+    def airflow_authorization(self, entity, plan, states, now):
+        from .airflow_adapter import authorize
+        return authorize(self, entity, plan, states, now)
+
+    def airflow_service(self, ticket, service, **data):
+        from .airflow_adapter import AirflowAuthorization
+        if not isinstance(ticket, AirflowAuthorization):
+            raise HAActivationDeferred("Airflow requires typed authorization")
+        return self.request(f"services/fan/{service}", {"entity_id": ticket.entity, **data},
+                            activation_deadline=ticket.deadline, airflow_authorization=ticket)
+
+    def airflow_jobs_clear(self, entity):
+        return not self.service_jobs((entity,)) and not self.uncertain_service_jobs((entity,))
 
     def auxiliary_target(self, ceiling_f):
         """Resolve native capabilities on HA's loop; never infer units from state."""

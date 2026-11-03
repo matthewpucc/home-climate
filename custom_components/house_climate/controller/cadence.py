@@ -213,6 +213,7 @@ class DecisionCadence:
         # gradient still looks useful. Maintenance only removes cached fan calls.
         prior_warnings = set(plan.warnings)
         self.policy.trim_transfer_fans(plan, states, rooms, now)
+        self.policy.directed_airflow.update(plan, rooms, now, allow_start=False)
         for warning in plan.warnings:
             if warning not in prior_warnings:
                 self._warning(warning)
