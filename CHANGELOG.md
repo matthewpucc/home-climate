@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.3
+
+- Corroborate an older unchanged valid battery percentage with a recent numeric power change observed after a runtime baseline on the same native device and loaded integration. Preserve the original SOC timestamp, expire activity after 180 seconds, and reset evidence on source interruption, reload, identity change or restart. Identical/formatting/cache writes do not create activity; known unloaded mandatory sources inhibit even recently cached values. Apply the same check at queued activation and recovery, retaining the 40% reserve, AC/output validity, shutdown proofs, ownership and timers. Add explicit battery evidence diagnostics. No live commands, private binding changes or storage migration.
+
 ## 0.9.2
 
 - Let explicit native Controller On supersede incomplete fallback preset confirmation, retaining real command lifetimes, uncertain-job ownership and fresh shared-head Off before normal acquisition. Fence queued fallback writes and invalidate earlier stop evidence after late head activation. Preserve independent auxiliary shutdown, cutoff and manual ownership.

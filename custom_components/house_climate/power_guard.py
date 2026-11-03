@@ -106,6 +106,10 @@ class PowerReading:
     meter_issue: str | None = None
     diagnostic_issues: tuple = ()
     supply_evidence: str = "unverified"
+    battery_evidence: str = "unverified"
+    battery_reported_at: float | None = None
+    battery_activity_at: float | None = None
+    battery_activity_entity: str | None = None
 
     @property
     def supplying_loads(self):
@@ -167,12 +171,11 @@ def _corroborated_ac(states, bindings, now, *, output_valid):
     return value, _timestamp(output_report), "corroborating_reports"
 
 
-def evaluate_power(states, bindings: PowerBindings, now=None):
+def evaluate_power(states, bindings: PowerBindings, now=None, *, battery_activity=None):
     """Eligibility uses corroborating supply signals, with no watt ceilings."""
     now = time.time() if now is None else now
     values, missing, advisory, meter_issues = {}, [], [], []
     specs = (
-        ("battery_percent", bindings.battery, {"%": 1}, BATTERY_MAX_AGE_SECONDS, missing),
         ("output_w", bindings.output_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS, missing),
         ("input_w", bindings.input_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS, advisory),
         ("circuit_w", bindings.circuit_power, {"W": 1, "kW": 1000}, TELEMETRY_MAX_AGE_SECONDS, advisory),
@@ -191,6 +194,31 @@ def evaluate_power(states, bindings: PowerBindings, now=None):
             errors.append(str(exc))
             if key == "circuit_w":
                 values["circuit_issue"] = str(exc)
+    # Keep the actual SOC report timestamp. A short-lived activity witness can
+    # corroborate an unchanged available value; it is not a new SOC acquisition.
+    try:
+        _, attrs, reported = _state_parts(states.get(bindings.battery))
+        if attrs.get("restored") or attrs.get("assumed_state"):
+            raise ValueError("Battery report is restored or assumed")
+        battery = _measurement(states, bindings.battery, {"%": 1}, now, maximum_age=math.inf)
+        if battery > 100:
+            raise ValueError("Battery percentage outside plausible bounds")
+        stamp = _timestamp(reported)
+        values["battery_reported_at"] = stamp
+        if now - stamp <= BATTERY_MAX_AGE_SECONDS:
+            values.update(battery_percent=battery, battery_evidence="ha_report")
+        elif (isinstance(battery_activity, Mapping)
+                and battery_activity.get("entity_id") in (bindings.input_power, bindings.output_power)
+                and (activity_at := _diagnostic_timestamp(battery_activity.get("reported_at"))) is not None
+                and 0 <= now - activity_at <= TELEMETRY_MAX_AGE_SECONDS
+                and "output_w" in values):
+            values.update(battery_percent=battery, battery_evidence="same_device_activity",
+                          battery_activity_at=activity_at,
+                          battery_activity_entity=battery_activity["entity_id"])
+        else:
+            raise ValueError("Battery report is old without recent same-device telemetry activity")
+    except ValueError as exc:
+        missing.append(str(exc))
     phases = []
     for entity in (bindings.wall_phase_a_voltage, bindings.wall_phase_b_voltage):
         try:
@@ -237,6 +265,11 @@ class HeaterPowerGuard:
         self.manual_override = lambda: False
         self.alerts = None
         self._low_battery_alert_active = False
+        self._battery_activity = None
+        self._battery_baselines = {}
+        self._battery_identity = None
+        self._battery_observed_at = None
+        self._battery_entry_listeners = set()
         self._clock, self._wall_clock = clock, wall_clock
         self._reading = PowerReading(issue="Waiting for power telemetry", telemetry_missing=True)
         self._blocked = True
@@ -409,7 +442,7 @@ class HeaterPowerGuard:
     def _external_power(self):
         """Read reserve/supply eligibility without inventing an absent heater value."""
         bindings = replace(self.bindings, heater_current=None, heater_power=None)
-        return evaluate_power(self._states(), bindings, self._wall_clock())
+        return self._evaluate_power(self._states(), bindings, self._wall_clock())
 
     def _isolated_recovery_reading(self):
         if (not self._heater_meter_configured or not self._observe_isolation(self._wall_clock())
@@ -666,6 +699,10 @@ class HeaterPowerGuard:
                 "watt_limits_enforced": False,
                 "ac_output_enabled": r.ac_enabled, "supply_reported_at": r.supply_reported_at,
                 "supply_evidence": r.supply_evidence,
+                "battery_evidence": r.battery_evidence,
+                "battery_reported_at": r.battery_reported_at,
+                "battery_activity_at": r.battery_activity_at,
+                "battery_activity_entity": r.battery_activity_entity,
                 "supplying_loads": r.supplying_loads, "heater_draw_status": self._heater_draw_status(),
                 "heater_meter_issue": r.meter_issue, "diagnostic_issues": r.diagnostic_issues,
                 "aggregate_stop": (self._aggregate_outcome.as_dict()
@@ -774,6 +811,117 @@ class HeaterPowerGuard:
             self._notice_error = None
         self._publish()
 
+    def _reset_battery_activity(self):
+        self._battery_activity = None
+        self._battery_baselines.clear()
+        self._battery_identity = None
+
+    def _battery_source_identity(self, entity):
+        """Registry identity, never an entity-name guess or user-written state attribute."""
+        try:
+            from homeassistant.config_entries import ConfigEntryState
+            from homeassistant.helpers import entity_registry
+            entry = entity_registry.async_get(self.hass).async_get(entity)
+            if entry is None or not entry.device_id or not entry.config_entry_id:
+                return None
+            source = self.hass.config_entries.async_get_entry(entry.config_entry_id)
+            if source is not None and self._active and not self._closing and not self._closed:
+                key = (source.entry_id, id(source))
+                if key not in self._battery_entry_listeners:
+                    def source_changed():
+                        # Observe even an unload/reload completed between checks.
+                        self._reset_battery_activity()
+                        self._schedule_check()
+                    self._unsubscribers.append(source.async_on_state_change(source_changed))
+                    self._battery_entry_listeners.add(key)
+            if source is None or source.state is not ConfigEntryState.LOADED:
+                return None
+            return entry.device_id, entry.config_entry_id, entry.platform
+        except (ImportError, AttributeError, KeyError):
+            # Standalone/fake HA adapters cannot invent a native device identity.
+            return None
+
+    def _battery_witness(self, states, now):
+        identity = self._battery_source_identity(self.bindings.battery)
+        if (identity is None or identity != self._battery_identity
+                or (self._battery_observed_at is not None and now < self._battery_observed_at)):
+            self._reset_battery_activity()
+        self._battery_observed_at = now
+        self._battery_identity = identity
+        try:
+            _, attrs, _ = _state_parts(states.get(self.bindings.battery))
+            if identity is None or attrs.get("restored") or attrs.get("assumed_state"):
+                raise ValueError("untrusted battery source")
+            value = _measurement(states, self.bindings.battery, {"%": 1}, now, maximum_age=math.inf)
+            if value > 100:
+                raise ValueError("invalid SOC")
+            # Output is already mandatory for supply eligibility. A mismatched,
+            # invalid or offline output must not corroborate the old SOC.
+            _, attrs, _ = _state_parts(states.get(self.bindings.output_power))
+            if (self._battery_source_identity(self.bindings.output_power) != identity
+                    or attrs.get("restored") or attrs.get("assumed_state")):
+                raise ValueError("untrusted output source")
+            _measurement(states, self.bindings.output_power, {"W": 1, "kW": 1000}, now)
+        except ValueError:
+            self._reset_battery_activity()
+            return None
+        for entity in (self.bindings.input_power, self.bindings.output_power):
+            try:
+                state = states.get(entity)
+                _, attrs, reported = _state_parts(state)
+                if (self._battery_source_identity(entity) != identity
+                        or attrs.get("restored") or attrs.get("assumed_state")):
+                    raise ValueError("untrusted activity source")
+                number = _measurement(states, entity, {"W": 1, "kW": 1000}, now)
+                changed = state.get("last_changed") if isinstance(state, dict) else state.last_changed
+                stamp = _timestamp(changed)
+                report = _timestamp(reported)
+                if stamp > report or stamp > now:
+                    raise ValueError("invalid activity timestamp")
+            except (ValueError, AttributeError):
+                self._battery_baselines.pop(entity, None)
+                if self._battery_activity and self._battery_activity["entity_id"] == entity:
+                    self._battery_activity = None
+                continue
+            previous = self._battery_baselines.get(entity)
+            if (previous is not None and number != previous[0]
+                    and stamp > previous[1] and stamp > previous[2]
+                    and now - stamp <= TELEMETRY_MAX_AGE_SECONDS):
+                self._battery_activity = {"entity_id": entity, "reported_at": stamp}
+            # Initial publication, identical cache writes, formatting and
+            # attribute-only updates establish no device activity lease.
+            self._battery_baselines[entity] = (number, stamp, now)
+        activity = self._battery_activity
+        if activity is not None and not 0 <= now - activity["reported_at"] <= TELEMETRY_MAX_AGE_SECONDS:
+            self._battery_activity = None
+        return self._battery_activity
+
+    def _battery_source_issue(self):
+        """Known integration failure contradicts even a recently cached report."""
+        try:
+            from homeassistant.config_entries import ConfigEntryState
+            from homeassistant.helpers import entity_registry
+            registry = entity_registry.async_get(self.hass)
+            for entity in (self.bindings.battery, self.bindings.output_power):
+                entry = registry.async_get(entity)
+                if entry is not None and entry.config_entry_id:
+                    source = self.hass.config_entries.async_get_entry(entry.config_entry_id)
+                    if source is None or source.state is not ConfigEntryState.LOADED:
+                        return f"Power telemetry unavailable: source integration for {entity} is not loaded"
+        except (ImportError, AttributeError, KeyError):
+            pass
+        return None
+
+    def _evaluate_power(self, states, bindings, now):
+        reading = evaluate_power(states, bindings, now,
+                                 battery_activity=self._battery_witness(states, now))
+        if issue := self._battery_source_issue():
+            self._reset_battery_activity()
+            return replace(reading, issue=issue, telemetry_missing=True, battery_percent=None,
+                           battery_evidence="unverified", battery_activity_at=None,
+                           battery_activity_entity=None)
+        return reading
+
     def _states(self):
         return {entity: self._state(entity) for entity in self.entity_ids}
 
@@ -877,6 +1025,17 @@ class HeaterPowerGuard:
 
         @callback
         def changed(_event=None):
+            if _event and _event.data.get("entity_id") in (
+                    self.bindings.battery, self.bindings.input_power, self.bindings.output_power):
+                # Process interruptions even when newer states have already
+                # replaced them in HA's cache. Re-addition is only a baseline.
+                entity = _event.data["entity_id"]
+                old, new = _event.data.get("old_state"), _event.data.get("new_state")
+                if old is None or new is None:
+                    self._reset_battery_activity()
+                event_states = self._states()
+                event_states[entity] = new
+                self._battery_witness(event_states, self._wall_clock())
             if _event and self._supervised_restore is not None:
                 self._supervised_restore_check(
                     entity=_event.data.get("entity_id"), state=_event.data.get("new_state"))
@@ -1216,7 +1375,7 @@ class HeaterPowerGuard:
         if entity is not None:
             states[entity] = state
         external = replace(self.bindings, heater_current=None, heater_power=None)
-        if evaluate_power(states, external, wall).issue:
+        if self._evaluate_power(states, external, wall).issue:
             return self._supervised_restore_abort("Authoritative electrical protection interrupted restoration")
         for role in ("battery", "output_power"):
             _, attrs, _ = _state_parts(states.get(getattr(self.bindings, role)))
@@ -1369,7 +1528,7 @@ class HeaterPowerGuard:
         if (state != "on" or attrs.get("restored") or attrs.get("assumed_state")
                 or not relay_time_valid or self._switch_changed() is None):
             raise RuntimeError("The dedicated heater relay must report trusted On")
-        reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
+        reading = self._evaluate_power(self._states(), self.bindings, self._wall_clock())
         if (not self._commissioning_external_trusted() or not reading.safe_to_rearm
                 or self._passive_off_evidence() is None):
             raise RuntimeError("Fresh native Off, low heater load, safe electricals and battery above 40% are required")
@@ -1560,7 +1719,7 @@ class HeaterPowerGuard:
                      and -5 <= self._wall_clock() - stamp <= TELEMETRY_MAX_AGE_SECONDS)
         except (ValueError, TypeError, OverflowError):
             fresh = False
-        reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
+        reading = self._evaluate_power(self._states(), self.bindings, self._wall_clock())
         if state != "off" or attrs.get("hvac_action") in ("heating", "cooling") or not fresh:
             raise RuntimeError("A fresh thermostat Off report is required after manual recovery")
         if not reading.safe_to_rearm:
@@ -1783,7 +1942,7 @@ class HeaterPowerGuard:
         self._last_observation_wall = now
         self._observe_isolation(now)
         states = self._states()
-        reading = evaluate_power(states, self.bindings, now)
+        reading = self._evaluate_power(states, self.bindings, now)
         if self.commissioning_active and (self._external_power().issue
                                          or not self._commissioning_external_trusted()):
             self._commissioning_failed("Authoritative electrical protection interrupted commissioning")
@@ -2338,7 +2497,7 @@ class HeaterPowerGuard:
         # restored/assumed Off state or missing post-start isolation proof.
         if isolated is None or not isolated.safe_to_rearm:
             return
-        prior_meter_missing = bool(evaluate_power(
+        prior_meter_missing = bool(self._evaluate_power(
             self._states(), self.bindings, self._wall_clock()).meter_issue)
         generation = (self._isolation_revision, self._binding_identity(), self._cut_owned)
         commissioning = self.commissioning_active
@@ -2373,7 +2532,7 @@ class HeaterPowerGuard:
                     or generation != (self._isolation_revision, self._binding_identity(), self._cut_owned)
                     or not self._switch_observed("off")):
                 return
-            prior_meter_missing |= bool(evaluate_power(
+            prior_meter_missing |= bool(self._evaluate_power(
                 self._states(), self.bindings, self._wall_clock()).meter_issue)
             requested = self._wall_clock()
             # Boot may resume the heater's retained setting. There is one
@@ -2446,7 +2605,7 @@ class HeaterPowerGuard:
                             or self._manual_recovery_required or self._external_power().issue):
                         return
                     await asyncio.sleep(min(.1, RESTORE_ACK_SECONDS / 5))
-                reading = evaluate_power(self._states(), self.bindings, self._wall_clock())
+                reading = self._evaluate_power(self._states(), self.bindings, self._wall_clock())
                 if (self._restore_authorized() and reading.safe_to_rearm and not self._closed and not self._closing
                         and (self._supervised_restore_check() if staged else time.monotonic() < deadline)
                         and (not commissioning or (not self._commissioning_expired()

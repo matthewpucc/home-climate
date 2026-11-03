@@ -1,6 +1,6 @@
 # Auxiliary supply, ownership and recovery
 
-Automated auxiliary heat requires a valid battery report **above 40%**, an available AC-output On state, current aggregate-output telemetry and an available heater that acknowledges its commands. Battery reports expire after 900 seconds; output reports after 180 seconds. Invalid required evidence inhibits automated heat. Queued activation and relay restoration recheck current evidence at dispatch.
+Automated auxiliary heat requires a valid battery report **above 40%**, an available AC-output On state, current aggregate-output telemetry and an available heater that acknowledges its commands. Battery HA reports qualify directly for 900 seconds; an older unchanged SOC can also qualify through the bounded same-device activity rule below. Output reports expire after 180 seconds. Invalid required evidence inhibits automated heat. Queued activation and relay restoration recheck current evidence at dispatch.
 
 Input, circuit, phase-voltage and aggregate-output totals have **no software watt ceilings**. The previous Emporia exception is removed. Positive output corroborates supplying loads; zero before startup remains inconclusive. Manufacturer protection, temperature protection and real shutdown-failure handling remain in force.
 
@@ -11,6 +11,20 @@ The optional power.ac_output_switch binding identifies the AC-output state indep
 Ordinary admission accepts corroborating signals rather than requiring a separate physical AC read. A valid, available unchanged On state can remain useful while fresh battery and output reports demonstrate telemetry continuity. Home Climate does not rewrite that switch's timestamp, command it to obtain freshness, or describe this combination as a physical read. Current physical feedback, if provided, must not contradict the reported state. Diagnostics distinguish device_report, corroborating_reports, reported_off, contradictory and unverified evidence. A cache write alone cannot replace missing battery or output telemetry.
 
 This contract does not require selecting Bluetooth versus cloud control just to use ordinary corroborating signals. It does not claim either transport guarantees current physical state. Numeric report timestamps remain HA receipt evidence unless the source exposes acquisition time.
+
+## Unchanged battery values and device activity
+
+`last_updated` dates the last HA state/attribute change; `last_reported` dates the latest HA state write, including an identical write. An unchanged 100% value with an old `last_updated` already qualifies when its `last_reported` is current. Neither timestamp establishes physical SOC acquisition. For example, Bluetti Official v1.0.5 republishes cached sensor values on shared callbacks; its cloud/Bluetooth connection status alone does not guarantee a new battery measurement.
+
+If the SOC report itself is older than 900 seconds, Home Climate can retain that valid available percentage when all of the following hold:
+
+- Battery and mandatory output sensors share the same nonempty native HA registry device, config entry and platform; the source integration is loaded. An input sensor may corroborate only if it shares that identity too. Entity-name similarities, external circuit watts and unrelated devices cannot qualify.
+- This guard runtime has first observed a numeric input/output baseline and then a real numeric power-value change with a later HA change timestamp. That activity remains eligible for **180 seconds**. Initial publication, identical cache writes, formatting changes, attribute-only writes and repeated polling do not renew it. Zero watts is still a valid measurement; changing to or from zero can demonstrate activity without proving that AC is enabled.
+- SOC remains finite, between 0 and 100%, available, non-restored and non-assumed, with a valid nonfuture original report timestamp. Current valid output telemetry and all ordinary AC, reserve, stop and recovery checks are still required. **40% or lower remains blocked**, including with an activity witness.
+
+The witness is process-local, never persisted. It clears on restart, source reload, identity changes, unavailable/invalid mandatory telemetry, removal/re-addition and clock rollback. Optional input loss withdraws input-derived evidence; it cannot invalidate an independent valid output witness. A registered mandatory source known to be unloaded blocks even otherwise recent cached values. After a reset, initial values only establish a baseline; another numeric change is required for the older-SOC exception. An output or input that is genuinely steady can therefore leave old SOC unqualified until another report or activity arrives.
+
+Diagnostics expose `battery_evidence` (`ha_report`, `same_device_activity`, or `unverified`), the unchanged `battery_reported_at`, and separate `battery_activity_at` / `battery_activity_entity`. Device activity corroborates the latest retained SOC; it is not a new SOC sample and cannot detect every upstream cache or firmware failure. No timestamp is rewritten and no poll, power toggle or hardware command is issued to obtain freshness. Missing registry identity keeps the older-SOC exception inhibited; existing fresh-report behaviour remains available unless there is explicit source failure. No private binding or storage migration is required.
 
 ## Heating, circulation and manual ownership
 
