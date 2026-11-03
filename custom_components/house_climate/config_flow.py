@@ -37,7 +37,7 @@ def _schema(live=False, protection=None, policy_settings=None):
                                                    {"label": "Cooling", "value": "cool"}],
                                           mode=selector.SelectSelectorMode.DROPDOWN))
     policy_settings = policy_settings or {}
-    for name in ("rooms", "auxiliary_policy", "seasonal_policy", "fallback"):
+    for name in ("rooms", "auxiliary_policy", "seasonal_policy", "purifiers", "fallback"):
         data[vol.Optional(name, default=policy_settings.get(name, {}))] = selector.ObjectSelector()
     for name, default, minimum in (("heartbeat_timeout_seconds", 300, 60),
                                     ("auxiliary_heartbeat_timeout_seconds", 120, 30)):
@@ -58,7 +58,7 @@ def _values(user_input, current, policy_settings=None):
     protection = ProtectionTemperatures.from_dict({
         **current.to_dict(), **{key: value for key, value in user_input.items() if key in current.to_dict()}})
     policy = dict(policy_settings or {})
-    for key in ("rooms", "auxiliary_policy", "seasonal_policy", "fallback",
+    for key in ("rooms", "auxiliary_policy", "seasonal_policy", "purifiers", "fallback",
                 "heartbeat_timeout_seconds", "auxiliary_heartbeat_timeout_seconds"):
         if key in user_input:
             selected = user_input[key]

@@ -480,6 +480,11 @@ class NativeAPI:
                 raise HAActivationDeferred("Head service expired before actual dispatch")
             raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
         controls = self.controls
+        if domain == "fan":
+            from .configuration import purifier_identity_issue
+            if issue := purifier_identity_issue(self.hass, self.config, body.get("entity_id"),
+                                                activation=activation, controls=controls):
+                raise HAError(issue)
         if domain in ("climate", "fan"):
             self.repair_gate.check(body.get("entity_id"), repair_epoch, activation=activation)
             if (controls is not None and generation is not None

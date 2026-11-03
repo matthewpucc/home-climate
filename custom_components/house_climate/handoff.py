@@ -100,7 +100,7 @@ def arm(controls, devices):
     fallback = getattr(controls.config, "fallback", None)
     if fallback is None:
         return None
-    return {
+    plan = {
         "version": 1, "stage": "armed", "authorized": bool(controls.live),
         "heads": [entity for entity in controls.config.heads.values() if entity in devices],
         "fans": [entity for entity in dict.fromkeys(controls.config.fans.values()) if entity in devices],
@@ -109,6 +109,11 @@ def arm(controls, devices):
         "requests": {}, "completed": [], "problems": {}, "stop_started": None,
         "settle_until": None,
     }
+    minimums = {fan.entity_id: fan.minimum_percentage for fan in controls.config.fan_controls.values()
+                if fan.entity_id in plan["fans"] and fan.minimum_percentage > 0}
+    if minimums:
+        plan["fan_minimum_percentages"] = minimums
+    return plan
 
 
 def validate(plan):
@@ -128,6 +133,11 @@ def validate(plan):
     if not (40 <= plan["heat_low_f"] < plan["cool_high_f"] <= 100
             and 0 <= plan["fan_percentage"] <= 100):
         raise ValueError("Invalid saved recovery target range")
+    minimums = plan.get("fan_minimum_percentages", {})
+    if (not isinstance(minimums, dict) or set(minimums) - set(plan["fans"])
+            or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   or not math.isfinite(value) or not 0 <= value <= 100 for value in minimums.values())):
+        raise ValueError("Invalid saved recovery purifier minimums")
     return deepcopy(plan)
 
 
@@ -155,11 +165,28 @@ def _desired(controls, plan, entity):
             "hvac_mode": "heat_cool", "target_temp_low": convert(plan["heat_low_f"]),
             "target_temp_high": convert(plan["cool_high_f"])}
     if entity in plan["fans"]:
+        minimum = plan.get("fan_minimum_percentages", {}).get(entity, 0)
+        percentage = max(plan["fan_percentage"], minimum)
+        from .configuration import purifier_identity_issue
+        if issue := purifier_identity_issue(controls.hass, controls.config, entity,
+                activation=bool(percentage), require_identity=minimum > 0, controls=controls):
+            raise ValueError(issue)
         state = controls.hass.states.get(entity)
         if state is None or state.state in ("unknown", "unavailable"):
             raise ValueError("Available circulation fan is required")
-        return "fan", ("turn_on" if plan["fan_percentage"] else "turn_off"), (
-            {"percentage": plan["fan_percentage"]} if plan["fan_percentage"] else {})
+        if percentage and minimum:
+            # Use the same integer report grid as ordinary fan control. Never
+            # round a saved purification minimum down during a safe handoff.
+            try:
+                step = float(state.attributes.get("percentage_step", 1))
+                if not math.isfinite(step) or not 0 < step <= 100:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("Invalid recovery fan percentage step") from None
+            rung = max(1, math.ceil((math.ceil(percentage) - 1e-7) / step))
+            percentage = min(100, max(1, math.floor(rung * step + 1e-7)))
+        return "fan", ("turn_on" if percentage else "turn_off"), (
+            {"percentage": percentage} if percentage else {})
     raise ValueError("Entity is not part of the saved recovery handoff")
 
 
@@ -270,8 +297,15 @@ async def step(controls):
             if request.get("uncertain") or request.get("cancelled_before_dispatch") or entity in controls._uncertain_device_jobs:
                 plan["problems"][entity] = "Recovery command completion is uncertain; ownership is retained"
                 continue
+            minimum = plan.get("fan_minimum_percentages", {}).get(entity, 0)
+            if minimum:
+                minimum = max(minimum, plan["fan_percentage"])
+            meets_minimum = (not minimum or (state is not None
+                and isinstance(state.attributes.get("percentage"), (int, float))
+                and not isinstance(state.attributes.get("percentage"), bool)
+                and state.attributes["percentage"] >= minimum))
             if (state is not None and state.last_reported.timestamp() > max(_report_boundary(request), plan.get("resume_after", 0))
-                    and _matches(state, request["data"], fan=entity in plan["fans"])):
+                    and meets_minimum and _matches(state, request["data"], fan=entity in plan["fans"])):
                 plan["completed"].append(entity)
                 plan["problems"].pop(entity, None)
                 await _save(controls)
@@ -342,6 +376,13 @@ async def step(controls):
                 if controls.pending_device_jobs({entity}) or controls.stop_jobs({entity}):
                     plan["problems"][entity] = "Previous device command remains unresolved; recovery activation blocked"
                     return
+                if domain == "fan":
+                    from .configuration import purifier_identity_issue
+                    if issue := purifier_identity_issue(controls.hass, controls.config, entity,
+                            activation=bool(data.get("percentage")),
+                            require_identity=plan.get("fan_minimum_percentages", {}).get(entity, 0) > 0,
+                            controls=controls):
+                        raise ValueError(issue)
                 request["dispatched"] = True
                 request["dispatched_at"] = now()
                 controls.head_activation_started(entity)
