@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add native auxiliary authorization and Off-operation diagnostic sensors with cumulative event counts, precise event times, ownership/freshness evidence and bounded downloadable history. Export numeric states directly through Home Assistant Prometheus without helpers. Diagnostics are observational and reset on integration reload; control policy, safety timing and command behavior are unchanged. See `docs/auxiliary-diagnostics.md`.
+
 ## 0.9.3
 
 - Preserve saved purifier minimums when deciding whether a late fan report cancels a bounded recovery retry. A report below the saved floor or fallback target keeps the valid retry available instead of consuming it without dispatch.

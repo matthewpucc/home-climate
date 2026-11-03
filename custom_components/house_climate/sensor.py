@@ -1,14 +1,18 @@
 """Readable plans on the device page; planned actions never imply device feedback."""
+from datetime import timedelta
 from math import ceil, isclose, isfinite
+import time
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.const import EntityCategory, PERCENTAGE, UnitOfTemperature
 from homeassistant.core import callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers import entity_registry as er
 
 from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 from .controller.sensors import from_f, to_f
+from .auxiliary_diagnostics import EVENTS
 
 
 def short(text):
@@ -395,13 +399,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
         entities.append(FanPlan(entry, fan, label))
     if entry.runtime_data.config.heater_entity:
         entities.append(AuxiliaryPlan(entry))
+        if getattr(entry.runtime_data, "controls", None) is not None:
+            diagnostics = AuxiliaryDiagnosticGroup(entry.runtime_data.controls)
+            entities.extend(AuxiliaryDiagnostic(entry, diagnostics, key) for key in AUXILIARY_METRICS)
 
     # Preserve existing temperature IDs/history and remove obsolete plan entities
     # when rooms, fans, or the auxiliary heater are removed in Configure.
     registry = er.async_get(hass)
     current = {entity.unique_id for entity in entities}
     prefixes = tuple(f"{entry.entry_id}_{kind}" for kind in
-                     ("room_", "plan_room_", "plan_fan_", "plan_auxiliary", "comfort_mode_"))
+                     ("room_", "plan_room_", "plan_fan_", "plan_auxiliary", "comfort_mode_", "auxiliary_diagnostic_"))
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (entity.domain == "sensor" and entity.platform == DOMAIN
                 and entity.unique_id.startswith(prefixes) and entity.unique_id not in current):
@@ -429,6 +436,82 @@ class ControllerEntity(SensorEntity):
     @callback
     def _updated(self):
         self.async_write_ha_state()
+
+
+# Fixed metric set: no event IDs, reasons or timestamps become metric labels.
+
+AUXILIARY_METRICS = (
+    *(f"{event}_count" for event in EVENTS),
+    *(f"{event}_at" for event in ("authorization_renewed", "authorization_expired",
+                               "off_requested", "off_dispatched", "off_completed",
+                               "off_acknowledged", "off_isolated")),
+    "authorization_deadline_at", "session_started_at", "off_ack_reported_at", "authorization_valid",
+    "ownership_retained", "stop_pending", "pending_jobs", "command_uncertain",
+    "ownership_generation", "auxiliary_generation", "stop_epoch",
+    "reported_off", "observation_errors", "sequence",
+)
+
+
+class AuxiliaryDiagnosticGroup:
+    """One read-only refresh per group, including during a stalled worker."""
+    def __init__(self, controls):
+        self.controls = controls
+        self.listeners = set()
+        self.unsubscribers = []
+        self.values, self.attributes = {}, {}
+
+    @callback
+    def refresh(self, *_):
+        self.values, self.attributes = self.controls.observations.values(self.controls, time.monotonic())
+        for listener in tuple(self.listeners):
+            listener()
+
+    @callback
+    def connect(self, hass, listener):
+        if not self.listeners:
+            self.refresh()
+            self.unsubscribers = [
+                async_dispatcher_connect(hass, SIGNAL_STATUS, self.refresh),
+                async_track_time_interval(hass, self.refresh, timedelta(seconds=15)),
+            ]
+        self.listeners.add(listener)
+
+        @callback
+        def remove():
+            self.listeners.discard(listener)
+            if not self.listeners:
+                for unsubscribe in self.unsubscribers:
+                    unsubscribe()
+                self.unsubscribers = []
+        return remove
+
+
+class AuxiliaryDiagnostic(ControllerEntity):
+    """Native state is the scrape value; attributes are only Recorder detail."""
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, entry, group, key):
+        super().__init__(entry, f"auxiliary_diagnostic_{key}")
+        self._diagnostic_group, self.key = group, key
+        self._attr_name = "Auxiliary " + key.replace("_", " ")
+        if key.endswith("_at"):
+            # HA timestamp states discard subsecond ordering. Keep Unix seconds
+            # numeric, without claiming these epoch values are durations.
+            self._attr_native_unit_of_measurement = "s"
+            self._attr_suggested_display_precision = 6
+        elif key.endswith("_count") or key in ("sequence", "observation_errors"):
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+
+    async def async_added_to_hass(self):
+        self.async_on_remove(self._diagnostic_group.connect(self.hass, self._updated))
+
+    @property
+    def native_value(self):
+        return self._diagnostic_group.values.get(self.key)
+
+    @property
+    def extra_state_attributes(self):
+        return self._diagnostic_group.attributes if self.key == "sequence" else None
 
 
 class ControllerStatus(ControllerEntity):
