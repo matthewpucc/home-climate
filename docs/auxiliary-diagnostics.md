@@ -11,6 +11,9 @@ Each event has a cumulative `*_count` sensor. Selected events also have a latest
 `*_at` sensor, expressed as numeric Unix seconds in UTC (including fractions).
 These use unit `s`, without a duration device class. HA timestamp entities discard
 subsecond precision, so these intentionally remain numeric.
+The pinned HA version serializes numeric states with 15 significant digits,
+which preserves contemporary Unix times to about 10 microseconds. Sequence
+numbers, rather than equal or rounded timestamps, establish observed event order.
 
 | Event | Evidence recorded |
 | --- | --- |

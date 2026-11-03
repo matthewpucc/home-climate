@@ -96,21 +96,32 @@ class AuxiliaryPrometheusTests(unittest.IsolatedAsyncioTestCase):
         # Several renewals between scrapes retain their count.
         for _ in range(3):
             c.confirm_auxiliary_authorization()
+        # Pinned HA stringifies floats with 15 significant digits. This value
+        # reproduces rounding just over 5 microseconds at current epoch sizes.
+        c.observations.started_at = 1793733775.538935
+        # Lifecycle behavior is covered separately; seed all remaining event
+        # fields here to verify every numeric entity reaches the real exporter.
+        for event, stamp in tuple(c.observations.times.items()):
+            if stamp is None:
+                c.observations.record(c, event, at=c.auxiliary_authorized_wall,
+                                      report_at=c.auxiliary_authorized_wall
+                                      if event == 'off_acknowledged' else None)
         samples, text = await self.scrape()
         self.assertEqual(self.sample(samples, 'authorization_renewed_count')[0].value, 4)
         self.assertEqual(self.sample(samples, 'authorization_valid')[0].value, 1)
         self.assertEqual(self.sample(samples, 'ownership_retained')[0].value, 1)
         renewed = self.sample(samples, 'authorization_renewed_at', 'homeassistant_sensor_unit_s')
-        self.assertAlmostEqual(renewed[0].value, c.auxiliary_authorized_wall, places=5)
+        self.assertAlmostEqual(renewed[0].value, c.auxiliary_authorized_wall, delta=1e-5)
         for key in AUXILIARY_METRICS:
             value = self.group.values[key]
             metric = 'homeassistant_sensor_unit_s' if key.endswith('_at') else 'homeassistant_sensor_state'
             series = self.sample(samples, key, metric)
-            if value is None:
-                self.assertEqual(series, [], key)
+            self.assertIsNotNone(value, key)
+            if key.endswith('_at'):
+                self.assertAlmostEqual(series[0].value, value, delta=1e-5, msg=key)
             else:
-                self.assertAlmostEqual(series[0].value, value, places=5, msg=key)
-                self.assertEqual(set(series[0].labels), {'entity', 'friendly_name', 'domain'})
+                self.assertEqual(series[0].value, value, key)
+            self.assertEqual(set(series[0].labels), {'entity', 'friendly_name', 'domain'})
         self.assertNotIn('authorization_renewed{', text)  # Attributes aren't fabricated metrics.
         self.assertNotIn('request_generation=', text)
         self.assertNotIn('input_', text)
@@ -179,9 +190,13 @@ class AuxiliaryPrometheusTests(unittest.IsolatedAsyncioTestCase):
             self.sensors[sensor.key] = sensor
         await self.platform.async_add_entities(sensors)
         self.group = sensors[0]._diagnostic_group
-        observations.record('guard_trip', at=now, reason='Synthetic reserve cutoff')
+        # Populate every numeric field, including each event timestamp and amps,
+        # so exporter coverage proves emitted values as well as unknown removal.
+        for event in observations.counts:
+            observations.record(event, at=now, reason='Synthetic reserve cutoff')
         observations.capture(guard, {'power_cut_confirmed': True, 'electrical_stop_confirmed': True,
-            'heater_power_w': 4, 'aggregate_stop': {'status': 'corroborated', 'classification': 'drop',
+            'heater_power_w': 4, 'heater_current_a': 0.04,
+            'aggregate_stop': {'status': 'corroborated', 'classification': 'drop',
             'baseline_w': 1400, 'latest_w': 100}})
         samples, text = await self.scrape()
         for key in SHUTDOWN_METRICS:
@@ -190,11 +205,12 @@ class AuxiliaryPrometheusTests(unittest.IsolatedAsyncioTestCase):
                       'homeassistant_sensor_unit_a' if key.endswith('_a') else 'homeassistant_sensor_state')
             series = self.sample(samples, key, metric)
             value = self.group.values[key]
-            if value is None:
-                self.assertEqual(series, [], key)
+            self.assertIsNotNone(value, key)
+            if key.endswith('_at'):
+                self.assertAlmostEqual(series[0].value, value, delta=1e-5, msg=key)
             else:
-                self.assertAlmostEqual(series[0].value, value, places=5, msg=key)
-                self.assertEqual(set(series[0].labels), {'entity', 'friendly_name', 'domain'})
+                self.assertEqual(series[0].value, value, key)
+            self.assertEqual(set(series[0].labels), {'entity', 'friendly_name', 'domain'})
         self.assertNotIn('reason=', text)
         self.assertNotIn('initiator=', text)
         observations.sampled_at = now - 31
