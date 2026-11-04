@@ -98,7 +98,8 @@ def check_report(api, state, fan):
     if stamp is None or (now - stamp).total_seconds() > api.config.sensor_stale_seconds:
         raise HAError("Purifier settings report is stale; refresh device telemetry")
     features = state.get("attributes", {}).get("supported_features")
-    if (type(features) is not int or features & 3 != 3
+    # Native HA states retain FanEntityFeature IntFlag values without JSON conversion.
+    if (isinstance(features, bool) or not isinstance(features, int) or features & 3 != 3
             or not api.hass.services.has_service("hass_dyson", "set_oscillation_angles")):
         raise HAError("Purifier needs speed, oscillation and atomic hass_dyson angle services")
     if fan.airflow.outlet == "calibrated_fixed":

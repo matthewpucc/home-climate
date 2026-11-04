@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+from homeassistant.components.fan import FanEntityFeature
 from homeassistant.config_entries import ConfigEntries, ConfigEntry, ConfigEntryState
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 
@@ -56,7 +57,7 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         self.data = states(self.cfg, {"alpha": 73, "beta": 72, "gamma": 68}, datetime.now(timezone.utc))
         for entity, state in self.data.items():
             self.hass.states.async_set(entity, state["state"], state.get("attributes", {}))
-        self.set_fan(state="on", percentage=20, supported_features=63, percentage_step=10,
+        self.set_fan(state="on", percentage=20, supported_features=FanEntityFeature(63), percentage_step=10,
                      angle_low=43, angle_high=75, direction="forward", oscillating=True, oscillation_enabled=True)
         self.hass.services.async_register("fan", "set_direction", self.profile_handler)
         self.hass.services.async_register("hass_dyson", "set_oscillation_angles", self.profile_handler)
@@ -108,7 +109,7 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         self.runtime_obj.config = self.cfg
         self.policy = Policy(self.cfg)
         self.executor = Executor(self.cfg, self.runtime_obj.api, "°F")
-        self.set_fan(supported_features=59, angle_low=100, angle_high=190,
+        self.set_fan(supported_features=FanEntityFeature(59), angle_low=100, angle_high=190,
                      oscillating=False, oscillation_enabled=False)
         self.temperature("alpha", demand)
         if commission:
@@ -124,6 +125,8 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
                 and call[2].get("percentage", 0) > 20]
 
     async def test_profile_before_boost_atomic_pair_and_explanatory_diagnostics(self):
+        _, data = await self.plan()
+        self.assertIsInstance(data[FAN]["attributes"]["supported_features"], FanEntityFeature)
         for _ in range(6):
             plan = await self.tick()
         self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 60)
@@ -135,6 +138,58 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["execution"]["phase"], "verified")
         self.assertFalse(status["execution"]["physical_bearing_measured"])
         self.assertIsNotNone(status["execution"]["last_verified_command"])
+
+    async def test_plain_integer_feature_masks_still_authorize_and_dispatch(self):
+        for fixed in (False, True):
+            if fixed:
+                await self.configure_fixed()
+            with self.subTest(fixed=fixed):
+                self.set_fan(supported_features=None)
+                self.set_fan(supported_features=59 if fixed else 63)
+                self.assertIs(type(self.hass.states.get(FAN).attributes["supported_features"]), int)
+                self.calls.clear()
+                await self.send(await self.ticket())
+                self.assertEqual([call[1] for call in self.calls], ["set_oscillation_angles"])
+
+    async def test_malformed_feature_masks_rejected_at_authorization_and_dispatch(self):
+        for fixed in (False, True):
+            if fixed:
+                await self.configure_fixed()
+            for features in (None, True, False, "63", 63.0, [], {}):
+                with self.subTest(fixed=fixed, features=features):
+                    self.set_fan(supported_features=None)
+                    self.set_fan(supported_features=FanEntityFeature(59 if fixed else 63))
+                    ticket = await self.ticket()
+                    # HA reuses equal attribute dictionaries: 63.0 equals the valid flag.
+                    self.set_fan(supported_features=None)
+                    self.set_fan(supported_features=features)
+                    self.assertIs(type(self.hass.states.get(FAN).attributes["supported_features"]), type(features))
+                    with self.assertRaisesRegex(HAError, "speed, oscillation"):
+                        await self.ticket()
+                    with self.assertRaisesRegex(HAError, "speed, oscillation"):
+                        await self.send(ticket)
+        self.assertEqual(self.calls, [])
+
+    async def test_feature_flags_still_require_speed_and_oscillation(self):
+        for missing in (FanEntityFeature.SET_SPEED, FanEntityFeature.OSCILLATE):
+            with self.subTest(missing=missing):
+                self.set_fan(supported_features=FanEntityFeature(63))
+                ticket = await self.ticket()
+                self.set_fan(supported_features=FanEntityFeature(63) & ~missing)
+                with self.assertRaisesRegex(HAError, "speed, oscillation"):
+                    await self.ticket()
+                with self.assertRaisesRegex(HAError, "speed, oscillation"):
+                    await self.send(ticket)
+        self.assertEqual(self.calls, [])
+
+    async def test_switchable_feature_flags_still_require_direction_service(self):
+        ticket = await self.ticket()
+        self.hass.services.async_remove("fan", "set_direction")
+        with self.assertRaisesRegex(HAError, "Switchable outlet requires"):
+            await self.ticket()
+        with self.assertRaisesRegex(HAError, "Switchable outlet requires"):
+            await self.send(ticket)
+        self.assertEqual(self.calls, [])
 
     async def test_stored_angles_and_optimistic_oscillation_do_not_acknowledge(self):
         async def accepted(call):
@@ -442,6 +497,8 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_59_fixed_outlet_rotates_and_boosts_without_direction_service(self):
         await self.configure_fixed()
+        _, data = await self.plan()
+        self.assertIsInstance(data[FAN]["attributes"]["supported_features"], FanEntityFeature)
         self.hass.services.async_remove("fan", "set_direction")
         for _ in range(5):
             plan = await self.tick()
@@ -467,7 +524,7 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(call[1] == "set_direction" for call in self.calls))
 
     async def test_missing_direction_never_auto_converts_unproven_switchable_profile(self):
-        self.set_fan(supported_features=59, direction="forward")
+        self.set_fan(supported_features=FanEntityFeature(59), direction="forward")
         for _ in range(3):
             plan = await self.tick()
         self.assertEqual(self.boosts(), [])
@@ -492,9 +549,9 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(HAError, "no direction command"):
             await self.send(ticket, "set_direction", direction="forward")
         for features in (63, 57, 51):
-            self.set_fan(supported_features=59)
+            self.set_fan(supported_features=FanEntityFeature(59))
             ticket = await self.ticket()
-            self.set_fan(supported_features=features)
+            self.set_fan(supported_features=FanEntityFeature(features))
             with self.subTest(features=features), self.assertRaises(HAError):
                 await self.send(ticket)
         self.assertEqual(self.calls, [])
