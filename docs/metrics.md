@@ -20,8 +20,9 @@ Find the actual entity ID in HA's device page or entity registry: names, prior
 renames, duplicate installations, and registry suffixes can change it.
 
 Every numeric sensor is a **Prometheus gauge**, even the cumulative event counts.
-Counts and sequences use HA `total_increasing`; other new diagnostics have no
-state class. All new sensors are diagnostic entities enabled by default. Entity
+Cumulative event/error counts and sequences use HA `total_increasing`; the current
+`pending_jobs` count and other new diagnostics have no state class. All new sensors
+are diagnostic entities enabled by default. Entity
 IDs select meanings within the families below. No reason strings, event IDs,
 timestamps, generations or profile names become metric labels. Entity counts
 grow only with configured rooms, fans and physical sources, never with events.
