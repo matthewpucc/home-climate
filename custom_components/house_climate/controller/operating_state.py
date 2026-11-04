@@ -39,6 +39,7 @@ class OperatingState:
         self.effects = {}
         self.active_emergencies = set()
         self.previous_emergencies = {}
+        self.outdoor_observation = None
 
     def environment(self, states, now, *, monotonic_now=None):
         tick = self.clock() if monotonic_now is None else monotonic_now
@@ -47,6 +48,7 @@ class OperatingState:
         if settings is None:
             return context
         outside = read_outdoor(self.config, states, now)
+        self.outdoor_observation = (now.timestamp(), outside.source_samples)
         wall = now.timestamp() if now.tzinfo is not None else None
         backwards = (self.last_tick is not None and tick < self.last_tick
                      or self._last_outdoor_wall is not None and wall is not None

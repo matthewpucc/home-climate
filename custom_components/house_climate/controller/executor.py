@@ -100,6 +100,7 @@ class Executor:
         self.pending: dict[str, Pending] = {}
         self.stop_started: float | None = None
         self.fan_failures: dict[str, FanRetry] = {}
+        self.fan_observations = {}
         from .airflow_execution import AirflowExecution
         self.airflow = AirflowExecution(self)
         self._fan_airflow_ticket = None
@@ -1156,6 +1157,7 @@ class Executor:
         """Circulation is optional: retain a visible issue and retry one fan."""
         failure = self.fan_failures.get(entity)
         command = None
+        acknowledged = None
         try:
             state = states.get(entity, {})
             attrs = state.get("attributes", {})
@@ -1197,6 +1199,7 @@ class Executor:
                     return observed.get("state") == "off"
 
             command = (service, tuple(sorted(data.items())))
+            acknowledged = False
             pending = self.pending.get(entity)
             # Supersede even a timed-out activation whose old snapshot says off.
             urgent_off = bool(failure and failure.command != command and (
@@ -1205,12 +1208,13 @@ class Executor:
             if not urgent_off and matches(state) and (pending is None or pending.command == command):
                 self.pending.pop(entity, None)
                 self.fan_failures.pop(entity, None)
+                acknowledged = True
                 return
             # A newly requested off bypasses the failed activation's backoff.
             if failure and now < failure.retry_at and not urgent_off:
                 plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
                 return
-            self.ensure(entity, service, data, matches, states, now, force=bool(urgent_off))
+            acknowledged = self.ensure(entity, service, data, matches, states, now, force=bool(urgent_off))
             if urgent_off:
                 failure.command, failure.retry_at = command, now
         except HAActivationDeferred:
@@ -1235,6 +1239,19 @@ class Executor:
                        f"({observed.get('attributes', {}).get('percentage')}%)")
             failure = FanRetry(command, message, now + delay, attempts)
             self.fan_failures[entity] = failure
+        finally:
+            # Observe the existing result, including quantization and deferred
+            # dispatch. No extra matching, acknowledgement or control work.
+            try:
+                self.fan_observations[entity] = {
+                    "sampled_at": datetime.now(timezone.utc).timestamp(),
+                    "requested_percentage": (dict(command[1]).get("percentage", 0) if command else None),
+                    "acknowledged": acknowledged,
+                    "pending": entity in self.pending,
+                    "failed": entity in self.fan_failures,
+                }
+            except Exception:
+                self.fan_observations.pop(entity, None)
         if failure:
             plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
 

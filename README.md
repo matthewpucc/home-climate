@@ -1,5 +1,9 @@
 # Home Climate
 
+For direct numeric diagnostics and every native Prometheus export, see the
+[metric reference](docs/metrics.md), including units, bounded codes, freshness,
+restart behavior, and requested versus reported evidence.
+
 A Home Assistant integration for a shared heat-pump system, room fans and a battery-backed auxiliary heater. Room profiles, weekly schedules, priorities, peak hours, seasonal selection and the recovery state are configurable. Physical device bindings stay in a private Home Assistant file; room climate cards provide temporary comfort adjustments.
 
 These changes target 0.9.0. Check the published release and installed version separately; this guide does not establish release availability or passed live acceptance.

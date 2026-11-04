@@ -94,6 +94,7 @@ class Plan:
     fans: dict[str, int] = field(default_factory=dict)
     fan_head_assists: dict[str, str] = field(default_factory=dict)
     fan_airflow: dict[str, dict] = field(default_factory=dict)
+    outdoor_source_evidence: dict = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
     room_targets: dict = field(default_factory=dict)
     window_states: dict = field(default_factory=dict)
@@ -368,6 +369,10 @@ class Policy:
                     self.context = replace(self.context, valid_until_monotonic=deadline if current is None else min(current, deadline))
         self.head_guard.context = self.context
         plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings)
+        if self.operating.outdoor_observation is not None:
+            sampled_at, samples = self.operating.outdoor_observation
+            plan.outdoor_source_evidence = {"sampled_at": sampled_at,
+                                            "sources": [asdict(sample) for sample in samples]}
         if self.seasonal_status is not None:
             plan.seasonal = self.seasonal_status.as_dict()
         plan.window_states = self.context.window_states

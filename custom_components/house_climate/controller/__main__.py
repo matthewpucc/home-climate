@@ -16,6 +16,7 @@ from .executor import ControlFault, Executor
 from .ha import HomeAssistant, HAStopping
 from .ha_package import watchdog_signature, write_dashboard, write_package
 from .locking import live_lock
+from .numeric_diagnostics import fan_reports
 from .policy import Policy
 
 
@@ -197,6 +198,8 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                        head_stop_reasons=recovery["head_stop_reasons"],
                        head_transition_history=recovery["head_transition_history"],
                        pending_head_commands=recovery["pending_head_commands"],
+                       fan_observations={entity: dict(row) for entity, row in executor.fan_observations.items()},
+                       fan_reports=fan_reports(config, states),
                        shared_stop=recovery.get("shared_stop", {}),
                        **cadence.status(), **plan.as_dict())
                 faults = 0

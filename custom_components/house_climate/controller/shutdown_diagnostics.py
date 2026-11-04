@@ -38,6 +38,8 @@ class ShutdownDiagnostics:
         self.times = dict.fromkeys(EVENTS)
         self.history = deque(maxlen=HISTORY_LIMIT)
         self.current = {}
+        self.guard_current = {}
+        self.guard_evaluated_at = None
         self.sampled_at = None
         self._signature = None
         self._last_native_ack = None
@@ -104,6 +106,10 @@ class ShutdownDiagnostics:
                 and aggregate.get('classification') in ('drop', 'relative_drop')
                 and drop_baseline is not None and latest is not None else None)
         self.sampled_at = now
+        # Already-evaluated publication only. Sensor refresh must never call
+        # guard properties, some of which reconcile safety evidence.
+        self.guard_current = dict(current)
+        self.guard_evaluated_at = observed_at
         self.current = {
             'isolation_confirmed': int(bool(current.get('power_cut_confirmed'))),
             'electrical_stop_confirmed': int(bool(current.get('electrical_stop_confirmed'))) if meter_known else None,

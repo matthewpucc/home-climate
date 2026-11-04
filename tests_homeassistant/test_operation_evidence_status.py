@@ -23,6 +23,8 @@ class OperationEvidenceStatusTests(unittest.IsolatedAsyncioTestCase):
                        "room_targets": {}, "power_guard": {"heater_draw_status": "idle"}}
         self.guard = {"blocked": True, "live": False, "shutdown_evidence": "reported_off_unverified",
                       "shutdown_confirmation": "state_only", "electrical_stop_confirmed": False}
+        self.guard["heater_draw_status"] = "idle"
+        self.status["power_guard"] = self.guard
         self.entry = SimpleNamespace(entry_id="evidence_fixture", runtime_data=SimpleNamespace(
             config=self.config, status=self.status, power_guard=SimpleNamespace(diagnostics=self.guard)))
 

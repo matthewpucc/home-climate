@@ -77,6 +77,7 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
         self.directory.cleanup()
 
     async def publish(self):
+        self.guard._publish()
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
         await self.hass.async_block_till_done()
         return self.hass.states.get(self.sensor.entity_id)
