@@ -124,6 +124,44 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         return [call for call in self.calls if call[0] == "fan" and call[1] in ("turn_on", "set_percentage")
                 and call[2].get("percentage", 0) > 20]
 
+    def configure_override(self, percentage):
+        control = replace(self.cfg.fan_controls[FAN], speed_override=percentage)
+        self.cfg = replace(self.cfg, fan_controls={**self.cfg.fan_controls, FAN: control})
+        self.runtime_obj.config = self.runtime_obj.api.config = self.runtime_obj.controls.config = self.cfg
+        self.policy = Policy(self.cfg)
+        self.executor = Executor(self.cfg, self.runtime_obj.api, "°F")
+
+    async def test_speed_override_preserves_native_aim_and_stops_with_controller(self):
+        self.configure_override(70)
+        for _ in range(8):
+            plan = await self.tick()
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 70)
+        self.assertEqual(plan.fan_airflow[FAN]["execution"]["phase"], "verified")
+        self.assertEqual(plan.fan_airflow[FAN]["speed_override"], 70)
+        self.assertEqual(plan.fan_airflow[FAN]["profile"], "toward_alpha")
+        self.assertTrue(any(call[1] == "set_oscillation_angles" for call in self.calls))
+        self.temperature("alpha", 72)
+        for _ in range(3):
+            plan = await self.tick()
+        self.assertIsNone(plan.fan_airflow[FAN]["profile"])
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 70)
+        await self.runtime_obj.controls.async_set_enabled(False)
+        await self.settle_watchdog(self.runtime_obj.controls)
+        self.assertEqual(self.hass.states.get(FAN).state, "off")
+
+    async def test_zero_override_stops_without_new_direction_and_clear_restores_automatic(self):
+        self.configure_override(0)
+        for _ in range(3):
+            plan = await self.tick()
+        self.assertEqual(self.hass.states.get(FAN).state, "off")
+        self.assertIsNone(plan.fan_airflow[FAN]["profile"])
+        self.assertFalse(any(call[0] == "hass_dyson" or call[1] == "set_direction" for call in self.calls))
+        self.configure_override(None)
+        for _ in range(8):
+            plan = await self.tick()
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 60)
+        self.assertEqual(plan.fan_airflow[FAN]["execution"]["phase"], "verified")
+
     async def test_profile_before_boost_atomic_pair_and_explanatory_diagnostics(self):
         _, data = await self.plan()
         self.assertIsInstance(data[FAN]["attributes"]["supported_features"], FanEntityFeature)

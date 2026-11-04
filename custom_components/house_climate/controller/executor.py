@@ -1299,7 +1299,7 @@ class Executor:
                 plan.reasons.append(message)
         for entity, percentage in plan.fans.items():
             fan = next((fan for fan in self.config.fan_controls.values() if fan.entity_id == entity), None)
-            minimum = fan.minimum_percentage if fan else 0
+            minimum = fan.purification_minimum if fan else 0
             ticket = None
             if fan and fan.airflow is not None:
                 percentage, ticket = self.airflow.apply(fan, percentage, plan, self._states, now)

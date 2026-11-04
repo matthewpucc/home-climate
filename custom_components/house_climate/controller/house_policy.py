@@ -9,7 +9,7 @@ import re
 from dataclasses import asdict
 from copy import deepcopy
 
-from .config import Config, outdoor_probe_dict
+from .config import Config, PurifierPolicy, outdoor_probe_dict
 from .bindings import BindingsError, HouseBindings, ROOM_ROLES
 from .protection import ProtectionTemperatures
 
@@ -219,6 +219,7 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
                 else:
                     rooms[identities[name]][field] = deepcopy(value)
     purifiers = data["purifiers"]
+    overrides = PurifierPolicy(**purifiers).room_overrides
     from .airflow_defaults import house_airflow
     for device in ("office", "entertainment"):
         rooms[identities[device]]["fans"][0]["airflow"] = house_airflow(
@@ -232,6 +233,9 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
             "percentage": purifiers["living_percentage"],
             "minimum_percentage": purifiers["living_percentage"],
         }]
+    for role, percentage in overrides.items():
+        for fan in rooms[identities[role]].get("fans", ()):
+            fan["speed_override"] = percentage
     return Config.from_dict(data)
 
 
@@ -264,6 +268,8 @@ def editable_policy_settings(config, bindings):
     purifiers = asdict(config.purifiers)
     if not purifiers["airflow_profiles"]:
         purifiers.pop("airflow_profiles")
+    if not purifiers["room_overrides"]:
+        purifiers.pop("room_overrides")
     return {"rooms": rooms, "auxiliary_policy": asdict(config.auxiliary_policy),
             "purifiers": purifiers,
             "fallback": asdict(config.fallback), "seasonal_policy": asdict(config.seasonal_policy),

@@ -209,7 +209,7 @@ class Policy:
             direction = self.transfer_airflow.opposing_direction(
                 source_head, destination.temperature, target)
             if direction:
-                minimum = math.ceil(fan.minimum_percentage)
+                minimum = math.ceil(fan.purification_minimum)
                 if plan.fans.get(fan.entity_id, 0) > minimum:
                     label = self.config.zones[fan.room].name or fan.room
                     warning = (f"Transfer fan {fan.entity_id}: {direction} at its source could move "
@@ -381,7 +381,7 @@ class Policy:
         plan.warnings.extend(self.context.warnings)
         # Purification is independent of thermal demand/probe availability.
         # Thermal transfer may boost this floor but cannot remove it.
-        plan.fans = {fan.entity_id: math.ceil(fan.minimum_percentage)
+        plan.fans = {fan.entity_id: math.ceil(fan.purification_minimum)
                      for fan in self.config.fan_controls.values()}
         demands = {name: self.demand(name, reading, bands[name], profiles[name].priority,
                                     running_modes={states.get(self.config.heads[self.config.zones[name].head], {}).get("state")})
@@ -462,8 +462,7 @@ class Policy:
                     useful = (room.temperature > target and delta > 0) or (room.temperature < target and delta < 0)
                     active = useful and abs(delta) > (.25 if self.transfer_on.get(key) else .75)
                 self.transfer_on[key] = active
-            plan.fans[fan.entity_id] = max(math.ceil(fan.minimum_percentage),
-                                         round(percentage) if active else 0)
+            plan.fans[fan.entity_id] = fan.requested_percentage(percentage if active else 0)
 
         eligible = {"heat": {}, "cool": {}}
         scores = {"heat": (0., 0., 0., 0.), "cool": (0., 0., 0., 0.)}
@@ -605,8 +604,7 @@ class Policy:
             assists = ((winner == "cool" and destination.temperature > target)
                        or (winner == "heat" and destination.temperature < target))
             if assists:
-                plan.fans[fan.entity_id] = max(math.ceil(fan.minimum_percentage),
-                                             round(settings.value(fan.percentage)))
+                plan.fans[fan.entity_id] = fan.requested_percentage(settings.value(fan.percentage))
                 if plan.fans[fan.entity_id]:
                     plan.fan_head_assists[fan.entity_id] = head
                 self.transfer_on[key] = True

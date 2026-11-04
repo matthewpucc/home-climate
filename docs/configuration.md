@@ -11,7 +11,7 @@ Open Home Climate under **Settings → Devices & services → Configure**. The s
 | Room profiles and weekly schedules | `rooms` | Base profiles, weekly periods and seasonal alternatives |
 | Auxiliary comfort and peak hours | `auxiliary_policy` | Peak window, deficit/progress qualification and inside-band stop margin |
 | Seasonal comfort selection | `seasonal_policy` | Outdoor averaging, warm/cool hysteresis and initial profile |
-| Purifier minimum and Living speed | `purifiers` | Ordinary purifier baseline and optional separate Living purifier speed |
+| Purifier speeds and room overrides | `purifiers` | Ordinary purifier baseline and optional separate Living purifier speed |
 | Recovery state after active control | `fallback` | Head range and circulation-fan setting when active control ends |
 | Controller health lease (seconds) | `heartbeat_timeout_seconds` | Independently renewed controller-health deadline; default 300 |
 | Auxiliary heat authorization lease (seconds) | `auxiliary_heartbeat_timeout_seconds` | Independently renewed automated-heat deadline; default 120 |
@@ -78,7 +78,7 @@ Protection, shared-head arbitration, equipment timers and auxiliary manual owner
 
 ## Purifier baseline and boosts
 
-The **Purifier minimum and Living speed** object defaults to:
+The **Purifier speeds and room overrides** object defaults to:
 
 ```json
 {"minimum_percentage": 20, "living_percentage": 100}
@@ -95,6 +95,56 @@ The optional, separately bound Living purifier uses `living_percentage` througho
 Generic room configurations keep a zero `minimum_percentage` on each fan control unless explicitly configured. The 20% baseline is a house-policy default, and existing room schedules and higher-speed requests are unchanged.
 
 Existing unfinished recovery plans retain their saved targets; upgrading does not rewrite them. The native integration checks HA registry identities before dispatch. The standalone HTTP/CLI controller cannot establish those device associations, so its operator must verify that ordinary fan bindings are independent purifiers and never heater aliases.
+
+### Room speed overrides
+
+In **Configure → Purifier speeds and room overrides**, add `room_overrides` to
+hold a requested speed independently for each room. For example:
+
+```json
+{
+  "minimum_percentage": 20,
+  "living_percentage": 100,
+  "room_overrides": {"office": 70, "entertainment": 70}
+}
+```
+
+This requests 70% for only Office and Entertainment throughout active control,
+including subsequent decisions, schedule changes and missing room probes.
+Primary and Guest keep their existing speeds. The room override replaces both
+the ordinary baseline and any scheduled or thermal speed request for that room;
+it is independent of temperature Hold. The ordinary fan's supported speed steps
+still apply, rounding upward when the exact requested percentage is unavailable.
+
+Use the stable room keys `primary`, `guest`, `office`, `entertainment`, and
+`living`, even if a room has a different display name or migrated internal ID.
+Values must be finite numbers from 0 to 100. Zero holds the purifier Off during
+active control and issues no new aim commands; it does **not** mean automatic.
+An optional Living override remains saved if its separate purifier is not bound.
+
+The map is saved with integration options and survives normal reloads/restarts.
+Supplying `room_overrides` replaces the entire saved map: remove only the room
+key you want to release while retaining the others, or supply
+`"room_overrides": {}` to restore automatic speeds everywhere. Omitting the
+field on a partial settings edit retains the saved map. Clearing an override
+restores the original baseline, schedules and thermal behavior.
+
+A positive override is independent purification, like the existing configurable
+minimum. Directed fans continue selecting their existing supported profiles and
+acknowledging outlet/sweep changes at the overridden baseline; no new route or
+thermal benefit is inferred. An unsupported direction adapter retains that
+purification speed. Live permission, controller ownership, device identity,
+repair/fault checks and mandatory Off cleanup still apply. The override does
+not continuously enforce a speed while the controller is disabled: safe
+recovery uses the higher of the override baseline and configured fallback speed,
+including when an active override was zero. Previously saved recovery plans
+keep their existing targets.
+
+Generic schema-v2 configurations can set `speed_override` on an individual
+room's fan rule; omit it or use `null` to resume automatic behavior. The
+house-policy editor maps its room overrides to these fan rules without changing
+private device wiring. Existing configurations need no migration and default to
+automatic behavior.
 
 ## Seasonal and auxiliary defaults
 

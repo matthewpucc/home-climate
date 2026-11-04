@@ -67,10 +67,11 @@ class DirectedAirflow:
             if fan.airflow is None:
                 continue
             entity, config = fan.entity_id, fan.airflow
-            minimum = math.ceil(fan.minimum_percentage)
+            minimum = math.ceil(fan.purification_minimum)
             previous = self.selected.get(entity)
             choices = {name: result for name, profile in config.profiles.items()
-                       if (result := self.useful(profile, plan, rooms, retained=name == previous,
+                       if fan.speed_override != 0
+                       and (result := self.useful(profile, plan, rooms, retained=name == previous,
                                                  boosted=name == self.boosting.get(entity)))}
             # Keep a still-useful route through ambiguous demand. Without a
             # previous route, equally plausible destinations cause no movement.
@@ -113,13 +114,14 @@ class DirectedAirflow:
                               requested=asdict(profile), head=head, boost=boost,
                               provisional=profile.calibration == "provisional")
                 if boost:
-                    requested = max(minimum, round(self.policy._airflow_settings.value(fan.percentage)))
+                    requested = fan.requested_percentage(self.policy._airflow_settings.value(fan.percentage))
                     if not allow_start:
                         # Maintenance is reduction-only, even when the same
                         # profile gains a newly useful ambient gradient.
                         requested = min(requested, cached.get("percentage", minimum))
                     plan.fans[entity] = requested
             intent["percentage"] = plan.fans[entity]
+            intent["speed_override"] = fan.speed_override
             if selected and intent.get("boost") and plan.fans[entity] > minimum:
                 self.boosting[entity] = selected
             else:

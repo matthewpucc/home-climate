@@ -158,6 +158,33 @@ class PurifierAliasGuardTests(unittest.IsolatedAsyncioTestCase):
         cfg = replace(self.config(), heater_entity=None, auxiliary_room=None)
         self.assertIsNone(self.issue(cfg))
 
+    async def test_positive_override_requires_identity_even_without_automatic_floor(self):
+        cfg = self.config(minimum=0)
+        cfg = replace(cfg, fan_controls={key: replace(fan, speed_override=70)
+                      if fan.entity_id == self.fan else fan for key, fan in cfg.fan_controls.items()})
+        runtime, _ = await self.runtime(cfg=cfg)
+        await self.claim(runtime)
+        await self.settle_watchdog(runtime.controls)
+        self.calls.clear()
+        er.async_get(self.hass).async_update_entity(self.fan, device_id=None)
+        with self.assertRaises(HAError):
+            await asyncio.to_thread(runtime.api.service, "fan", "turn_on", entity_id=self.fan, percentage=70)
+        self.assertEqual(self.fan_calls(), [])
+
+    async def test_recovery_persists_override_baseline_independently_of_later_edits(self):
+        cfg = self.config(fallback=True)
+        cfg = replace(cfg, fan_controls={key: replace(fan, speed_override=70)
+                      if fan.entity_id == self.fan else fan for key, fan in cfg.fan_controls.items()})
+        controls = NativeControls(self.hass, cfg, True, "override_recovery", lambda: None)
+        controls.owned = (self.fan,)
+        controls.handoff = handoff.arm(controls, controls.owned)
+        await controls._save(controls.owned, ())
+        restored = NativeControls(self.hass, self.config(fallback=True), True, "override_recovery", lambda: None)
+        await restored.async_load()
+        self.assertEqual(restored.handoff["fan_minimum_percentages"], {self.fan: 70})
+        self.assertEqual(restored.handoff["fan_percentage"], 40)
+        self.assertEqual(self.calls, [])
+
     async def test_remapped_heater_keeps_persisted_manual_alias_protected(self):
         original = NativeControls(self.hass, self.config(), False, "manual_remap", lambda: None)
         await original.async_load()
