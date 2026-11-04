@@ -691,6 +691,7 @@ class HeaterPowerGuard:
                 "commissioning": dict(self._commissioning),
                 "circuit_power_w": r.circuit_w, "elite_input_w": r.input_w,
                 "elite_output_w": r.output_w, "battery_percent": r.battery_percent,
+                "battery_reserve_percent": BATTERY_RESERVE_PERCENT,
                 "heater_current_a": r.heater_a, "heater_power_w": r.heater_w,
                 "input_budget_w": r.input_budget_w,
                 "branch_current_measured": False, "live": self.live}

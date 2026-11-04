@@ -93,6 +93,10 @@ class DecisionCadence:
 
     def _trim(self, states, rooms, now, climate_unit="°F"):
         plan = self.cached_plan
+        if self.policy.operating.outdoor_observation is not None:
+            sampled_at, samples = self.policy.operating.outdoor_observation
+            plan.outdoor_source_evidence = {"sampled_at": sampled_at,
+                                            "sources": [asdict(sample) for sample in samples]}
         low, high = limits(self.config, self.policy.context)
         plan.window_states = self.policy.context.window_states
         plan.protection_context = self.policy.context.as_dict()

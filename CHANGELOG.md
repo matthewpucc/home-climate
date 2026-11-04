@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add direct native numeric guard readiness/block/reason and configured reserve, persistent auxiliary manual ownership, per-fan requested/reported speed and sweep bounds with separate acknowledgment/pending evidence, and per-source report/acquisition times and qualification. Reuse captured observations and the existing 15-second sensor group; stale evidence becomes unknown without evaluating safety or control during refresh. Preserve all control behavior and gates. See [the complete native metric reference](docs/metrics.md), including existing exports, bounded codes, freshness, restart and physical-evidence limits.
+
 ## 0.9.7
 
 - Accept Home Assistant's integer feature flags in native purifier airflow capability checks while rejecting boolean and malformed masks. Preserve required feature bits, services, outlet calibration and all existing dispatch/acknowledgement gates.

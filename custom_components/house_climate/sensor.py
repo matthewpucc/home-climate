@@ -14,6 +14,7 @@ from .const import DEVICE_NAME, NAME, DOMAIN, SIGNAL_STATUS
 from .controller.sensors import from_f, to_f
 from .auxiliary_diagnostics import EVENTS
 from .controller.shutdown_diagnostics import METRICS as SHUTDOWN_METRICS
+from .controller import numeric_diagnostics
 
 
 def short(text):
@@ -387,6 +388,7 @@ def pending_head_message(detail, display_unit):
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
+    diagnostic_group = None
     entities = [ControllerStatus(entry), Overview(entry), RecoveryStatus(entry),
                 CurrentIssues(entry), LastFault(entry)]
     if getattr(entry.runtime_data, "power_guard", None) is not None:
@@ -402,18 +404,30 @@ async def async_setup_entry(hass, entry, async_add_entities):
         entities.append(AuxiliaryPlan(entry))
         if getattr(entry.runtime_data, "controls", None) is not None:
             diagnostics = AuxiliaryDiagnosticGroup(entry.runtime_data.controls)
+            diagnostic_group = diagnostics
             entities.extend(AuxiliaryDiagnostic(entry, diagnostics, key) for key in AUXILIARY_METRICS)
         guard = getattr(entry.runtime_data, "power_guard", None)
         if guard is not None and hasattr(guard, "shutdown_observations"):
             diagnostics = ShutdownDiagnosticGroup(guard)
+            diagnostic_group = diagnostic_group or diagnostics
             entities.extend(AuxiliaryDiagnostic(entry, diagnostics, key) for key in SHUTDOWN_METRICS)
+
+    definitions = numeric_diagnostics.metrics(
+        entry.runtime_data.config,
+        controls=getattr(entry.runtime_data, "controls", None) is not None,
+        guard=hasattr(getattr(entry.runtime_data, "power_guard", None), "shutdown_observations"))
+    if definitions:
+        diagnostic_group = diagnostic_group or AuxiliaryDiagnosticGroup(None)
+        diagnostic_group.runtime = entry.runtime_data
+        diagnostic_group.definitions = definitions
+        entities.extend(NumericDiagnostic(entry, diagnostic_group, metric) for metric in definitions)
 
     # Preserve existing temperature IDs/history and remove obsolete plan entities
     # when rooms, fans, or the auxiliary heater are removed in Configure.
     registry = er.async_get(hass)
     current = {entity.unique_id for entity in entities}
     prefixes = tuple(f"{entry.entry_id}_{kind}" for kind in
-                     ("room_", "plan_room_", "plan_fan_", "plan_auxiliary", "comfort_mode_", "auxiliary_diagnostic_"))
+                     ("room_", "plan_room_", "plan_fan_", "plan_auxiliary", "comfort_mode_", "auxiliary_diagnostic_", "numeric_"))
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (entity.domain == "sensor" and entity.platform == DOMAIN
                 and entity.unique_id.startswith(prefixes) and entity.unique_id not in current):
@@ -464,10 +478,18 @@ class AuxiliaryDiagnosticGroup:
         self.listeners = set()
         self.unsubscribers = []
         self.values, self.attributes = {}, {}
+        self.runtime, self.definitions = None, ()
 
     @callback
     def refresh(self, *_):
-        self.values, self.attributes = self.controls.observations.values(self.controls, time.monotonic())
+        self.values, self.attributes = (self.controls.observations.values(self.controls, time.monotonic())
+                                        if self.controls is not None else ({}, {}))
+        self.publish()
+
+    @callback
+    def publish(self):
+        if self.runtime is not None:
+            self.values.update(numeric_diagnostics.values(self.runtime, self.definitions, time.time()))
         for listener in tuple(self.listeners):
             listener()
 
@@ -527,8 +549,27 @@ class ShutdownDiagnosticGroup(AuxiliaryDiagnosticGroup):
     @callback
     def refresh(self, *_):
         self.values, self.attributes = self.controls.shutdown_observations.values(time.time())
-        for listener in tuple(self.listeners):
-            listener()
+        self.publish()
+
+
+class NumericDiagnostic(ControllerEntity):
+    """Direct numeric state from the existing shared 15-second refresh."""
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, entry, group, metric):
+        super().__init__(entry, f"numeric_{metric.key}")
+        self._diagnostic_group, self.key = group, metric.key
+        self._attr_name = metric.name
+        self._attr_native_unit_of_measurement = metric.unit
+        if metric.unit == "s":
+            self._attr_suggested_display_precision = 6
+
+    async def async_added_to_hass(self):
+        self.async_on_remove(self._diagnostic_group.connect(self.hass, self._updated))
+
+    @property
+    def native_value(self):
+        return self._diagnostic_group.values.get(self.key)
 
 
 class ControllerStatus(ControllerEntity):
@@ -574,9 +615,14 @@ class HeaterPowerStatus(ControllerEntity):
     def __init__(self, entry):
         super().__init__(entry, "heater_power_guard")
 
+    def captured_guard(self):
+        observations = getattr(self.runtime.power_guard, "shutdown_observations", None)
+        return (observations.guard_current if observations is not None
+                else getattr(self.runtime, "status", {}).get("power_guard") or {})
+
     @property
     def native_value(self):
-        guard = self.runtime.power_guard.diagnostics
+        guard = self.captured_guard()
         if guard.get("power_restore_inflight") or guard.get("power_restore_cleanup_pending"):
             return "Waiting for heater outlet restoration to stop safely"
         if guard.get("shutdown_evidence") == "contradictory":
@@ -596,7 +642,7 @@ class HeaterPowerStatus(ControllerEntity):
     def extra_state_attributes(self):
         # Original circuit/battery sensors already retain measured values. Keep
         # this status focused on the interlock and its ownership/recovery state.
-        guard = self.runtime.power_guard.diagnostics
+        guard = self.captured_guard()
         return {key: guard[key] for key in
                 ("blocked", "reason", "latched", "switch_cut_owned", "power_cut_confirmed",
                  "restoring", "restore_attempts", "power_restore_inflight",
