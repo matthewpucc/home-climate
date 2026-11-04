@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.7
 
 - Accept Home Assistant's integer feature flags in native purifier airflow capability checks while rejecting boolean and malformed masks. Preserve required feature bits, services, outlet calibration and all existing dispatch/acknowledgement gates.
 
