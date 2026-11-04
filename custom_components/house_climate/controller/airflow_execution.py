@@ -71,7 +71,7 @@ class AirflowExecution:
         self.verified = {}
 
     def apply(self, fan, percentage, plan, states, now):
-        entity, minimum = fan.entity_id, math.ceil(fan.minimum_percentage)
+        entity, minimum = fan.entity_id, math.ceil(fan.purification_minimum)
         intent = plan.fan_airflow.get(entity, {})
         name = intent.get("profile")
         state = states.get(entity, {})

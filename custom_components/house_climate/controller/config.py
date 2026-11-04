@@ -156,6 +156,7 @@ class FanControl:
     source_room: str | None = None
     minimum_percentage: float = 0
     airflow: AirflowConfig | None = None
+    speed_override: float | None = None
 
     def __post_init__(self):
         if isinstance(self.airflow, dict):
@@ -163,12 +164,32 @@ class FanControl:
         elif self.airflow is not None and not isinstance(self.airflow, AirflowConfig):
             raise ValueError("Fan airflow must be a settings object")
 
+    @property
+    def purification_minimum(self):
+        """An explicit speed is independent of thermal demand, like the floor."""
+        return self.minimum_percentage if self.speed_override is None else self.speed_override
+
+    def requested_percentage(self, automatic):
+        if self.speed_override is not None:
+            return math.ceil(self.speed_override)
+        return max(math.ceil(self.minimum_percentage), round(automatic))
+
 
 @dataclass(frozen=True)
 class PurifierPolicy:
     minimum_percentage: float = 0
     living_percentage: float = 100
     airflow_profiles: dict = field(default_factory=dict)
+    room_overrides: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self):
+        from .bindings import ROOM_ROLES
+        if not isinstance(self.room_overrides, dict) or set(self.room_overrides) - ROOM_ROLES:
+            raise ValueError("Purifier room overrides must name configured house room roles")
+        for value in self.room_overrides.values():
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or not 0 <= value <= 100):
+                raise ValueError("Purifier room overrides must be finite percentages from 0 to 100")
 
 
 @dataclass(frozen=True)
@@ -497,6 +518,11 @@ class Config:
                     or not math.isfinite(fan.minimum_percentage)
                     or not 0 <= fan.minimum_percentage <= 100):
                 raise ValueError("Fan minimum percentage must be a finite number from 0 to 100")
+            if fan.speed_override is not None and (
+                    isinstance(fan.speed_override, bool)
+                    or not isinstance(fan.speed_override, (int, float))
+                    or not math.isfinite(fan.speed_override) or not 0 <= fan.speed_override <= 100):
+                raise ValueError("Fan speed override must be a finite number from 0 to 100 or null")
         if set(self.fans.values()) != {f.entity_id for f in self.fan_controls.values()}:
             raise ValueError("Every fan must have a control rule")
         for name in ("poll_seconds", "sensor_stale_seconds", "sensor_confirmation_seconds",

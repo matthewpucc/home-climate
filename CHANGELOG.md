@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add persistent per-room purifier speed overrides in Configure. Hold only selected rooms at a requested percentage, including Office and Entertainment at 70%, while preserving other rooms, existing directed-airflow profiles and activation/shutdown checks. Clearing a room override restores its automatic baseline and scheduled/thermal speeds. Zero holds Off during active control; supported speed steps and existing recovery behavior still apply. See [room speed overrides](docs/configuration.md#room-speed-overrides). No live configuration changes or deployment.
+
 ## 0.9.8
 
 - Add direct native numeric guard readiness/block/reason and configured reserve, persistent auxiliary manual ownership, per-fan requested/reported speed and sweep bounds with separate acknowledgment/pending evidence, and per-source report/acquisition times and qualification. Reuse captured observations and the existing 15-second sensor group; stale evidence becomes unknown without evaluating safety or control during refresh. Preserve all control behavior and gates. See [the complete native metric reference](docs/metrics.md), including existing exports, bounded codes, freshness, restart and physical-evidence limits.

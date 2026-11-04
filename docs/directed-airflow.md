@@ -105,6 +105,14 @@ the integration's UI uses 5° increments.
 
 ## Configuration and migration
 
+Room [speed overrides](configuration.md#room-speed-overrides) replace the
+purifier's ordinary baseline and automatic speed request while retaining these
+profile-selection, dwell, identity and acknowledgement rules. A positive
+override is independent purification, so it remains available without a useful
+thermal route; aim changes are staged at that overridden baseline. Zero holds
+Off without new aim commands. Clearing the override restores the original
+minimum and direction-dependent boosts.
+
 House policy changes its former two fixed Entertainment-to-Office fan rules to
 the profiles above. Purifier minimums, the 60% configured boost, unrelated fan
 rules, auxiliary policy, HVAC policy, and protection settings are preserved.

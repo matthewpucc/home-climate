@@ -148,7 +148,7 @@ def validate_dispatch(api, ticket, service, body):
     policy = Policy(config)
     policy.calls.update({call: True for call in ticket.calls})
     policy.directed_airflow.selected[ticket.entity] = ticket.name
-    if ticket.percentage > fan.minimum_percentage:
+    if ticket.percentage > fan.purification_minimum:
         policy.directed_airflow.boosting[ticket.entity] = ticket.name
     current = policy.decide(states, now, settings, api.hass.config.units.temperature_unit)
     intent = current.fan_airflow.get(ticket.entity, {})
@@ -156,7 +156,7 @@ def validate_dispatch(api, ticket, service, body):
             or target_signature(current) != ticket.targets):
         raise HAActivationDeferred("Fresh room demand/source output no longer supports this airflow intent")
     if service in ("set_direction", "set_airflow_profile"):
-        if not at_minimum(state, fan.minimum_percentage):
+        if not at_minimum(state, fan.purification_minimum):
             raise HAActivationDeferred("Reduce purifier to its minimum before changing aim")
         if service == "set_direction":
             if fan.airflow.outlet == "calibrated_fixed":
@@ -182,7 +182,7 @@ def validate_dispatch(api, ticket, service, body):
         raise HAError("Invalid fan percentage step")
     permitted = min(ticket.percentage, current.fans.get(ticket.entity, 0))
     maximum = min(100, math.floor(max(1, round(permitted / step),
-        math.ceil((math.ceil(fan.minimum_percentage) - 1e-7) / step)) * step + 1e-7))
+        math.ceil((math.ceil(fan.purification_minimum) - 1e-7) / step)) * step + 1e-7))
     if not intent.get("boost") or type(body["percentage"]) not in (int, float) or not 0 < body["percentage"] <= maximum:
         raise HAActivationDeferred("Fresh airflow intent no longer permits this boost")
     return "fan", service, body

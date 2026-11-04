@@ -187,7 +187,7 @@ class DecisionCadence:
             if fan.strategy == "transfer":
                 unsafe = unsafe or fan.source_room not in rooms
             assist_head = plan.fan_head_assists.get(fan.entity_id)
-            minimum = math.ceil(fan.minimum_percentage)
+            minimum = math.ceil(fan.purification_minimum)
             if unsafe and plan.fans.get(fan.entity_id, 0) > minimum:
                 plan.fans[fan.entity_id] = minimum
                 if assist_head:
