@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.9
+
+- Package persistent purifier speed overrides in the shared controller. Generic room fan rules can set `speed_override`; clearing it restores the automatic baseline and scheduled/thermal speeds.
+- The native integration adds per-room overrides in Configure while preserving directed-airflow profiles and existing activation/shutdown checks. Updating the add-on alone does not install the native editor or guarded airflow adapter.
+
 ## 0.9.8
 
 - Align distribution metadata with the native integration's numeric observability release. The new guard, ownership, fan and source metric entities require updating the native integration; updating the add-on alone does not install them.

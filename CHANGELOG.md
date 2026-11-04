@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.9
 
 - Add persistent per-room purifier speed overrides in Configure. Hold only selected rooms at a requested percentage, including Office and Entertainment at 70%, while preserving other rooms, existing directed-airflow profiles and activation/shutdown checks. Clearing a room override restores its automatic baseline and scheduled/thermal speeds. Zero holds Off during active control; supported speed steps and existing recovery behavior still apply. See [room speed overrides](docs/configuration.md#room-speed-overrides). No live configuration changes or deployment.
 
