@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.8
+
+- Align distribution metadata with the native integration's numeric observability release. The new guard, ownership, fan and source metric entities require updating the native integration; updating the add-on alone does not install them.
+- Include captured shared-controller fan and outdoor-source evidence without changing control behavior or safety gates.
+
 ## 0.9.6
 
 - Align distribution metadata with the native integration release. Bounded shutdown-recovery mode retries and current Kumo Auto capability checks are native-integration fixes; updating the add-on alone does not install them.
