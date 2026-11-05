@@ -131,6 +131,36 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
         self.policy = Policy(self.cfg)
         self.executor = Executor(self.cfg, self.runtime_obj.api, "°F")
 
+    async def test_dashboard_override_reaches_native_aim_and_zero_invalidates_queued_ticket(self):
+        runtime = self.runtime_obj
+        await runtime.purifier_speeds.async_set("alpha", 70)
+
+        async def tick():
+            data = await asyncio.to_thread(runtime.api.states)
+            now = datetime.now(timezone.utc)
+            plan = self.policy.decide(data, now, runtime._settings(data, self.cfg, now))
+            await asyncio.to_thread(self.executor.step, plan, data, time.monotonic())
+            return plan, data
+
+        for _ in range(8):
+            plan, data = await tick()
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 70)
+        self.assertEqual(plan.fan_airflow[FAN]["execution"]["phase"], "verified")
+        ticket = runtime.api.airflow_authorization(FAN, plan, data, time.monotonic())
+        await runtime.purifier_speeds.async_set("alpha", 0)
+        self.calls.clear()
+        with self.assertRaises(HAActivationDeferred):
+            await self.send(ticket)
+        self.assertEqual(self.calls, [])
+        for _ in range(3):
+            await tick()
+        self.assertEqual(self.hass.states.get(FAN).state, "off")
+        self.assertFalse(any(call[1] in ("set_direction", "set_oscillation_angles") for call in self.calls))
+        await runtime.purifier_speeds.async_set("alpha", None)
+        for _ in range(8):
+            await tick()
+        self.assertEqual(self.hass.states.get(FAN).attributes["percentage"], 60)
+
     async def test_speed_override_preserves_native_aim_and_stops_with_controller(self):
         self.configure_override(70)
         for _ in range(8):

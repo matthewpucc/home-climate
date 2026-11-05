@@ -22,12 +22,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
                               or getattr(guard.bindings, "heater_switch", None)
                               or guard.diagnostics.get("manual_recovery_required")):
         entities.append(AcknowledgeHeaterRecovery(entry))
+    entities.extend(ResumePurifierSpeed(entry, room_id)
+                    for room_id in getattr(getattr(entry.runtime_data, "purifier_speeds", None), "rooms", ()))
     registry = er.async_get(hass)
     current = {entity.unique_id for entity in entities}
     prefix = f"{entry.entry_id}_reload_"
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (entity.domain == "button" and entity.platform == DOMAIN
-                and (entity.unique_id.startswith((prefix, f"{entry.entry_id}_resume_schedule_"))
+                and (entity.unique_id.startswith((prefix, f"{entry.entry_id}_resume_schedule_",
+                                                     f"{entry.entry_id}_resume_purifier_"))
                      or entity.unique_id == f"{entry.entry_id}_heater_power_recovery")
                 and entity.unique_id not in current):
             registry.async_remove(entity.entity_id)
@@ -153,4 +156,21 @@ class RetryRecoverySettings(ReloadHeadIntegration):
         try:
             await self.runtime.controls.async_retry_handoff()
         except (RuntimeError, ValueError, OSError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
+
+class ResumePurifierSpeed(RoomControl, ButtonEntity):
+    _attr_icon = "mdi:fan-auto"
+
+    def __init__(self, entry, room_id):
+        super().__init__(entry, room_id, f"resume_purifier_{room_id}")
+        room = self.runtime.config.zones[room_id]
+        self._attr_name = f"{room.name or room_id} resume automatic purifier speed"
+
+    async def async_press(self):
+        if self.runtime.stop_event.is_set():
+            raise HomeAssistantError("Purifier controls are stopping")
+        try:
+            await self.runtime.purifier_speeds.async_set(self.room_id, None)
+        except (ValueError, OSError) as exc:
             raise HomeAssistantError(str(exc)) from exc

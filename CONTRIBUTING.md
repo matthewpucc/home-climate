@@ -33,6 +33,7 @@ Native integration (Python 3.14):
 
 ```sh
 python -m pip install -e '.[test]' 'homeassistant==2026.10.4' 'prometheus-client==0.21.0'
+python tests_homeassistant/install_bluetooth_requirements.py
 python -m unittest discover -s tests_homeassistant -v
 python scripts/package_hacs.py
 ```
@@ -52,3 +53,17 @@ Published releases and their tags/assets are left unchanged on subsequent runs o
 Release-publisher tests use Node.js 20+ and mocked GitHub APIs (`node --test tests_release/*.test.cjs`). Archive validation runs these tests alongside the Python suites from the packaged source.
 
 `scripts/package_hacs.py` creates a manual integration ZIP and a public-repository candidate from an explicit file allowlist. The candidate has generic examples, tests, and its own CI. It contains no Git history. Review it before publication; producing the artifact does not publish it.
+
+The Bluetooth regression tests install optional imports using the installed HA
+manifests' pinned requirements. They exercise the real remote scanner with
+synthetic packets and no Bluetooth hardware. The focused feature suite also
+runs on HA 2026.11.0:
+
+```sh
+python -m pip install 'homeassistant==2026.11.0'
+python tests_homeassistant/install_bluetooth_requirements.py
+python -m unittest tests_homeassistant.test_bluetooth_freshness tests_homeassistant.test_purifier_controls -v
+```
+
+The full native suite remains pinned to 2026.10.4; older shared test fixtures need
+config-entry initialization before registry loading on 2026.11.0.

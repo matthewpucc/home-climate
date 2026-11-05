@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.10
+
+- Add persistent room purifier percentage controls and a per-room resume-automatic button without integration reload. Preserve explicit zero/off, other rooms, supported speed rounding, direction/identity checks and saved recovery plans.
+- Add native Govee H5100 freshness from validated raw Bluetooth temperature packets. Reject merged-only fields, malformed/wrong-device data and known cached replay; expire receipts normally and clear them on restart. Keep receipt distinct from physical measurement time and independent temperature progress. Unsupported paths retain HA timestamp freshness.
+- Raw-packet availability depends on the Bluetooth scanner/proxy and remains unverified on installed hardware. Missing packet evidence preserves existing stale-data rejection. See [packet evidence and limitations](docs/bluetooth-freshness.md) and [room speed controls](docs/configuration.md#room-speed-overrides).
+
 ## 0.9.9
 
 - Add persistent per-room purifier speed overrides in Configure. Hold only selected rooms at a requested percentage, including Office and Entertainment at 70%, while preserving other rooms, existing directed-airflow profiles and activation/shutdown checks. Clearing a room override restores its automatic baseline and scheduled/thermal speeds. Zero holds Off during active control; supported speed steps and existing recovery behavior still apply. See [room speed overrides](docs/configuration.md#room-speed-overrides). No live configuration changes or deployment.

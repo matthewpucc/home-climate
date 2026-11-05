@@ -76,7 +76,7 @@ class DecisionCadence:
         return (tuple(profiles), tuple(sorted(settings.numbers.items())),
                 tuple(sorted((key, value.isoformat()) for key, value in settings.times.items())),
                 tuple(sorted(settings.toggles.items())), effects, protection,
-                context.confirmed_open_rooms)
+                context.confirmed_open_rooms, tuple(sorted(settings.room_fan_overrides.items())))
 
     def _warning(self, message):
         if message not in self._safety_warnings:
@@ -179,7 +179,7 @@ class DecisionCadence:
             if was_fan and not plan.auxiliary_fan_only:
                 self._warning("Auxiliary circulation stopped by fresh room temperature/probe check; waiting for next comfort decision")
 
-        for key, fan in self.config.fan_controls.items():
+        for key, fan in self.policy.fan_controls.items():
             room = rooms.get(fan.room)
             unsafe = not room
             if fan.strategy in ("cooling", "transfer"):

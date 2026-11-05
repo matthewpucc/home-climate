@@ -94,6 +94,7 @@ class Plan:
     fans: dict[str, int] = field(default_factory=dict)
     fan_head_assists: dict[str, str] = field(default_factory=dict)
     fan_airflow: dict[str, dict] = field(default_factory=dict)
+    fan_speed_overrides: dict[str, float | None] = field(default_factory=dict)
     outdoor_source_evidence: dict = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
     room_targets: dict = field(default_factory=dict)
@@ -114,6 +115,7 @@ class Policy:
 
     def __init__(self, config: Config, clock=None):
         self.config = config
+        self.fan_controls = config.fan_controls
         self.sensors = Sensors(config)
         self.head_guard = HeadGuard(config)
         self.calls: dict[tuple[str, str], bool] = {}
@@ -198,7 +200,7 @@ class Policy:
     def trim_transfer_fans(self, plan, states, rooms, now):
         """An ambient gradient cannot override possible conditioned discharge."""
         self.transfer_airflow.observe(states, now, plan)
-        for key, fan in self.config.fan_controls.items():
+        for key, fan in self.fan_controls.items():
             if fan.strategy != "transfer":
                 continue
             destination = rooms.get(fan.room)
@@ -351,6 +353,9 @@ class Policy:
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F", *, context=None,
                monotonic_now=None) -> Plan:
         settings = self.seasonal_settings(states, now, settings)
+        self.fan_controls = {key: replace(fan, speed_override=settings.room_fan_overrides[fan.room])
+                             if fan.room in settings.room_fan_overrides else fan
+                             for key, fan in self.config.fan_controls.items()}
         self.context = context if context is not None else self.operating.environment(states, now)
         LOW, HIGH = limits(self.config, self.context)
         profiles = {key: settings.profile(room, now, self.config.timezone, key) for key, room in self.config.zones.items()}
@@ -368,7 +373,9 @@ class Policy:
                     current = self.context.valid_until_monotonic
                     self.context = replace(self.context, valid_until_monotonic=deadline if current is None else min(current, deadline))
         self.head_guard.context = self.context
-        plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings)
+        plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings,
+                    fan_speed_overrides={fan.entity_id: fan.speed_override
+                                         for fan in self.fan_controls.values()})
         if self.operating.outdoor_observation is not None:
             sampled_at, samples = self.operating.outdoor_observation
             plan.outdoor_source_evidence = {"sampled_at": sampled_at,
@@ -382,7 +389,7 @@ class Policy:
         # Purification is independent of thermal demand/probe availability.
         # Thermal transfer may boost this floor but cannot remove it.
         plan.fans = {fan.entity_id: math.ceil(fan.purification_minimum)
-                     for fan in self.config.fan_controls.values()}
+                     for fan in self.fan_controls.values()}
         demands = {name: self.demand(name, reading, bands[name], profiles[name].priority,
                                     running_modes={states.get(self.config.heads[self.config.zones[name].head], {}).get("state")})
                    for name, reading in rooms.items()}
@@ -437,7 +444,7 @@ class Policy:
                 and demands[self.config.auxiliary_room]["cool"]["active"] and "fan_only" not in heater_modes):
             plan.warnings.append("Auxiliary heater does not expose fan_only; circulation skipped")
 
-        for key, fan in self.config.fan_controls.items():
+        for key, fan in self.fan_controls.items():
             room = rooms.get(fan.room)
             if not room:
                 self.transfer_on.pop(key, None)
@@ -590,7 +597,7 @@ class Policy:
         # A transfer fan can distribute conditioned air before the source
         # area's ambient probe reflects the head's output. Only assist a head
         # that survived the complete shared-mode arbitration and safety checks.
-        for key, fan in self.config.fan_controls.items():
+        for key, fan in self.fan_controls.items():
             if fan.strategy != "transfer":
                 continue
             destination, source = rooms.get(fan.room), rooms.get(fan.source_room)

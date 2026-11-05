@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.10
+
+- Align distribution metadata and shared-controller support with the native room speed controls and validated H5100 packet freshness release.
+- The native integration adds persistent room percentage controls and resume-automatic buttons without reload. Raw Bluetooth packet collection and the native controls require updating the integration; updating the add-on alone does not install them. Scanner/proxy raw-packet support remains unverified on installed hardware.
+
 ## 0.9.9
 
 - Package persistent purifier speed overrides in the shared controller. Generic room fan rules can set `speed_override`; clearing it restores the automatic baseline and scheduled/thermal speeds.

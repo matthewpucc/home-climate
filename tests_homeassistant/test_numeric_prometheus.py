@@ -104,6 +104,9 @@ class NumericPrometheusTests(unittest.IsolatedAsyncioTestCase):
         for metric in self.definitions:
             with self.subTest(metric=metric.key):
                 series = self.sample(samples, metric.key, self.family(metric))
+                if metric.field == "packet_received_at":
+                    self.assertEqual(series, [], "No packet receipt is fabricated for ordinary source fixtures")
+                    continue
                 self.assertEqual(len(series), 1)
                 self.assertAlmostEqual(series[0].value, self.group.values[metric.key], delta=1e-5)
                 self.assertEqual(set(series[0].labels), {"entity", "friendly_name", "domain"})
@@ -222,6 +225,17 @@ class NumericPrometheusTests(unittest.IsolatedAsyncioTestCase):
         samples, _ = await self.scrape()
         key = f"source_{source_id('alpha', source['source'])}_qualified"
         self.assertEqual(self.sample(samples, key), [])
+
+    async def test_packet_receipt_exports_separately_without_fabricating_a_measurement(self):
+        source = self.view.status["rooms"]["alpha"]["source_evidence"][0]
+        source.update(reported_at=self.wall - self.view.config.sensor_stale_seconds - 1,
+                      packet_received_at=self.wall, measurement_at=None)
+        samples, _ = await self.scrape()
+        prefix = f"source_{source_id('alpha', source['source'])}"
+        self.assertAlmostEqual(self.sample(samples, prefix + "_packet_received_at", "homeassistant_sensor_unit_s")[0].value,
+                               self.wall, delta=1e-5)
+        self.assertEqual(self.sample(samples, prefix + "_qualified")[0].value, 1)
+        self.assertEqual(self.sample(samples, prefix + "_measurement_at", "homeassistant_sensor_unit_s"), [])
 
     async def test_reference_covers_every_sensor_key_and_bounded_code(self):
         reference = Path("docs/metrics.md").read_text()

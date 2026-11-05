@@ -158,6 +158,7 @@ flag. Rejected aliases do not create independent physical sources or measurement
 | Key | Unit | Meaning |
 | --- | --- | --- |
 | `source_{source}_reported_at` | s | Captured accepted alias's HA report time. Unknown if no accepted evidence exists; an expired prior snapshot can retain this historical time. |
+| `source_{source}_packet_received_at` | s | Validated native H5100 raw-packet receipt time. Unknown on other paths. Keeps communication freshness separate from physical measurement and HA report time. |
 | `source_{source}_measurement_at` | s | Explicit bound physical acquisition timestamp only. Unknown when absent; HA report time never substitutes for it. |
 | `source_{source}_qualified` | flag | 1 for captured qualified evidence still within its deadlines; 0 only for explicitly current `change_only_unverified` evidence. Missing, unaccepted, stale, future or expired-snapshot evidence is unknown. The existing evaluator currently emits change-only-unverified only with old/future reports, which therefore remain unknown here. |
 | `source_{source}_reason_code` | code | Bounded evidence explanation below. It can explain stale/missing evidence while qualified is unknown. Before any capture it is unknown. |
@@ -169,7 +170,7 @@ not invent a rejection cause; it covers missing, unavailable, invalid, restored,
 assumed or inactive-dependent sources omitted by the existing evaluator. Specific
 causes remain in existing warnings. Code 1 is reserved for explicitly unverified
 evidence whose report itself is current; old change-only values use code 4. A
-qualified HA report without measurement_at does not prove physical acquisition
+qualified HA report or packet receipt without measurement_at does not prove physical acquisition
 time, a new independent measurement, or qualified progress history.
 
 ## Auxiliary event and current-state sensors (existing)

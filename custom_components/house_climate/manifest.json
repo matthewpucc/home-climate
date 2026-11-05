@@ -1,7 +1,7 @@
 {
   "domain": "house_climate",
   "name": "Home Climate",
-  "version": "0.9.9",
+  "version": "0.9.10",
   "codeowners": [
     "@matthewpucc"
   ],
@@ -11,5 +11,8 @@
   "integration_type": "service",
   "iot_class": "calculated",
   "requirements": [],
-  "single_config_entry": true
+  "single_config_entry": true,
+  "after_dependencies": [
+    "govee_ble"
+  ]
 }

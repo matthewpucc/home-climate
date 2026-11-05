@@ -24,7 +24,7 @@ FAN_FIELDS = ("requested_percent", "reported_percent", "reported_at", "speed_ack
               "speed_pending", "speed_failed", "requested_lower_angle", "requested_upper_angle",
               "reported_lower_angle", "reported_upper_angle", "airflow_acknowledged",
               "airflow_pending", "airflow_phase_code")
-SOURCE_FIELDS = ("reported_at", "measurement_at", "qualified", "reason_code")
+SOURCE_FIELDS = ("reported_at", "packet_received_at", "measurement_at", "qualified", "reason_code")
 
 
 def number(value):
@@ -193,19 +193,21 @@ def source_values(status, room, source, config, now, snapshot_age):
         evidence = status.get("rooms", {}).get(room, {}).get("source_evidence", ())
     sample = next((row for row in evidence if row.get("source") == source), {})
     reported, measurement = timestamp(sample.get("reported_at")), timestamp(sample.get("measurement_at"))
-    values = {"reported_at": reported, "measurement_at": measurement}
+    received = timestamp(sample.get("packet_received_at"))
+    values = {"reported_at": reported, "packet_received_at": received, "measurement_at": measurement}
     if not fresh(sampled_at, now, snapshot_age):
         if sampled_at is not None:
             values["reason_code"] = SOURCE_CODES["snapshot_expired"]
         return values
     reason = "not_accepted"
     if sample:
-        if any(stamp is not None and stamp > now for stamp in (reported, measurement)):
+        if any(stamp is not None and stamp > now for stamp in (reported, measurement, received)):
             reason = "future"
         elif room is None:
             expiry = number(sample.get("valid_until"))
             reason = "qualified" if expiry is not None and now < expiry else "report_expired"
-        elif (not fresh(reported, now, config.sensor_stale_seconds)
+        elif (not (fresh(reported, now, config.sensor_stale_seconds)
+                       or fresh(received, now, config.sensor_stale_seconds))
               or measurement is not None and not fresh(measurement, now, config.sensor_stale_seconds)):
             reason = "report_expired"
         else:

@@ -124,6 +124,21 @@ class PurifierAliasGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(restored.recovering)
         return restored, stored
 
+    async def test_dashboard_positive_override_requires_identity_when_configured_floor_is_zero(self):
+        runtime = await self.ready(minimum=0)
+        room = next(f.room for f in runtime.config.fan_controls.values() if f.entity_id == self.fan)
+        er.async_get(self.hass).async_update_entity(self.fan, device_id=None)
+        self.assertIsNone(configuration.purifier_identity_issue(
+            self.hass, runtime.config, self.fan, controls=runtime.controls))
+        await runtime.purifier_speeds.async_set(room, 70)
+        self.assertIn("unverified", configuration.purifier_identity_issue(
+            self.hass, runtime.config, self.fan, controls=runtime.controls))
+        # Known aliases still block even explicit Off.
+        self.alias()
+        await runtime.purifier_speeds.async_set(room, 0)
+        self.assertIn("alias", configuration.purifier_identity_issue(
+            self.hass, runtime.config, self.fan, activation=False, controls=runtime.controls))
+
     async def test_setup_rejects_known_auxiliary_alias_even_without_a_floor(self):
         self.alias()
         for minimum in (0, 20):

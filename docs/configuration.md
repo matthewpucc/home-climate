@@ -98,6 +98,34 @@ Existing unfinished recovery plans retain their saved targets; upgrading does no
 
 ### Room speed overrides
 
+For routine changes, open the **Home Climate device** in Devices & services
+(or add its entities to your dashboard). Each room with a configured purifier
+has **<Room> purifier speed override**, a 0–100% number, and **<Room> resume
+automatic purifier speed**, a button. Setting the number saves immediately and
+wakes the controller for its next decision; no YAML/JSON edit or integration
+reload is needed. Entering **0% means Off** during active control. Press the
+button to clear only that room's override and resume its baseline, schedules and
+thermal behavior. In automatic mode the override number is empty/unknown and
+its `speed_mode` attribute reads `automatic`.
+
+Dashboard edits persist across restarts and apply to all configured ordinary
+fans in that room. Other rooms and the auxiliary heater are unaffected. They are
+independent of temperature Hold and work in Preview too; Preview saves intent
+without sending equipment commands. Live permission and ownership still govern
+actual actuation. Existing device speed rounding and direction checks apply.
+
+The dashboard setting takes precedence over that room's configured speed
+including an existing `room_overrides` entry. Resume automatic explicitly
+removes that speed for active control; it does not restore an older configured
+fixed percentage. Dashboard intent remains valid while that room's fan rules
+and bindings are unchanged. An intentional change to those rules supersedes
+its saved dashboard setting; other rooms' settings survive. Already armed
+recovery plans retain their saved targets, and newly armed recovery plans use
+the effective override as their baseline, subject to the configured fallback.
+
+The configuration editor remains available for baseline policy and unbound
+room preferences. Its edits use the normal integration reload:
+
 In **Configure → Purifier speeds and room overrides**, add `room_overrides` to
 hold a requested speed independently for each room. For example:
 

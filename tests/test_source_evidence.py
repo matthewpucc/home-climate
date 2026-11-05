@@ -24,6 +24,23 @@ def configuration(probes):
 
 
 class SourceEvidenceTests(unittest.TestCase):
+    def test_packet_receipt_cannot_renew_malformed_future_or_mismatched_evidence(self):
+        probe = Probe("sensor.a", "desk")
+        state = sample(68, NOW - timedelta(hours=1))
+        for receipt in ({}, {"received_at": NOW.timestamp()},
+                        {"received_at": NOW.timestamp(), "temperature_c": True},
+                        {"received_at": NOW.timestamp(), "temperature_c": float("nan")},
+                        {"received_at": NOW.timestamp() + 1, "temperature_c": 20},
+                        {"received_at": NOW.timestamp() - 901, "temperature_c": 20},
+                        {"received_at": NOW.timestamp(), "temperature_c": 25}):
+            with self.subTest(receipt=receipt), self.assertRaises(ValueError):
+                probe_evidence(probe, {"sensor.a": {**state, "bluetooth_temperature_receipt": receipt}}, NOW, 900)
+        evidence = probe_evidence(probe, {"sensor.a": {**state, "bluetooth_temperature_receipt": {
+            "received_at": NOW.timestamp(), "temperature_c": 20}}}, NOW, 900)
+        self.assertEqual(evidence["reported_at"], (NOW - timedelta(hours=1)).timestamp())
+        self.assertIsNone(evidence["observed_at"])
+        self.assertIsNone(evidence["measurement_at"])
+
     def test_external_head_probe_is_explicit_and_roundtrips_without_offset_guess(self):
         raw = example_bindings().to_dict()
         raw["rooms"]["office"].append({"entity_id": raw["heads"]["bonus"],

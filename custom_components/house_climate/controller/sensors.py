@@ -69,7 +69,17 @@ def probe_evidence(probe: Probe, states: dict, now: datetime, stale_seconds: flo
     stamp = state.get("last_reported") or state.get("last_updated")
     timestamp = _aware_timestamp(stamp)
     age = (now - timestamp).total_seconds()
-    if age < -60 or (age > stale_seconds and not probe.report_on_change):
+    receipt = state.get("bluetooth_temperature_receipt") if probe.attribute is None else None
+    received = None
+    if isinstance(receipt, dict):
+        candidate = receipt.get("received_at")
+        packet_temperature = receipt.get("temperature_c")
+        if (not isinstance(candidate, bool) and isinstance(candidate, (int, float))
+                and math.isfinite(candidate) and 0 <= now.timestamp() - candidate <= stale_seconds
+                and not isinstance(packet_temperature, bool) and isinstance(packet_temperature, (int, float))
+                and math.isfinite(packet_temperature) and -40 <= packet_temperature <= 60):
+            received = candidate
+    if age < -60 or (age > stale_seconds and received is None and not probe.report_on_change):
         raise ValueError("stale/future reading")
     acquired = None
     acquisition_entity = getattr(probe, "observation_time_entity", None)
@@ -90,14 +100,20 @@ def probe_evidence(probe: Probe, states: dict, now: datetime, stale_seconds: flo
     value = to_f(float(raw), unit) + probe.offset_f
     if not math.isfinite(value) or not -40 <= value <= 140:
         raise ValueError("implausible temperature")
+    if received is not None:
+        packet_value = to_f(float(receipt["temperature_c"]), "°C") + probe.offset_f
+        if not math.isfinite(packet_value) or abs(packet_value - value) > .11:
+            raise ValueError("packet/entity temperature mismatch")
     qualified = 0 <= age <= stale_seconds
     observed = acquired or timestamp
     return {"source": probe.source.strip(), "entity_id": probe.entity_id,
             "temperature_f": value, "reported_at": timestamp.timestamp(),
             "observed_at": observed.timestamp() if qualified else None,
             "measurement_at": acquired.timestamp() if acquired else None,
-            "timestamp_kind": "device_observation" if acquired else "ha_report",
-            "freshness": "qualified" if qualified else "change_only_unverified"}
+            "timestamp_kind": ("device_observation" if acquired else
+                               "bluetooth_packet_receipt" if received is not None and not qualified else "ha_report"),
+            **({"packet_received_at": received} if received is not None else {}),
+            "freshness": "qualified" if qualified or received is not None else "change_only_unverified"}
 
 
 @dataclass(frozen=True)

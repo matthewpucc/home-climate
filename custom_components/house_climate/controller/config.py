@@ -624,6 +624,7 @@ class Settings:
     toggles: dict[str, bool]
     room_profiles: dict[str, Profile] = field(default_factory=dict)
     seasonal_profile: str = "cool"
+    room_fan_overrides: dict[str, float | None] = field(default_factory=dict)
 
     @classmethod
     def read(cls, states, config, strict=False):

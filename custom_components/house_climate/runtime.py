@@ -145,6 +145,7 @@ class NativeAPI:
         self._uncertain_service_entities = set()
         self.service_notify = None
         self.settings_provider = None
+        self.bluetooth_freshness = None
         # Volatile controller metadata survives a worker/executor replacement
         # on this runtime, without becoming a persisted emergency-guard latch.
         self.auxiliary_startup_failure = None
@@ -367,6 +368,8 @@ class NativeAPI:
                     "last_changed": state.last_changed.isoformat(),
                     "last_updated": state.last_updated.isoformat(),
                     "last_reported": state.last_reported.isoformat(),
+                    **({"bluetooth_temperature_receipt": receipt}
+                       if self.bluetooth_freshness and (receipt := self.bluetooth_freshness.evidence(entity_id, state)) else {}),
                     **({"integration_repair": repair} if (repair := self.repair_gate.overlay(entity_id)) else {}),
                     **({"airflow_identity": airflow_identity} if airflow_identity else {}),
                 })
@@ -753,6 +756,7 @@ class ControllerRuntime:
         self.wake_event = threading.Event()
         self.controls = None
         self.comfort = None
+        self.purifier_speeds = None
         self.house_policy = house_policy
         self.power_bindings = power_bindings
         self.power_guard = None
@@ -800,18 +804,26 @@ class ControllerRuntime:
             self.seasonal_state = SeasonalState(self.hass, entry_id)
             await self.seasonal_state.async_load()
             await self.comfort.async_load()
+            from .purifier import RoomPurifierSpeeds
+            self.purifier_speeds = RoomPurifierSpeeds(
+                self.hass, self.config, entry_id, self._async_comfort_changed, self.wake_event)
+            await self.purifier_speeds.async_load()
+            from .bluetooth_freshness import BluetoothFreshness
+            self.api.bluetooth_freshness = BluetoothFreshness(self.hass, self.config)
+            self.api.bluetooth_freshness.async_start()
             if hasattr(self.comfort, "set_seasonal_profile"):
                 self.comfort.set_seasonal_profile(self.seasonal_state.profile)
             if self.notification_settings is not None:
                 from .notifications import AlertManager
                 self.notifications = AlertManager(self.hass, entry_id, self.notification_settings,
                                                   self._notification_changed)
-            self.api.settings_provider = self.comfort.settings
+            self.api.settings_provider = self._settings
             await self.recovery.capabilities.async_load(entry_id)
             if not self.config.legacy:
                 from .controls import NativeControls
                 self.controls = NativeControls(self.hass, self.config, self.live, entry_id,
                                                self._async_controls_changed)
+                self.controls.fan_controls_provider = self.purifier_speeds.fan_controls
                 self.api.controls = self.controls
                 self.controls.pending_device_jobs = lambda entities: (
                     self.api.service_jobs(entities) or self.api.uncertain_service_jobs(entities))
@@ -843,7 +855,15 @@ class ControllerRuntime:
             if self.power_guard is not None:
                 await self.power_guard.async_close()
             await self.comfort.async_close()
+            if self.purifier_speeds:
+                await self.purifier_speeds.async_close()
+            if self.api.bluetooth_freshness:
+                self.api.bluetooth_freshness.async_close()
             raise
+
+    def _settings(self, states, config, now, strict=False):
+        settings = self.comfort.settings(states, config, now, strict=strict)
+        return self.purifier_speeds.settings(settings) if self.purifier_speeds else settings
 
     @callback
     def _notification_changed(self):
@@ -1105,7 +1125,7 @@ class ControllerRuntime:
             args = SimpleNamespace(live=self.live, once=False, snapshot=None, at=None)
             run_loop(args, self.config, ha_client=self.api,
                      stop_event=self.stop_event, wake_event=self.wake_event, event_callback=self._report,
-                     settings_provider=self.comfort.settings if self.comfort else None)
+                     settings_provider=self._settings if self.comfort else None)
         except Exception as exc:
             error = str(exc)
             _LOGGER.exception("Controller worker stopped unexpectedly")
@@ -1332,6 +1352,10 @@ class ControllerRuntime:
         self._set_unload_phase("comfort_storage")
         if self.comfort:
             await self.comfort.async_close()
+            if self.purifier_speeds:
+                await self.purifier_speeds.async_close()
+            if self.api.bluetooth_freshness:
+                self.api.bluetooth_freshness.async_close()
         self._set_unload_phase("integration_recovery")
         recovery_closed = await self.recovery.async_close()
         self._set_unload_phase("ownership_storage")
