@@ -144,7 +144,9 @@ def arm(controls, devices):
         "requests": {}, "completed": [], "problems": {}, "stop_started": None,
         "settle_until": None,
     }
-    minimums = {fan.entity_id: fan.purification_minimum for fan in controls.config.fan_controls.values()
+    provider = getattr(controls, "fan_controls_provider", None)
+    fans = provider() if provider else controls.config.fan_controls
+    minimums = {fan.entity_id: fan.purification_minimum for fan in fans.values()
                 if fan.entity_id in plan["fans"] and fan.purification_minimum > 0}
     if minimums:
         plan["fan_minimum_percentages"] = minimums

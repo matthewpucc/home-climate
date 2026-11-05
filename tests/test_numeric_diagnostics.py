@@ -35,6 +35,25 @@ class NumericDiagnosticTests(unittest.TestCase):
             "fan_airflow": {FAN: {"requested": {"lower_angle": 100, "upper_angle": 190},
                 "execution": {"phase": "angles"}}}}
 
+    def test_packet_freshness_is_separate_from_report_and_acquisition_and_expires(self):
+        old = self.wall - self.cfg.sensor_stale_seconds - 1
+        sample = {"source": "desk", "reported_at": old, "packet_received_at": self.wall,
+                  "measurement_at": None, "freshness": "qualified"}
+        status = {"timestamp": self.wall, "rooms": {"alpha": {"source_evidence": [sample]}}}
+        result = source_values(status, "alpha", "desk", self.cfg, self.wall, 30)
+        self.assertEqual(result["qualified"], 1)
+        self.assertEqual(result["reported_at"], old)
+        self.assertEqual(result["packet_received_at"], self.wall)
+        self.assertIsNone(result["measurement_at"])
+        sample["packet_received_at"] = old
+        self.assertEqual(source_values(status, "alpha", "desk", self.cfg, self.wall, 30)["reason_code"],
+                         SOURCE_CODES["report_expired"])
+        sample["packet_received_at"] = self.wall + 1
+        self.assertEqual(source_values(status, "alpha", "desk", self.cfg, self.wall, 30)["reason_code"],
+                         SOURCE_CODES["future"])
+        sample["packet_received_at"], sample["measurement_at"] = self.wall, old
+        self.assertIsNone(source_values(status, "alpha", "desk", self.cfg, self.wall, 30)["qualified"])
+
     def test_fan_zero_missing_stale_future_and_untrusted_are_distinct(self):
         for attr in ("percentage", "angle_low", "angle_high"):
             for invalid in (None, True, float("nan"), -1, 361):

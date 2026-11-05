@@ -21,6 +21,8 @@ Existing installs update in place. The old private filename `house_climate_bindi
 
 See the [configuration guide](docs/configuration.md) for the editor, default schedules, source descriptors, manual takeover and notification routing.
 
+Use the [room purifier speed controls](docs/configuration.md#room-speed-overrides) for persistent per-room percentages without reloading. Supported [Govee H5100 packet freshness](docs/bluetooth-freshness.md) can keep stable readings eligible when valid raw packets continue.
+
 Supported purifiers can use [demand-directed room airflow](docs/directed-airflow.md), with named per-device sweeps, provisional calibration metadata and fresh settings acknowledgement before directional boosts. Comfort airflow does not replace HVAC demand.
 
 ## Configurable comfort

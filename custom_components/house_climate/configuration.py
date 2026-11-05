@@ -87,8 +87,10 @@ def purifier_identity_issue(hass, config, entity, *, activation=True, require_id
     fan_device = fan_entry.device_id if fan_entry else None
     if fan_device and fan_device in heater_devices:
         return "Purifier binding is an auxiliary heater fan alias; use a separate physical purifier"
+    provider = getattr(controls, "fan_controls_provider", None)
+    fans = provider() if provider else config.fan_controls
     explicit_floor = any(fan.entity_id == entity and fan.purification_minimum > 0
-                         for fan in config.fan_controls.values())
+                         for fan in fans.values())
     if activation and (explicit_floor or require_identity) and (None in heater_devices or not fan_device):
         return "Purifier device identity is unverified; a separate device from the auxiliary heater is required"
     return None

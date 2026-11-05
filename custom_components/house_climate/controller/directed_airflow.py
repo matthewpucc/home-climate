@@ -63,7 +63,7 @@ class DirectedAirflow:
         return None
 
     def update(self, plan, rooms, now, *, allow_start=True):
-        for fan in self.policy.config.fan_controls.values():
+        for fan in self.policy.fan_controls.values():
             if fan.airflow is None:
                 continue
             entity, config = fan.entity_id, fan.airflow
