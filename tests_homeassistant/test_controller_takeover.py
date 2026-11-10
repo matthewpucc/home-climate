@@ -312,7 +312,7 @@ class ControllerTakeoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(c.enabled)
         self.assertFalse(c.enabled_intent)
         self.assertIsNotNone(c.handoff)
-        self.assertIn(c.handoff['stage'], ('armed', 'stopping', 'settling'))
+        self.assertIn(c.handoff['stage'], ('armed', 'stopping', 'applying'))
 
     async def test_normal_worker_restarts_after_wrong_preset_without_matching_it(self):
         runtime, c, _ = await self.failed_preset()

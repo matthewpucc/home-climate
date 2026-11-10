@@ -10,10 +10,12 @@ import asyncio
 from dataclasses import dataclass
 import hashlib
 import logging
+import math
 import re
 import time
 
 from .controller.notifications import NotificationSettings
+from .handoff import HANDOFF_RETRY_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 SERVICE_TIMEOUT_SECONDS = 5.0
@@ -58,6 +60,8 @@ class AlertManager:
         self._service_tasks: set[asyncio.Task] = set()
         self._status_keys: set[str] = set()
         self._status_fault = None
+        self._recovery_identity = None
+        self._recovery_grace_until = None
         self._closed = False
 
     @property
@@ -93,14 +97,71 @@ class AlertManager:
         # Stable IDs without collisions from replacing punctuation in entity IDs.
         return f"{kind}_{hashlib.sha256(str(identity).encode()).hexdigest()[:16]}"
 
+    def _actionable_recovery_problems(self, handoff):
+        """Give initial ownership settings one bounded retry interval to settle.
+
+        Start before capability validation or dispatch, not at the first error.
+        Persisted wall time bounds restored plans; a monotonic deadline prevents
+        wall-clock changes or repeated status reports extending this grace.
+        Safety/stop failures and subsequent attempts never receive this grace.
+        """
+        problems = handoff.get("problems") or {}
+        if not handoff:
+            self._recovery_identity = self._recovery_grace_until = None
+            return problems
+        if handoff.get("stage") != "applying":
+            return problems
+        identity = (handoff.get("applying_started"), handoff.get("stop_started"))
+        if self._recovery_grace_until is None or identity != self._recovery_identity:
+            self._recovery_identity = identity
+            self._recovery_grace_until = self._clock() + HANDOFF_RETRY_SECONDS
+        if handoff.get("interrupted") or not isinstance(problems, dict):
+            return problems
+        started = handoff.get("applying_started")
+        if started is not None:
+            if (isinstance(started, bool) or not isinstance(started, (int, float))
+                    or not math.isfinite(started)):
+                return problems
+            age = time.time() - started
+            if age < 0:
+                return problems
+            self._recovery_grace_until = min(
+                self._recovery_grace_until,
+                self._clock() + max(0, HANDOFF_RETRY_SECONDS - age))
+        if self._clock() >= self._recovery_grace_until:
+            return problems
+        devices = set(handoff.get("heads") or ()) | set(handoff.get("fans") or ())
+        requests = handoff.get("requests") or {}
+        actionable = {}
+        for entity, reason in problems.items():
+            request = requests.get(entity)
+            if entity not in devices:
+                actionable[entity] = reason
+                continue
+            if request is None:
+                continue  # Capability validation can fail before reservation.
+            if not isinstance(request, dict):
+                actionable[entity] = reason
+                continue
+            first_at = request.get("first_at", request.get("at"))
+            attempts = request.get("attempts", 1)
+            if (type(attempts) is not int or attempts != 1
+                    or any(request.get(flag) for flag in (
+                        "uncertain", "cancelled_before_dispatch", "operator_changed"))
+                    or isinstance(first_at, bool) or not isinstance(first_at, (int, float))
+                    or not math.isfinite(first_at)
+                    or not 0 <= time.time() - first_at < HANDOFF_RETRY_SECONDS):
+                actionable[entity] = reason
+        return actionable
+
     def observe_status(self, status):
         """Route actionable controller evidence; ordinary timers remain quiet."""
         if self._closed:
             return
         conditions = {}
         handoff = status.get("handoff") or {}
-        if handoff.get("problems") or handoff.get("stage") == "failed":
-            problems = handoff.get("problems") or {}
+        problems = self._actionable_recovery_problems(handoff)
+        if problems or handoff.get("stage") == "failed":
             detail = ("; ".join(f"{device}: {reason}" for device, reason in problems.items())
                       if isinstance(problems, dict) else str(problems))
             conditions["recovery_handoff"] = (

@@ -258,6 +258,129 @@ class NotificationRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[0][0], "fixture_critical")
         self.assertEqual(manager.diagnostics["active"][0]["key"], "recovery_handoff")
 
+    def recovery_status(self, *, started=1000.0, request=None):
+        plan = {"stage": "applying", "heads": ["climate.fixture_head"], "fans": [],
+                "stop_started": 999.0, "applying_started": started,
+                "requests": {}, "problems": {"climate.fixture_head":
+                    "Recovery Auto is rejected by the current provider capability"}}
+        if request is not None:
+            plan["requests"]["climate.fixture_head"] = request
+        return {"event": "stopped", "handoff": plan}
+
+    def observe_recovery(self, status, *, wall_time=1000.0):
+        with patch("custom_components.house_climate.notifications.time.time", return_value=wall_time):
+            self.manager.observe_status(status)
+
+    async def test_initial_predispatch_capability_failure_resolving_is_quiet(self):
+        manager = self.start(critical=True)
+        status = self.recovery_status()
+        self.observe_recovery(status)
+        self.clock += 14
+        self.observe_recovery(status, wall_time=1014)
+        self.assertEqual(manager.diagnostics["active"], [])
+        self.assertEqual(self.notice, {})
+        status["handoff"] = None
+        self.observe_recovery(status, wall_time=1015)
+        self.clock += 20
+        self.observe_recovery(status, wall_time=1035)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.calls, [])
+
+    async def test_initial_predispatch_capability_failure_alerts_after_grace(self):
+        manager = self.start(critical=True)
+        status = self.recovery_status()
+        for elapsed in (0, 1, 5, 14):
+            self.clock = 100 + elapsed
+            self.observe_recovery(status, wall_time=1000 + elapsed)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.calls, [])
+        self.clock = 115
+        self.observe_recovery(status, wall_time=1015)
+        await self.hass.async_block_till_done()
+        self.assertEqual([kind for kind, _ in self.calls], ["fixture_critical"])
+        self.assertIn("rejected", manager.diagnostics["active"][0]["message"])
+        self.clock += 60
+        self.observe_recovery(status, wall_time=1075)
+        await self.hass.async_block_till_done()
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_first_service_rejection_quiet_but_later_attempt_alerts(self):
+        self.start(critical=True)
+        status = self.recovery_status(request={"at": 1000.0, "attempts": 1,
+            "dispatched": True, "service_failed": True, "rejected": True})
+        self.observe_recovery(status)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.calls, [])
+        status["handoff"]["requests"]["climate.fixture_head"]["attempts"] = 2
+        self.observe_recovery(status)
+        await self.hass.async_block_till_done()
+        self.assertEqual([kind for kind, _ in self.calls], ["fixture_critical"])
+
+    async def test_old_and_interrupted_recovery_alerts_without_new_grace(self):
+        manager = self.start(critical=True)
+        variants = [self.recovery_status(started=980),
+                    self.recovery_status(request={"at": 980.0, "attempts": 1}),
+                    self.recovery_status(request={"at": 1000.0, "attempts": 3})]
+        interrupted = self.recovery_status()
+        interrupted["handoff"]["interrupted"] = True
+        variants.append(interrupted)
+        for flag in ("uncertain", "cancelled_before_dispatch", "operator_changed"):
+            variants.append(self.recovery_status(request={"at": 1000.0, flag: True}))
+        for status in variants:
+            with self.subTest(handoff=status["handoff"]):
+                manager.observe_status({"handoff": None})
+                self.observe_recovery(status)
+                await self.hass.async_block_till_done()
+                self.assertEqual(manager.diagnostics["active"][0]["severity"], "critical")
+        self.assertEqual(len(self.calls), len(variants))
+
+    async def test_legacy_grace_does_not_restart_when_errors_clear_or_change(self):
+        self.start(critical=True)
+        status = self.recovery_status(started=None)
+        self.observe_recovery(status)
+        self.clock += 10
+        status["handoff"]["problems"] = {}
+        self.observe_recovery(status)
+        self.clock += 5
+        status["handoff"]["problems"] = {"climate.fixture_head": "Different capability error"}
+        self.observe_recovery(status)
+        await self.hass.async_block_till_done()
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_grace_starts_before_first_error_and_survives_clock_rollback(self):
+        self.start(critical=True)
+        status = self.recovery_status()
+        status["handoff"]["problems"] = {}
+        self.observe_recovery(status)
+        self.clock += 15
+        status["handoff"]["problems"] = {"climate.fixture_head": "Range unconfirmed"}
+        self.observe_recovery(status, wall_time=1001)
+        await self.hass.async_block_till_done()
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_recovery_grace_never_suppresses_stop_or_emergency_alerts(self):
+        manager = self.start(critical=True)
+        status = self.recovery_status()
+        status["handoff"]["problems"]["head_stop"] = "Off not confirmed"
+        status["shared_stop"] = {"climate.fixture_other": {"failed": True, "confirmed": False}}
+        self.observe_recovery(status)
+        self.battery()
+        await self.hass.async_block_till_done()
+        self.assertEqual(len(self.calls), 3)
+        recovery = next(item for item in manager.diagnostics["active"] if item["key"] == "recovery_handoff")
+        self.assertIn("Off not confirmed", recovery["message"])
+        self.assertNotIn("provider capability", recovery["message"])
+
+    async def test_new_handoff_after_completion_receives_its_own_grace(self):
+        manager = self.start(critical=True)
+        self.observe_recovery(self.recovery_status(started=980))
+        await self.hass.async_block_till_done()
+        manager.observe_status({"handoff": None})
+        self.observe_recovery(self.recovery_status(started=1000))
+        await self.hass.async_block_till_done()
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(manager.diagnostics["active"], [])
+
     async def test_outdoor_primary_warmup_quiet_but_fallback_or_unverified_requires_attention(self):
         manager = self.start()
         status = {"event": "live", "control_enabled": True, "seasonal": {
