@@ -193,10 +193,9 @@ class HandoffSafetyTests(unittest.IsolatedAsyncioTestCase):
             return task
 
         try:
-            await controls.async_set_enabled(False)
-            await controls.async_check()
-            await asyncio.sleep(.02)
-            with patch.object(self.hass, "async_create_background_task", side_effect=create):
+            with (patch.object(controls, "_schedule_check"),
+                  patch.object(self.hass, "async_create_background_task", side_effect=create)):
+                await controls.async_set_enabled(False)
                 await controls.async_check()
                 await self.settle_watchdog(controls)
             self.assertEqual(len(cancelled), 1)

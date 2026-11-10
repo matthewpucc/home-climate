@@ -43,14 +43,14 @@ class UnloadLifecycleTests(unittest.IsolatedAsyncioTestCase):
             })
         return await self.runtime(cfg=cfg)
 
-    async def test_budget_includes_mandatory_settle_and_feedback_without_double_counting(self):
+    async def test_budget_includes_stop_and_feedback_without_transition_delay(self):
         runtime, _ = await self.runtime()
         self.assertEqual(runtime._unload_budget_seconds(), 120)
         runtime.config = replace(runtime.config, fallback=FallbackPolicy(),
                                  command_timeout_seconds=45, head_minimum_off_seconds=180,
                                  off_settle_seconds=30, head_activation_timeout_seconds=120)
         device_count = len(set((*runtime.config.climate_entities, *runtime.config.fans.values())))
-        self.assertEqual(runtime._unload_budget_seconds(), 45 + 45 + 180 + 120 + 5 * device_count + 20)
+        self.assertEqual(runtime._unload_budget_seconds(), 45 + 45 + 120 + 5 * device_count + 20)
 
     async def test_healthy_fallback_can_outlast_old_ack_budget_and_reload(self):
         runtime, _ = await self.fallback_runtime()

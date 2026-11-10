@@ -408,7 +408,8 @@ class NativeControls:
                         raise HAError("Fresh head Off reports after the failed recovery are required before retry")
                 previous = deepcopy(plan)
                 self.handoff = {**plan, "stage": "stopping", "requests": {}, "completed": [],
-                                "problems": {}, "stop_started": None, "settle_until": None}
+                                "problems": {}, "stop_started": None, "settle_until": None,
+                                "applying_started": None}
                 self.handoff.pop("interrupted", None)
                 self.handoff.pop("resume_after", None)
                 try:

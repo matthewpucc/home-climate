@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Keep the first recovery-setting failure quiet for one bounded 15-second interval, including a provider capability rejection before dispatch. Retain diagnostic problems, then notify on persistent or repeated failures; interrupted/uncertain recovery and independent stop/emergency alerts remain actionable.
+
+- Apply shutdown recovery Auto immediately after confirmed shared-head Off and prior-command cleanup, without waiting the active-control minimum-Off/settling interval. Preserve ordinary Heat/Cool transition timing, preset acknowledgements, retained ownership, auxiliary shutdown and emergency protection. Remove that unused interval from the bounded unload budget.
+
 ## 0.9.10
 
 - Add persistent room purifier percentage controls and a per-room resume-automatic button without integration reload. Preserve explicit zero/off, other rooms, supported speed rounding, direction/identity checks and saved recovery plans.

@@ -105,7 +105,7 @@ def _mode_retry_evidence(controls, request, state, current):
 
     Off commonly has no range fields. Unlike range retries, require feedback
     after the completed handler and refuse a return to Off after activation.
-    The original stop/settle barrier and first-attempt deadline still apply.
+    The original stop barrier and first-attempt deadline still apply.
     """
     if (request.get("service_failed")
             or state.last_reported.timestamp() <= request["finished_at"]
@@ -142,7 +142,7 @@ def arm(controls, devices):
         "heat_low_f": fallback.heat_low_f, "cool_high_f": fallback.cool_high_f,
         "fan_percentage": fallback.fan_percentage,
         "requests": {}, "completed": [], "problems": {}, "stop_started": None,
-        "settle_until": None,
+        "settle_until": None, "applying_started": None,
     }
     provider = getattr(controls, "fan_controls_provider", None)
     fans = provider() if provider else controls.config.fan_controls
@@ -313,19 +313,25 @@ async def step(controls):
             await _save(controls)
         if plan["stage"] == "blocked":
             return
-        plan["stage"] = "settling"
-        plan["settle_until"] = now() + max(controls.config.off_settle_seconds,
-                                           controls.config.head_minimum_off_seconds)
+        # Terminal Auto hands compressor timing back to the heat pump. Keep
+        # confirmed Off and actual-command cleanup, but do not apply the
+        # controller's normal Heat/Cool transition or minimum-Off timers.
+        plan["stage"], plan["settle_until"] = "applying", None
+        plan["applying_started"] = plan.get("applying_started") or now()
         await _save(controls)
     if plan["stage"] == "settling":
+        # Accept an older persisted stage without serving its obsolete timer.
         if not all(controls._is_off(e) for e in plan["heads"]):
             plan["stage"], plan["settle_until"] = "stopping", None
             await _save(controls)
             return
-        if now() < plan["settle_until"]:
+        heads = set(plan["heads"])
+        if (controls.stop_jobs(heads) or controls.pending_device_jobs(heads)
+                or controls.inflight > controls.auxiliary_inflight):
             controls._publish()
             return
-        plan["stage"] = "applying"
+        plan["stage"], plan["settle_until"] = "applying", None
+        plan["applying_started"] = plan.get("applying_started") or now()
         await _save(controls)
     if plan["stage"] != "applying":
         return

@@ -1254,13 +1254,12 @@ class ControllerRuntime:
         return True
 
     def _unload_budget_seconds(self):
-        """Allow the existing physical settle/feedback windows before failure."""
+        """Allow bounded stop and fallback-feedback windows before failure."""
         if self.config.fallback is None:
             return UNLOAD_ACK_TIMEOUT_SECONDS
         devices = len(set((*self.config.climate_entities, *self.config.fans.values())))
         return max(UNLOAD_ACK_TIMEOUT_SECONDS,
                    WORKER_STOP_TIMEOUT_SECONDS + self.config.command_timeout_seconds
-                   + max(self.config.head_minimum_off_seconds, self.config.off_settle_seconds)
                    + self.config.head_activation_timeout_seconds + 5 * devices + 20)
 
     def _set_unload_phase(self, phase):
