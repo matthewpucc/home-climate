@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.11
 
 - Keep the first recovery-setting failure quiet for one bounded 15-second interval, including a provider capability rejection before dispatch. Retain diagnostic problems, then notify on persistent or repeated failures; interrupted/uncertain recovery and independent stop/emergency alerts remain actionable.
 
