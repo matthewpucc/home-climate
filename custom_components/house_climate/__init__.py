@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import math
+import sqlite3
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
+from homeassistant.core import SupportsResponse
 from homeassistant.exceptions import ConfigEntryError, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers.start import async_at_started
 import voluptuous as vol
@@ -95,6 +97,23 @@ async def async_setup_entry(hass, entry):
         except (RuntimeError, ValueError) as exc:
             raise HomeAssistantError(str(exc)) from exc
 
+    async def thermal_history_query(call):
+        history = runtime.thermal_storage
+        if hass.data.get(DOMAIN) is not runtime or history is None:
+            raise HomeAssistantError("Thermal history is unavailable")
+        from .controller.thermal_history import read_history
+        try:
+            return await hass.async_add_executor_job(
+                read_history, history.path, call.data["start"], call.data["end"], call.data["limit"])
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            raise HomeAssistantError("Thermal history query failed; check storage diagnostics") from exc
+
+    hass.services.async_register(DOMAIN, "thermal_history_query", thermal_history_query,
+        schema=vol.Schema({vol.Required("start"):vol.Coerce(float),
+                           vol.Required("end"):vol.Coerce(float),
+                           vol.Optional("limit", default=200):vol.All(vol.Coerce(int),vol.Range(min=1,max=1000))}),
+        supports_response=SupportsResponse.ONLY)
+
     hass.services.async_register(DOMAIN, "approve_heater_restore", approve_heater_restore,
         schema=vol.Schema({vol.Required("confirm"): vol.All(bool, vol.In((True,)))}))
     hass.services.async_register(DOMAIN, "generate_package", generate_package)
@@ -127,6 +146,7 @@ async def async_unload_entry(hass, entry):
         unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         if unloaded:
             hass.services.async_remove(DOMAIN, "generate_package")
+            hass.services.async_remove(DOMAIN, "thermal_history_query")
             hass.services.async_remove(DOMAIN, "commission_heater_relay")
             hass.services.async_remove(DOMAIN, "approve_heater_restore")
             # A timed-out caller still owns this retained runtime until its

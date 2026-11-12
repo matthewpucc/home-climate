@@ -9,7 +9,9 @@ async def async_get_config_entry_diagnostics(hass, entry):
     bluetooth = getattr(getattr(entry.runtime_data, "api", None), "bluetooth_freshness", None)
     runtime = entry.runtime_data
     heads = getattr(getattr(runtime, "config", None), "heads", {})
-    return {"head_transitions": {
+    history = getattr(runtime, "thermal_storage", None)
+    return {"thermal_storage": history.diagnostics if history else {"status": "unavailable"},
+            "head_transitions": {
                 "history_limit_per_head": HEAD_TRANSITION_LIMIT,
                 "persistence": "process_local",
                 "recent_events": bounded_head_history(getattr(runtime, "status", {}), heads.values())},
