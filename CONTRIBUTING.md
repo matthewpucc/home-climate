@@ -32,7 +32,7 @@ home-climate --config config.example.toml demo
 Native integration (Python 3.14):
 
 ```sh
-python -m pip install -e '.[test]' 'homeassistant==2026.10.4' 'prometheus-client==0.21.0'
+python -m pip install -e '.[test]' 'homeassistant==2026.11.1' 'prometheus-client==0.21.0'
 python tests_homeassistant/install_bluetooth_requirements.py
 python -m unittest discover -s tests_homeassistant -v
 python scripts/package_hacs.py
@@ -46,7 +46,7 @@ Keep versions aligned in `pyproject.toml`, the integration manifest, and add-on 
 
 The Build and release workflow runs tests before building native installation artifacts, source-build add-on bundles, and AMD64/ARM64 GHCR images. Pull requests do not publish images or releases. GHCR version and latest tags may be refreshed; commit tags/digests identify exact container builds.
 
-On the default branch, successful checks publish a GitHub Release named `v<manifest version>` at the checked commit, with changelog notes and the four installation/source bundles. HACS reads these releases for versioned updates. To ship a new version, bump all three version files and add the matching `## <version>` changelog entry before merging. No manual tag push or extra token is needed.
+On the default branch, successful checks publish a GitHub Release named `v<manifest version>` at the checked commit, with changelog notes and the four installation/source bundles. Marketplace reads these releases for versioned updates. To ship a new version, bump all three version files and add the matching `## <version>` changelog entry before merging. No manual tag push or extra token is needed.
 
 Published releases and their tags/assets are left unchanged on subsequent runs of the same version. Uploads are staged in a draft; rerun the original workflow if an upload fails. A draft can resume only at its original tag's commit. Release publishing has write permission only in the final default-branch job.
 
@@ -57,13 +57,16 @@ Release-publisher tests use Node.js 20+ and mocked GitHub APIs (`node --test tes
 The Bluetooth regression tests install optional imports using the installed HA
 manifests' pinned requirements. They exercise the real remote scanner with
 synthetic packets and no Bluetooth hardware. The focused feature suite also
-runs on HA 2026.11.0:
+runs on HA 2026.11.1:
 
 ```sh
-python -m pip install 'homeassistant==2026.11.0'
+python -m pip install 'homeassistant==2026.11.1'
 python tests_homeassistant/install_bluetooth_requirements.py
 python -m unittest tests_homeassistant.test_bluetooth_freshness tests_homeassistant.test_purifier_controls -v
 ```
 
-The full native suite remains pinned to 2026.10.4; older shared test fixtures need
-config-entry initialization before registry loading on 2026.11.0.
+The full native suite and distribution validation run on HA 2026.11.1. Registry
+fixtures initialize config entries before loading the entity/device registries,
+matching the native startup dependency. Keep these CI pins current with stable
+HA releases and rerun the full suite when updating them; a focused feature test
+is not a substitute for current-release validation.

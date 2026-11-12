@@ -349,12 +349,17 @@ class AuxiliaryStartupNativeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_contract_invalid_values_fail_closed(self):
         self.ceiling_80()
+        # HA 2026.11 redirects the legacy unit attribute through a descriptor
+        # without __delete__; patch its backing attribute so restore is valid.
+        unit_attribute = ("_attr_native_temperature_unit"
+                          if hasattr(ClimateEntity, "native_temperature_unit")
+                          else "_attr_temperature_unit")
         for attribute, invalid in (("_attr_target_temperature_step", None),
                                    ("_attr_target_temperature_step", 0),
                                    ("_attr_target_temperature_step", float("nan")),
                                    ("_attr_min_temp", float("inf")),
                                    ("_attr_precision", float("nan")),
-                                   ("_attr_temperature_unit", "K")):
+                                   (unit_attribute, "K")):
             with self.subTest(attribute=attribute, invalid=invalid), patch.object(self.heater, attribute, invalid, create=True):
                 with self.assertRaisesRegex(HAError, "native target capabilities unavailable"):
                     await asyncio.to_thread(self.api.auxiliary_target, 80)

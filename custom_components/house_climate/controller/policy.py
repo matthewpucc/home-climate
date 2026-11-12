@@ -98,6 +98,7 @@ class Plan:
     outdoor_source_evidence: dict = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
     room_targets: dict = field(default_factory=dict)
+    head_fan_investigation: dict = field(default_factory=dict)
     window_states: dict = field(default_factory=dict)
     protection_context: dict = field(default_factory=dict)
     decision_valid_until_monotonic: float | None = None
@@ -633,4 +634,6 @@ class Policy:
         refresh_window_authorizations(plan, self.config, states, now, settings,
             monotonic_now=tick, expires_at_monotonic=tick + self.config.decision_interval_seconds,
             climate_unit=climate_unit)
+        from .head_fan_investigation import investigation_snapshot
+        plan.head_fan_investigation = investigation_snapshot(self.config, plan, states, now)
         return plan

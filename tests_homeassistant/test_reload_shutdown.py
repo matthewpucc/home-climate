@@ -47,11 +47,13 @@ class ReloadShutdownTests(unittest.IsolatedAsyncioTestCase):
         self.hass.config.components.add(DOMAIN)
         self.hass.data[DOMAIN] = runtime
         loader_integration = SimpleNamespace(
-            domain=DOMAIN, async_get_component=AsyncMock(return_value=integration),
+            domain=DOMAIN, is_built_in=False, async_get_component=AsyncMock(return_value=integration),
             logger=logging.getLogger("test.house_climate"),
         )
+        from homeassistant.loader import DATA_CUSTOM_COMPONENTS
         try:
             with (
+                patch.dict(self.hass.data, {DATA_CUSTOM_COMPONENTS: {DOMAIN: loader_integration}}),
                 patch.object(manager, "async_get_known_entry", return_value=entry),
                 patch.object(manager, "async_setup", new=AsyncMock(return_value=True)) as setup,
                 patch.object(manager, "async_unload_platforms", new=AsyncMock(return_value=True)),

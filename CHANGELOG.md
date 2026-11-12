@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.12
+
+- Validate the full native suite against Home Assistant 2026.11.1 and initialize native registry fixtures in startup order. Update installation guidance for built-in Marketplace while preserving its hacs.json/release compatibility contract.
+
+- Add read-only per-head fan investigation evidence to plans, with honest unknown physical confirmation, shared-room grouping, and a local 22:00–09:00 sleep-window eligibility check. No fan actuation or learned control is enabled. Document staged fan-first validation and remaining implementation gates.
+
 ## 0.9.11
 
 - Keep the first recovery-setting failure quiet for one bounded 15-second interval, including a provider capability rejection before dispatch. Retain diagnostic problems, then notify on persistent or repeated failures; interrupted/uncertain recovery and independent stop/emergency alerts remain actionable.

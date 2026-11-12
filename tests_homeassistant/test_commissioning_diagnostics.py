@@ -42,6 +42,10 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.directory.name)
+        # HA 2026.11 registry loading waits for initialized config entries.
+        if self.hass.config_entries is None:
+            self.hass.config_entries = ConfigEntries(self.hass, {})
+            await self.hass.config_entries.async_initialize()
         dr.async_setup(self.hass)
         await dr.async_load(self.hass)
         await er.async_load(self.hass)
@@ -52,7 +56,6 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
             entry_id="diagnostic-controller", notify=lambda: None,
         )
         self.runtime = SimpleNamespace(power_guard=self.guard)
-        self.hass.config_entries = ConfigEntries(self.hass, {})
         self.entry = ConfigEntry(
             version=3, minor_version=1, domain=DOMAIN, entry_id="diagnostic-controller",
             title="Home Climate", source="user", data={}, options={}, unique_id=None,

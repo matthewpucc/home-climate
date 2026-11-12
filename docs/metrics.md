@@ -320,3 +320,12 @@ Software tests establish serialization and observation semantics only. They do
 not verify physical fan aim, heater isolation, sensor placement, a production
 scrape, or real hardware timing. The separate 10-minute timeout investigation
 is outside this change.
+
+
+## Fan investigation plan evidence
+
+`head_fan_investigation` in the serialized plan is observation-only. It reports
+current advertised fan modes, cached reported mode, unknown physical confirmation,
+served-room source counts/temperature spread, and local daytime-window eligibility.
+It is not a new numeric Prometheus export or a control request. See
+[fan-first investigation](fan-first-investigation.md) for limits and next stages.

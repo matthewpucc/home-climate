@@ -17,6 +17,11 @@ class NotificationRoutingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.directory.name)
+        # HA 2026.11 registry loading waits for initialized config entries.
+        from homeassistant.config_entries import ConfigEntries
+        if self.hass.config_entries is None:
+            self.hass.config_entries = ConfigEntries(self.hass, {})
+            await self.hass.config_entries.async_initialize()
         dr.async_setup(self.hass)
         await dr.async_load(self.hass)
         await er.async_load(self.hass)
