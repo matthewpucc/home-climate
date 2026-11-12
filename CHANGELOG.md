@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Keep bounded per-head transition history available live and in downloaded diagnostics, but exclude it from Recorder on controller/recovery status entities to avoid oversized-attribute rejection. Record a compact current-window summary instead; no durable event archive, backfill, or control changes.
+
 ## 0.9.12
 
 - Validate the full native suite against Home Assistant 2026.11.1 and initialize native registry fixtures in startup order. Update installation guidance for built-in Marketplace while preserving its hacs.json/release compatibility contract.
