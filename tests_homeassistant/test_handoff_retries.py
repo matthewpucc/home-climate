@@ -150,6 +150,44 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controls.owned, ())
         self.assertEqual(self.controls.service_inflight, 0)
 
+    async def test_notification_disposition_uses_actual_retry_evidence(self):
+        initial = await self.first()
+        self.plan["problems"][self.head] = "Retryable mismatch"
+        self.wall = initial["finished_at"] + 1
+        self.report(self.head, at=self.wall)
+        self.assertEqual(handoff.notification_disposition(self.controls)[self.head], "recovering")
+        self.plan["requests"][self.head]["dispatched"] = False
+        self.assertEqual(handoff.notification_disposition(self.controls)[self.head], "human_required")
+        self.plan["requests"][self.head]["dispatched"] = True
+        self.plan["requests"][self.head]["data"]["target_temp_low"] = 55
+        self.assertEqual(handoff.notification_disposition(self.controls)[self.head], "human_required")
+
+    async def test_reserved_retry_publication_does_not_alert(self):
+        initial = await self.first()
+        self.plan["problems"][self.head] = "Prior retryable mismatch"
+        observations = []
+        original = handoff._save
+        async def capture(controls):
+            if controls.handoff and controls.handoff["requests"].get(self.head, {}).get("attempts") == 2:
+                observations.append(handoff.notification_disposition(controls).get(self.head))
+            await original(controls)
+        with patch.object(handoff, "_save", side_effect=capture):
+            await self.step(initial["finished_at"] + 15)
+        self.assertIn("recovering", observations)
+        self.assertNotIn("human_required", observations)
+        self.assertFalse(self.request()["automatic_retry_pending"])
+
+    async def test_final_attempt_waits_for_feedback_but_not_forever(self):
+        initial = await self.first()
+        self.plan["problems"][self.head] = "Mismatch"
+        request = self.request()
+        request["attempts"] = 3
+        self.wall = request["finished_at"] + 1
+        self.report(self.head, at=self.wall)
+        self.assertEqual(handoff.notification_disposition(self.controls)[self.head], "recovering")
+        self.wall = request["finished_at"] + 15
+        self.assertEqual(handoff.notification_disposition(self.controls)[self.head], "human_required")
+
     async def first_off(self):
         self.default_response = "off"
         return await self.first()

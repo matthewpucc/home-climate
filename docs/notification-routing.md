@@ -67,3 +67,22 @@ service outcome and local-notice errors. Equipment diagnostics separately show
 requested settings, HA-reported mode/action and electrical corroboration.
 Neither a Heat-mode echo nor a successful notification service call proves
 the corresponding physical outcome.
+
+## Action-required recovery routing
+
+Head recovery exposes `notification_disposition` in `recovery_details`.
+Recovering head commands remain visible in runtime diagnostics but do not send
+phone alerts within the existing activation timeout. Repeated failures do not
+renew that deadline. Capability blocks and auxiliary-heater uncertainty are not
+silenced by this head-recovery grace. Shared-head stop failures retain their
+independent bounded-attempt critical alert.
+
+Ownership recovery exposes `handoff_notification_disposition`. Valid attempts
+remain quiet while their bounded sequence can still settle. Exhaustion (after
+the last attempt's feedback interval), the original deadline, uncertain or
+rejected commands, interruption and manual interference require attention.
+Notification policy never grants another actuator retry or changes its guards.
+
+This change does not suppress source-quality or battery-reserve alerts. Those
+need a separate assessment of whether usable fallback measurements or a
+successful automated cutoff leave anything for a person to do.

@@ -161,6 +161,10 @@ class AlertManager:
         conditions = {}
         handoff = status.get("handoff") or {}
         problems = self._actionable_recovery_problems(handoff)
+        dispositions = status.get("handoff_notification_disposition") or {}
+        if isinstance(problems, dict):
+            problems = {entity: reason for entity, reason in problems.items()
+                        if dispositions.get(entity) != "recovering"}
         if problems or handoff.get("stage") == "failed":
             detail = ("; ".join(f"{device}: {reason}" for device, reason in problems.items())
                       if isinstance(problems, dict) else str(problems))
@@ -185,7 +189,9 @@ class AlertManager:
                 "normal", "Home Climate stopped after a fault", str(self._status_fault))
         if live:
             for entity, issue in (status.get("device_issues") or {}).items():
-                if entity not in failed_heads and issue:
+                if (entity not in failed_heads and issue
+                        and (status.get("recovery_details") or {}).get(entity, {}).get(
+                            "notification_disposition") != "recovering"):
                     conditions[self._status_key("device_issue", entity)] = (
                         "normal", "Home Climate device needs attention", f"{entity}: {issue}")
             # room_targets names every configured room in the current plan;

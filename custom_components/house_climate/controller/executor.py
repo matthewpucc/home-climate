@@ -105,6 +105,7 @@ class Executor:
         self.airflow = AirflowExecution(self)
         self._fan_airflow_ticket = None
         self.device_issues: dict[str, str] = {}
+        self._attention_started: dict[str, float] = {}
         self.recoveries: dict[str, ClimateRecovery] = {}
         self.capability_blocks: dict[str, dict] = {}
         self._states = {}
@@ -266,6 +267,7 @@ class Executor:
             self.device_issues[entity] = self.capability_blocks[entity]["reason"]
         else:
             self.device_issues.pop(entity, None)
+            self._attention_started.pop(entity, None)
 
     def _issue(self, entity, reason, states=None, *, baseline=None, receipt=False):
         if entity == self.config.heater_entity and self._auxiliary_startup is not None:
@@ -297,12 +299,22 @@ class Executor:
         self._sync_issue(entity)
 
     def recovery_status(self, now):
+        # Recovery retries keep running independently. Bound the quiet period
+        # by the existing activation timeout; repeated errors cannot renew it.
+        self._attention_started = {entity: stamp for entity, stamp in self._attention_started.items()
+                                   if entity in self.device_issues}
         devices = {}
         for entity, reason in self.device_issues.items():
             state = self._states.get(entity, {})
             block = self.capability_blocks.get(entity)
             devices[entity] = {
                 "reason": reason, "state": state.get("state", "missing"),
+                "notification_disposition": (
+                    "recovering" if entity in self.recoveries
+                    and entity != self.config.heater_entity
+                    and 0 <= now - self._attention_started.setdefault(entity, now)
+                        < self.config.head_activation_timeout_seconds
+                    else "human_required"),
                 "available_modes": list(state.get("attributes", {}).get("hvac_modes") or []),
                 "required_mode": self._wanted_modes.get(entity),
                 "kind": ("recovery" if entity in self.recoveries
