@@ -763,6 +763,7 @@ class ControllerRuntime:
         self.notifications = None
         self.notification_settings = notification_settings
         self.seasonal_state = None
+        self.thermal_storage = None
         self.api = NativeAPI(hass, live, self.stop_event, config)
         self.api.heartbeat_notify = self._async_heartbeat_changed
         self.thread = None
@@ -860,6 +861,16 @@ class ControllerRuntime:
             if self.api.bluetooth_freshness:
                 self.api.bluetooth_freshness.async_close()
             raise
+
+        # Optional evidence persistence starts only after control setup succeeds.
+        # Its failures never prevent the controller from running.
+        try:
+            from .thermal_storage import ThermalStorage
+            self.thermal_storage = ThermalStorage(self.hass, self.config, entry_id)
+            self.thermal_storage.start()
+        except Exception:
+            self.thermal_storage = None
+            _LOGGER.warning("Thermal history could not start; control is unaffected", exc_info=True)
 
     def _settings(self, states, config, now, strict=False):
         settings = self.comfort.settings(states, config, now, strict=strict)
@@ -1065,6 +1076,8 @@ class ControllerRuntime:
         if self.controls and event == "live" and not self.controls.enabled:
             event = "stopping" if self.controls.owned else "shadow"
         self.status = {"event": event, **data, **self.last_fault}
+        if self.thermal_storage is not None:
+            self.thermal_storage.observe(event, data)
         if self.seasonal_state is not None:
             seasonal = data.get("seasonal")
             self.seasonal_state.observe(seasonal)
@@ -1394,6 +1407,8 @@ class ControllerRuntime:
                     await self.seasonal_state.async_close()
                 if self.notifications is not None:
                     await self.notifications.async_close()
+                if self.thermal_storage is not None:
+                    await self.thermal_storage.async_close()
         else:
             self._warn_unload_deferred(recovery_pending=not recovery_closed)
             if not jobs_closed:

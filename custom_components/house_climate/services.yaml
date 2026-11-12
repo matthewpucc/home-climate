@@ -33,3 +33,32 @@ approve_heater_restore:
       required: true
       selector:
         boolean:
+
+thermal_history_query:
+  name: Query thermal evidence history
+  description: Read bounded raw source reports, summaries and planned-demand episodes from Home Climate's private SQLite history. Timestamps are UTC Unix seconds. Does not operate equipment.
+  fields:
+    start:
+      name: Start timestamp
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 9999999999
+          mode: box
+    end:
+      name: End timestamp
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 9999999999
+          mode: box
+    limit:
+      name: Maximum rows per record type
+      default: 200
+      selector:
+        number:
+          min: 1
+          max: 1000
+          mode: box

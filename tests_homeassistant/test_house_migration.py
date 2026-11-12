@@ -476,8 +476,11 @@ class HousePowerBridgeTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
 
             with patch.object(self.hass.config_entries, "async_unload_platforms",
                               new=AsyncMock(return_value=True)) as unload_platforms:
-                with self.assertLogs("custom_components.house_climate.runtime", level="WARNING"):
-                    self.assertFalse(await async_unload_entry(self.hass, entry))
+                # Exercise deadline expiry without waiting the production-sized
+                # budget before this fixture releases its delayed physical job.
+                with patch.object(runtime, "_unload_budget_seconds", return_value=.2):
+                    with self.assertLogs("custom_components.house_climate.runtime", level="WARNING"):
+                        self.assertFalse(await async_unload_entry(self.hass, entry))
                 unload_platforms.assert_not_awaited()
                 self.assertIs(self.hass.data[DOMAIN], runtime)
                 guard_observer_removed.assert_not_called()
