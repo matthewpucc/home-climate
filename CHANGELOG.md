@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.15
+
+- Keep individual device-recovery and ownership-handoff failures quiet while a valid, bounded automatic retry is pending. Escalate actionable failures after recovery is blocked or exhausted; preserve urgent shutdown/isolation alerts and diagnostic evidence. No actuator, retry-budget, or safety-guard changes.
+
 ## 0.9.14
 
 - Add observation-only SQLite thermal evidence, bounded read-only lookback, transactional retention rollups, and isolated background storage diagnostics. Include consistent Home Assistant backup hooks and standalone restore tests. See [thermal history](docs/thermal-history.md). No fan experiments or learned actuation are enabled.
