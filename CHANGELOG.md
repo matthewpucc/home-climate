@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.13
 
 - Keep bounded per-head transition history available live and in downloaded diagnostics, but exclude it from Recorder on controller/recovery status entities to avoid oversized-attribute rejection. Record a compact current-window summary instead; no durable event archive, backfill, or control changes.
 
