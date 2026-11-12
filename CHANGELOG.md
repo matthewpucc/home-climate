@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.12
 
 - Validate the full native suite against Home Assistant 2026.11.1 and initialize native registry fixtures in startup order. Update installation guidance for built-in Marketplace while preserving its hacs.json/release compatibility contract.
 
