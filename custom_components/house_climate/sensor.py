@@ -15,6 +15,7 @@ from .controller.sensors import from_f, to_f
 from .auxiliary_diagnostics import EVENTS
 from .controller.shutdown_diagnostics import METRICS as SHUTDOWN_METRICS
 from .controller import numeric_diagnostics
+from .controller.diagnostics import head_transition_summary
 
 
 def short(text):
@@ -574,6 +575,7 @@ class NumericDiagnostic(ControllerEntity):
 
 class ControllerStatus(ControllerEntity):
     """Keep the existing status entity compatible with automations."""
+    _unrecorded_attributes = frozenset({"head_transition_history"})
     _attr_name = "Controller status"
     _attr_icon = "mdi:home-thermometer"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -603,7 +605,9 @@ class ControllerStatus(ControllerEntity):
                  "auxiliary_manual", "auxiliary_manual_entity", "handoff", "notifications",
                  "enabled_intent", "takeover_pending",
                  "auxiliary_decision", "auxiliary_policy", "shared_stop", "seasonal",
-                 "seasonal_policy", "shutdown_evidence") if key in status} | heartbeat_attributes(status)
+                 "seasonal_policy", "shutdown_evidence") if key in status} | heartbeat_attributes(status) | {
+                    "head_transition_summary": head_transition_summary(
+                        status, getattr(getattr(self.runtime, "config", None), "heads", {}).values())}
 
 
 class HeaterPowerStatus(ControllerEntity):
@@ -723,6 +727,8 @@ class RecoveryStatus(ControllerEntity):
     _attr_name = "Recovery status"
     _attr_icon = "mdi:progress-clock"
 
+    _unrecorded_attributes = frozenset({"head_transition_history"})
+
     def __init__(self, entry):
         super().__init__(entry, "recovery")
 
@@ -785,7 +791,9 @@ class RecoveryStatus(ControllerEntity):
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
                  "integration_recovery", "cycle_holds", "head_stop_reasons", "head_transition_history", "pending_head_commands",
                  "head_constraints", "head_protections", "unavailable_mode_requests", "mode_scores",
-                 "shared_stop", "handoff", "unload", "auxiliary_manual", "notifications") if key in status} | heartbeat_attributes(status)
+                 "shared_stop", "handoff", "unload", "auxiliary_manual", "notifications") if key in status} | heartbeat_attributes(status) | {
+                    "head_transition_summary": head_transition_summary(
+                        status, getattr(getattr(self.runtime, "config", None), "heads", {}).values())}
 
 
 class CurrentIssues(ControllerEntity):

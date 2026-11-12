@@ -329,3 +329,29 @@ current advertised fan modes, cached reported mode, unknown physical confirmatio
 served-room source counts/temperature spread, and local daytime-window eligibility.
 It is not a new numeric Prometheus export or a control request. See
 [fan-first investigation](fan-first-investigation.md) for limits and next stages.
+
+## Recorder and head-transition history
+
+Controller status and Recovery status retain their full live
+`head_transition_history` attribute for existing views and automations. That
+rolling history is excluded from HA Recorder on both entities: up to 16 verbose
+rows per head can otherwise exceed Recorder's 16,384-byte attribute limit and
+cause **all** attributes for that state event to be discarded.
+
+Recorder instead receives `head_transition_summary`, keyed by configured head:
+`retained_event_count`, `last_sequence`, `last_event`, and `last_recorded_at`.
+The count describes the current rolling window, not all events. Sequence numbers
+are process-local, can skip between recorded summaries, and reset with the
+executor. A summary is not a complete event archive or proof of physical operation.
+Other existing status attributes and the separate numeric Prometheus exports are
+unchanged. This targeted exclusion does not guarantee arbitrary configurations or
+other large attributes will always fit Recorder's limit.
+
+Download diagnostics includes `head_transitions`: a copied snapshot of at most
+16 recent events per configured head, with an explicit `process_local`
+persistence label. Only recognized command/evidence fields are exported; the
+configuration and arbitrary runtime payloads are not copied. Live attributes and
+downloads are not automatically durable. No historical gaps are backfilled, and
+integration reload/restart does not restore this rolling evidence. Previously
+rejected Recorder attributes cannot be recovered by this change. The proposed
+SQLite episode store and retained learning models are not implemented here.

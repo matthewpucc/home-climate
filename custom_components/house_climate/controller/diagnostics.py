@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
 import math
@@ -79,3 +80,53 @@ class HeadTransitions:
 
     def snapshot(self):
         return {entity: deepcopy(list(events)) for entity, events in self.events.items() if events}
+
+
+# Export only the executor's evidence fields, never arbitrary runtime/config data.
+_HEAD_EVENT_FIELDS = frozenset({
+    "sequence", "event", "source", "recorded_at", "observed_mode",
+    "observed_target_temperature", "observed_current_temperature", "reported_at",
+    "available_modes", "requested_mode", "known_modes", "command_id", "service",
+    "error_type", "reason",
+})
+_HEAD_COMMAND_FIELDS = frozenset({
+    "hvac_mode", "temperature", "target_temp_low", "target_temp_high", "preset_mode",
+})
+
+
+def bounded_head_history(status, heads):
+    """Copy the current bounded executor evidence for configured heads only."""
+    history = status.get("head_transition_history") if isinstance(status, Mapping) else None
+    if not isinstance(history, Mapping):
+        return {}
+    result = {}
+    for head in dict.fromkeys(heads):
+        rows = history.get(head, ())
+        if not isinstance(rows, (list, tuple)):
+            continue
+        selected = []
+        for row in rows[-HEAD_TRANSITION_LIMIT:]:
+            if not isinstance(row, dict):
+                continue
+            item = {key: deepcopy(value) for key, value in row.items()
+                    if key in _HEAD_EVENT_FIELDS}
+            if isinstance(row.get("data"), dict):
+                item["data"] = {key: deepcopy(value) for key, value in row["data"].items()
+                                if key in _HEAD_COMMAND_FIELDS}
+            if isinstance(row.get("integration_repair"), dict):
+                item["integration_repair"] = {
+                    key: deepcopy(row["integration_repair"][key]) for key in ("epoch", "held")
+                    if key in row["integration_repair"]}
+            selected.append(item)
+        if selected:
+            result[head] = selected
+    return result
+
+
+def head_transition_summary(status, heads):
+    """Small current-window summary, not a durable event counter or archive."""
+    return {head: {"retained_event_count": len(rows),
+                   "last_sequence": rows[-1].get("sequence"),
+                   "last_event": rows[-1].get("event"),
+                   "last_recorded_at": rows[-1].get("recorded_at")}
+            for head, rows in bounded_head_history(status, heads).items()}
