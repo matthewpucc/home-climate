@@ -63,9 +63,19 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(off_peak.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.directory.name)
+        # Real startup installs the frame helper used by current HA API checks.
+        from homeassistant import loader
+        from homeassistant.helpers import frame
+        loader.async_setup(self.hass)
+        frame.async_setup(self.hass)
         self.hass.config.units = US_CUSTOMARY_SYSTEM
         await self.hass.config.async_set_time_zone("America/Los_Angeles")
         from homeassistant.helpers import device_registry as dr, entity_registry as er
+        # HA 2026.11 registry loading waits for initialized config entries.
+        from homeassistant.config_entries import ConfigEntries
+        if self.hass.config_entries is None:
+            self.hass.config_entries = ConfigEntries(self.hass, {})
+            await self.hass.config_entries.async_initialize()
         dr.async_setup(self.hass)
         await dr.async_load(self.hass)
         await er.async_load(self.hass)

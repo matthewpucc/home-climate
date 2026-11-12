@@ -32,7 +32,7 @@ home-climate --config config.example.toml demo
 Native integration (Python 3.14):
 
 ```sh
-python -m pip install -e '.[test]' 'homeassistant==2026.10.4' 'prometheus-client==0.21.0'
+python -m pip install -e '.[test]' 'homeassistant==2026.11.1' 'prometheus-client==0.21.0'
 python tests_homeassistant/install_bluetooth_requirements.py
 python -m unittest discover -s tests_homeassistant -v
 python scripts/package_hacs.py
@@ -57,13 +57,16 @@ Release-publisher tests use Node.js 20+ and mocked GitHub APIs (`node --test tes
 The Bluetooth regression tests install optional imports using the installed HA
 manifests' pinned requirements. They exercise the real remote scanner with
 synthetic packets and no Bluetooth hardware. The focused feature suite also
-runs on HA 2026.11.0:
+runs on HA 2026.11.1:
 
 ```sh
-python -m pip install 'homeassistant==2026.11.0'
+python -m pip install 'homeassistant==2026.11.1'
 python tests_homeassistant/install_bluetooth_requirements.py
 python -m unittest tests_homeassistant.test_bluetooth_freshness tests_homeassistant.test_purifier_controls -v
 ```
 
-The full native suite remains pinned to 2026.10.4; older shared test fixtures need
-config-entry initialization before registry loading on 2026.11.0.
+The full native suite and distribution validation run on HA 2026.11.1. Registry
+fixtures initialize config entries before loading the entity/device registries,
+matching the native startup dependency. Keep these CI pins current with stable
+HA releases and rerun the full suite when updating them; a focused feature test
+is not a substitute for current-release validation.

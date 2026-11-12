@@ -6,11 +6,11 @@ restart behavior, and requested versus reported evidence.
 
 A Home Assistant integration for a shared heat-pump system, room fans and a battery-backed auxiliary heater. Room profiles, weekly schedules, priorities, peak hours, seasonal selection and the recovery state are configurable. Physical device bindings stay in a private Home Assistant file; room climate cards provide temporary comfort adjustments.
 
-These changes target 0.9.0. Check the published release and installed version separately; this guide does not establish release availability or passed live acceptance.
+Check the published release and installed version separately; this guide does not establish release availability or passed live acceptance.
 
 ## Install and inspect
 
-Use the [installation guide](docs/hacs.md) to add this repository to HACS as an **Integration**, or install the release ZIP.
+Use the [installation guide](docs/hacs.md) to add this repository through Home Assistant **Settings → Marketplace** (HA 2026.11+), or install the release ZIP.
 
 1. Place the private device map at `/config/home_climate_bindings.json`. [bindings.example.json](bindings.example.json) contains synthetic IDs only.
 2. Install the integration, restart Home Assistant, and add **Home Climate** under Settings → Devices & services, or let the existing entry migrate.

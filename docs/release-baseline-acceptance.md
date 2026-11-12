@@ -25,7 +25,7 @@ if it contains private entity mappings or live snapshots.
 | Code | Commit SHA, PR, reviewed diff, unresolved issues |
 | Checks | Exact-commit CI run and all required job outcomes; local test commands and counts |
 | Distribution | Version, release/tag commit, asset filename and SHA-256, packaged-source test result |
-| Installation | HACS/installed version, HA version, integration load result, configuration revision |
+| Installation | Marketplace/installed version, HA version, integration load result, configuration revision |
 | Ownership | Controller/live state, auxiliary manual ownership, pending commands, retained cut/fault obligations |
 | Sources | Physical-source map, units, corrections, quality restrictions and timestamp semantics |
 | Notifications | Normal and critical routes, capability evidence, test outcome and remaining delivery uncertainty |
@@ -152,7 +152,7 @@ fixtures and preserve the behavior that matters.
 
 - A changed actuator behavior after the only hardware session creates a new live
   validation gap. Do not inherit the earlier session's result automatically.
-- Verify the reviewed release commit, tag, workflow, downloaded assets and HACS
+- Verify the reviewed release commit, tag, workflow, downloaded assets and Marketplace
   source. Verify the actually installed version and active runtime independently.
 - Confirm that ordinary operation is continuing with expected ownership, valid
   sensors, no unexplained pending jobs and the intended room policy. A successful
