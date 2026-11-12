@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.14
 
 - Add observation-only SQLite thermal evidence, bounded read-only lookback, transactional retention rollups, and isolated background storage diagnostics. Include consistent Home Assistant backup hooks and standalone restore tests. See [thermal history](docs/thermal-history.md). No fan experiments or learned actuation are enabled.
 
