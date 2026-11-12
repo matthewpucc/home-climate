@@ -38,6 +38,55 @@ def _valid_retry_record(request):
             and (request.get("finished_at") is None or request["finished_at"] >= _report_boundary(request)))
 
 
+def notification_disposition(controls):
+    """Classify recovery problems without changing retry or actuator policy.
+
+    Only a valid, bounded recovery sequence may remain quiet. Unsafe,
+    interrupted, rejected or ambiguous commands still require attention.
+    """
+    plan = controls.handoff or {}
+    result = {}
+    current = now()
+    for entity in plan.get("problems", {}):
+        disposition = "human_required"
+        request = plan.get("requests", {}).get(entity)
+        if (plan.get("stage") == "applying" and not plan.get("interrupted")
+                and entity in (*plan.get("heads", ()), *plan.get("fans", ()))
+                and _valid_retry_record(request)):
+            # Ask the same producer predicate that authorizes retries, at the
+            # next eligible retry instant. This grants no command permission.
+            finished = request.get("finished_at")
+            check_at = max(current, finished + HANDOFF_RETRY_SECONDS) if finished is not None else current
+            state = controls.hass.states.get(entity)
+            try:
+                _, _, desired = _desired(controls, plan, entity)
+                job = controls._handoff_jobs.get(entity)
+                running = (finished is None and (request.get("automatic_retry_pending")
+                    or (job is not None and not job.done() and request.get("dispatched")))
+                    and desired == request["data"]
+                    and not any(request.get(flag) for flag in (
+                        "uncertain", "rejected", "operator_changed", "cancelled_before_dispatch"))
+                    and entity not in controls._uncertain_device_jobs
+                    and 0 <= current - request.get("first_at", request["at"])
+                        < controls.config.head_activation_timeout_seconds)
+                # The last completed attempt still gets its feedback interval.
+                # This read-only assessment does not alter the real attempt budget.
+                evidence_request = request
+                if (request.get("attempts") == HANDOFF_MAX_ATTEMPTS and finished is not None
+                        and current < finished + HANDOFF_RETRY_SECONDS):
+                    evidence_request = {**request, "attempts": HANDOFF_MAX_ATTEMPTS - 1}
+                retryable = running or (finished is not None and state is not None
+                    and state.last_reported.timestamp() <= current
+                    and desired == request["data"] and _retry_evidence(
+                    controls, plan, entity, evidence_request, state, current=check_at))
+            except (KeyError, TypeError, ValueError):
+                retryable = False
+            if retryable:
+                disposition = "recovering"
+        result[entity] = disposition
+    return result
+
+
 def _report_boundary(request):
     return request.get("dispatched_at", request["at"])
 
@@ -74,9 +123,9 @@ def _reported_target_valid(state, *, fan):
     return 0 <= values[0] <= 100 if fan else values[0] <= values[1]
 
 
-def _retry_evidence(controls, plan, entity, request, state):
+def _retry_evidence(controls, plan, entity, request, state, *, current=None):
     """A reported mismatch permits bounded reassertion, not a claim of physical failure."""
-    current = now()
+    current = now() if current is None else current
     if (not _valid_retry_record(request) or plan.get("interrupted")
             or not request.get("dispatched") or request.get("finished_at") is None
             or request.get("uncertain") or request.get("cancelled_before_dispatch")
@@ -397,7 +446,8 @@ async def step(controls):
         reserved_at = now()
         request = {"at": reserved_at, "data": data,
                    "first_at": retry.get("first_at", retry["at"]) if retry else reserved_at,
-                   "attempts": retry.get("attempts", 1) + 1 if retry else 1}
+                   "attempts": retry.get("attempts", 1) + 1 if retry else 1,
+                   "automatic_retry_pending": retry is not None}
         plan["requests"][entity] = request
         generation = controls.ownership_generation
         await _save(controls)
@@ -462,6 +512,7 @@ async def step(controls):
                         request["rejected"] = True
                 plan["problems"][entity] = f"Recovery command failed: {exc}"
             finally:
+                request["automatic_retry_pending"] = False
                 if started:
                     request["finished_at"] = now()
                     controls.head_activation_finished(entity)
@@ -470,6 +521,7 @@ async def step(controls):
         def finished(job, entity=entity, request=request):
             controls.service_inflight -= 1
             if job.cancelled():
+                request["automatic_retry_pending"] = False
                 if request.get("dispatched"):
                     request["uncertain"] = True
                     controls.activation_job_uncertain(entity)

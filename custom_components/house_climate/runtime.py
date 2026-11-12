@@ -1,6 +1,7 @@
 """Run the existing synchronous engine outside HA's event loop."""
 from __future__ import annotations
 
+
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from homeassistant.util.unit_conversion import TemperatureConverter
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_state_change_event
 
+from .handoff import notification_disposition
 from .const import SIGNAL_STATUS
 from .controller.__main__ import run_loop
 from .controller.ha import HAActivationDeferred, HAError, HAStopping
@@ -989,7 +991,9 @@ class ControllerRuntime:
                            pending_fans=list(self.controls.pending_fans),
                            auxiliary_manual=self.controls.auxiliary_manual,
                            auxiliary_manual_entity=self.controls.auxiliary_manual_entity,
-                           handoff=self.controls.handoff)
+                           handoff=self.controls.handoff,
+                           handoff_notification_disposition=
+                               notification_disposition(self.controls))
         ready = self.controls._snapshot.get("enabled", False)
         if previous != self.controls.enabled or ready != self._controls_ready:
             self.wake_event.set()
@@ -1093,7 +1097,9 @@ class ControllerRuntime:
                                pending_fans=list(self.controls.pending_fans),
                                auxiliary_manual=self.controls.auxiliary_manual,
                                auxiliary_manual_entity=self.controls.auxiliary_manual_entity,
-                               handoff=self.controls.handoff)
+                               handoff=self.controls.handoff,
+                           handoff_notification_disposition=
+                               notification_disposition(self.controls))
         self._update_reload_status()
         self._update_heartbeat_status()
         self.recovery.observe(self.status)

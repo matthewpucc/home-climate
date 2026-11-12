@@ -409,5 +409,34 @@ class NotificationRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.calls), 2)
 
 
+    async def test_producer_recovering_is_quiet_then_actionable_once(self):
+        manager = self.start()
+        entity = "climate.fixture_head"
+        status = {"event": "live", "device_issues": {entity: "retrying"},
+                  "recovery_details": {entity: {"notification_disposition": "recovering"}}}
+        manager.observe_status(status)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.calls, [])
+        status["recovery_details"][entity]["notification_disposition"] = "human_required"
+        manager.observe_status(status)
+        manager.observe_status(status)
+        await self.hass.async_block_till_done()
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_handoff_retry_disposition_preserves_stop_alarm(self):
+        manager = self.start()
+        status = self.recovery_status(started=980)
+        entity = "climate.fixture_head"
+        status["handoff_notification_disposition"] = {entity: "recovering"}
+        self.observe_recovery(status)
+        await self.hass.async_block_till_done()
+        self.assertEqual(self.calls, [])
+        status["shared_stop"] = {entity: {"failed": True, "confirmed": False}}
+        self.observe_recovery(status)
+        await self.hass.async_block_till_done()
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn("head stop", self.calls[0][1]["title"])
+
+
 if __name__ == "__main__":
     unittest.main()
