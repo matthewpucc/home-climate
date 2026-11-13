@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Distinguish expected dedicated heater meter silence after physically verified relay isolation from a powered meter fault. Keep raw evidence, explicit recovery, and post-restoration low-load checks intact; do not invent zero draw.
+
 ## 0.9.18
 
 - Add opt-in, journaled one-call heat-pump blower trials with native ownership/interlock gates, bounded expiry and baseline restoration; installation starts no trial.

@@ -98,7 +98,9 @@ class ShutdownDiagnostics:
         watts, amps = number(current.get('heater_power_w')), number(current.get('heater_current_a'))
         now, observed_at = guard._wall_clock(), guard._last_observation_wall
         reading_fresh = observed_at is not None and 0 <= now - observed_at <= 30
-        meter_known = reading_fresh and not current.get('heater_meter_issue') and (watts is not None or amps is not None)
+        meter_known = (reading_fresh and not current.get('heater_meter_issue')
+                       and not current.get('heater_meter_silence_expected')
+                       and (watts is not None or amps is not None))
         baseline, latest = number(aggregate.get('baseline_w')), number(aggregate.get('latest_w'))
         drop_baseline = (number(aggregate.get('qualified_baseline_w'))
                          if aggregate.get('classification') == 'relative_drop' else baseline)

@@ -232,7 +232,8 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
         attrs = self.sensor.extra_state_attributes
         self.assertEqual(set(attrs), ORIGINAL_GUARD_KEYS | {
             "shutdown_active", "commissioning", "retained_cut_recovery_pending",
-            "supply_evidence", "shutdown_evidence", "shutdown_contradicted", "manual_override"})
+            "supply_evidence", "shutdown_evidence", "shutdown_contradicted", "manual_override",
+            "heater_meter_expectation", "heater_meter_raw_issue", "heater_meter_silence_expected"})
         result = state.attributes["commissioning"]
         self.assertTrue(set(result) <= COMMISSIONING_KEYS)
         self.assertLessEqual(len(result["reason"]), 240)
