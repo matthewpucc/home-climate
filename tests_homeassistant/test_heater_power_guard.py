@@ -260,6 +260,62 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         self.guard._restore_approved_until = self.guard._clock() + 1000
         self.guard._manual_recovery_required = False
 
+    async def test_isolated_silent_meter_is_expected_during_manual_recovery(self):
+        await self.verified_cut()
+        self.guard._manual_recovery_required = True
+        await self.advance_isolated(181)
+        self.put(self.b.heater_switch, "off", timestamp=self.wall, force=True)
+        d = self.guard.diagnostics
+        self.assertTrue(d["heater_meter_silence_expected"])
+        self.assertEqual(d["heater_draw_status"], "isolated_meter_silent")
+        self.assertIsNone(d["heater_meter_issue"])
+        self.assertIsNotNone(d["heater_meter_raw_issue"])
+        self.assertFalse(d["electrical_stop_confirmed"])
+        self.assertIsNone(d["heater_power_w"])
+        self.assertTrue(d["manual_recovery_required"])
+        self.assertTrue(d["blocked"])
+        self.guard.shutdown_observations.capture(self.guard, d)
+        self.assertIsNone(self.guard.shutdown_observations.current["dedicated_load_w"])
+        self.assertIsNone(self.guard.shutdown_observations.current["electrical_stop_confirmed"])
+        self.assertNotIn("turn_on", [call[1] for call in self.calls])
+
+    async def test_silence_expectation_requires_current_physical_dedicated_off(self):
+        await self.verified_cut()
+        self.guard._manual_recovery_required = True
+        await self.advance_isolated(181)
+        self.assertFalse(self.guard.diagnostics["heater_meter_silence_expected"])
+        for attrs in ({}, {"assumed_state": True}, {"restored": True}):
+            self.hass.states.async_set(self.b.heater_switch, "off", attrs, force_update=True)
+            self.assertFalse(self.guard.diagnostics["heater_meter_silence_expected"])
+        self.put(self.b.heater_switch, "off", force=True)
+        self.assertTrue(self.guard.diagnostics["heater_meter_silence_expected"])
+        self.guard._identity_mismatch = True
+        self.assertFalse(self.guard.diagnostics["heater_meter_silence_expected"])
+        self.guard._identity_mismatch = False
+        self.put(self.b.heater_switch, "on", force=True)
+        self.assertFalse(self.guard.diagnostics["heater_meter_silence_expected"])
+
+    async def test_silence_expectation_preserves_malformed_meter_evidence(self):
+        await self.verified_cut()
+        self.guard._manual_recovery_required = True
+        await self.advance_isolated(181)
+        self.put(self.b.heater_switch, "off", force=True)
+        for value, unit, stamp in ((0, "V", self.wall), (-1, "W", self.wall),
+                                   ("nan", "W", self.wall), (0, "W", self.wall + 60)):
+            self.put(self.b.heater_power, value, {"unit_of_measurement": unit},
+                     timestamp=stamp, force=True)
+            self.assertFalse(self.guard.diagnostics["heater_meter_silence_expected"])
+        self.put(self.b.heater_power, "unavailable", force=True)
+        self.assertTrue(self.guard.diagnostics["heater_meter_silence_expected"])
+
+    async def test_silence_expectation_does_not_hide_current_high_load(self):
+        await self.verified_cut()
+        self.guard._manual_recovery_required = True
+        await self.advance_isolated(181)
+        self.put(self.b.heater_switch, "off", force=True)
+        self.put(self.b.heater_power, 1300, {"unit_of_measurement": "W"}, force=True)
+        self.assertFalse(self.guard.diagnostics["heater_meter_silence_expected"])
+
     async def test_verified_cut_can_recover_after_off_meter_expires(self):
         await self.verified_cut()
         self.resume_heat_after_on = True

@@ -543,8 +543,43 @@ class HeaterPowerGuard:
                    "reason": "Diagnostic only; no watt ceiling"}
             for role, value in (("input", self._reading.input_w), ("circuit", self._reading.circuit_w))}}
 
-    def _heater_draw_status(self):
+    def _meter_silence_expected(self):
+        """Diagnostic only: a verified dedicated cut can silence its load meter.
+
+        Never use cached Off, shared AC isolation, or a fabricated zero as proof.
+        This projection grants no restoration permission and clears no fault.
+        """
+        if (not self._heater_meter_configured or self._identity_mismatch
+                or self._shutdown_contradicted or self._restoring
+                or self._positive_tasks or self._emergency_service_tasks
+                or self._compensation_pending):
+            return False
+        relay, _ = _device_feedback(
+            self._state(self.bindings.heater_switch), self._wall_clock(),
+            after=max(self._retained_cut_claim_after or 0, self._cut_request_wall or 0))
+        if relay != "off":
+            return False
+        entity, units, _, _ = self._heater_meter()
+        value, attrs, reported = _state_parts(self._state(entity))
+        if value in (None, "unknown", "unavailable"):
+            return True
+        # Only silence/expiry is expected. Malformed units, values, timestamps
+        # and optimistic/restored readings remain visible as untrusted evidence.
+        if (isinstance(value, bool) or attrs.get("unit_of_measurement") not in units
+                or attrs.get("restored") or attrs.get("assumed_state")):
+            return False
+        try:
+            number = float(value) * units[attrs["unit_of_measurement"]]
+            age = self._wall_clock() - _timestamp(reported)
+            return (math.isfinite(number) and number >= 0
+                    and age > TELEMETRY_MAX_AGE_SECONDS)
+        except (ValueError, TypeError, OverflowError):
+            return False
+
+    def _heater_draw_status(self, *, silence_expected=False):
         r = self._reading
+        if silence_expected:
+            return "isolated_meter_silent"
         if r.meter_issue or (r.heater_w is None and r.heater_a is None):
             return "unknown"
         substantial = r.heater_w >= HEATER_OFF_MAX_W if r.heater_w is not None else r.heater_a >= 1
@@ -640,6 +675,7 @@ class HeaterPowerGuard:
     def diagnostics(self):
         r = self._reading
         blocked = self.blocked
+        silence_expected = self._meter_silence_expected()
         # A completed request leaves internal evidence available to the control
         # code. Do not display its later expiry as a new active shutdown. This
         # projection never clears, refreshes or otherwise changes that evidence.
@@ -672,8 +708,15 @@ class HeaterPowerGuard:
                 "watt_limits_enforced": False,
                 "ac_output_enabled": r.ac_enabled, "supply_reported_at": r.supply_reported_at,
                 "supply_evidence": r.supply_evidence,
-                "supplying_loads": r.supplying_loads, "heater_draw_status": self._heater_draw_status(),
-                "heater_meter_issue": r.meter_issue, "diagnostic_issues": r.diagnostic_issues,
+                "supplying_loads": r.supplying_loads, "heater_draw_status": self._heater_draw_status(silence_expected=silence_expected),
+                "heater_meter_issue": None if silence_expected else r.meter_issue,
+                "heater_meter_raw_issue": r.meter_issue,
+                "heater_meter_silence_expected": silence_expected,
+                "heater_meter_expectation": (
+                    "Dedicated relay verified Off; meter silence is expected. Fresh low load and native Off are required after approved restoration."
+                    if silence_expected else
+                    "Fresh dedicated load evidence required when powered; silence is not proof of zero draw."),
+                "diagnostic_issues": r.diagnostic_issues,
                 "aggregate_stop": (self._aggregate_outcome.as_dict()
                                    if shutdown_active and self._aggregate_outcome else None),
                 "emergency_ac_enabled": self._emergency_enabled,
@@ -712,8 +755,9 @@ class HeaterPowerGuard:
             "retained_cut_recovery_pending", "shutdown_fault", "restore_approval_pending",
             "binding_identity_mismatch", "emergency_notification_error", "commissioning")}
         stable["ac_output_enabled"] = self._reading.ac_enabled
-        stable["heater_draw_status"] = self._heater_draw_status()
-        stable["heater_meter_issue"] = self._reading.meter_issue
+        stable["heater_draw_status"] = current["heater_draw_status"]
+        stable["heater_meter_issue"] = current["heater_meter_issue"]
+        stable["heater_meter_silence_expected"] = current["heater_meter_silence_expected"]
         if stable != self._last_diagnostics:
             self._last_diagnostics = stable
             self.notify()

@@ -43,6 +43,19 @@ Diagnostics distinguish:
 
 The existing contradiction rule accepts one qualifying high report; no new sustained-high delay is implied. A HA report after a command does not necessarily date physical acquisition. The supervised acceptance protocol measures this distinction before proposing a deadline or filtering change. Missing data is unknown, not a fabricated zero or proof of continued heating. Aggregate stop corroboration remains separate from removed operating watt ceilings.
 
+### Meter silence during dedicated isolation
+
+A current physical report confirming the dedicated heater relay Off can make a
+missing or expired dedicated meter report expected: the meter may lose power or
+stop reporting with the relay Off. Diagnostics expose
+`heater_meter_silence_expected` and `isolated_meter_silent` draw status, retaining
+`heater_meter_raw_issue` for investigation. This does not synthesize zero watts
+or meter-confirmed electrical stop. Cached, assumed, restored, expired or
+identity-mismatched relay reports, shared AC isolation alone, and current
+contradictory high load do not qualify. After relay power returns, fresh low
+dedicated load and native Off are still required by the existing recovery flow.
+This display change neither clears a latch nor grants restoration permission.
+
 ## Explicit recovery and migration
 
 A reserve/supply hold with successful native Off can recover after 60 seconds of continuously safe evidence. Genuine failed shutdown requires explicit approval; its five-minute cooldown remains, as do legacy persisted cooldowns. Installation does not discard ownership, latches, pending work or recovery obligations.
