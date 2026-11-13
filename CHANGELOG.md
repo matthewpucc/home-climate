@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.16
+
+- Add a bounded, Home Climate-only head-fan command evidence lifecycle with fixed deadlines, cancellation and cached-report consistency checks. Physical confirmation remains unknown. Document explicit non-sleep-sensitive overnight trial eligibility while protecting Primary; no runtime dispatch, fan experiment, learned actuation, or Kumo change is enabled.
+
 ## 0.9.15
 
 - Keep individual device-recovery and ownership-handoff failures quiet while a valid, bounded automatic retry is pending. Escalate actionable failures after recovery is blocked or exhausted; preserve urgent shutdown/isolation alerts and diagnostic evidence. No actuator, retry-budget, or safety-guard changes.
