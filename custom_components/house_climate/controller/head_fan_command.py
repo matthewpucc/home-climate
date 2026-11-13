@@ -1,8 +1,8 @@
-"""Pure, single-attempt fan command lifecycle; not connected to live dispatch.
+"""Pure, single-attempt fan command lifecycle used by opt-in native trials.
 
 A HA report corroborates only the requested setting. It never proves a device
 poll, physical fan speed, or delivered capacity. Do not use this state machine
-as authorization: a future runtime adapter must serialize with HVAC/Off work.
+as authorization: the native runtime must serialize with HVAC/Off work.
 """
 from __future__ import annotations
 

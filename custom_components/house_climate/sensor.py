@@ -600,7 +600,7 @@ class ControllerStatus(ControllerEntity):
                  "device_issues", "waiting_devices", "recovery_details",
                  "settle_remaining_seconds", "integration_recovery",
                  "decision_interval_seconds", "decision_remaining_seconds", "cycle_holds",
-                 "head_stop_reasons", "head_transition_history", "pending_head_commands", "head_constraints",
+                 "head_stop_reasons", "head_transition_history", "pending_head_commands", "head_fan_trial", "head_constraints",
                  "head_protections", "unavailable_mode_requests", "mode_scores", "protection_context",
                  "auxiliary_manual", "auxiliary_manual_entity", "handoff", "notifications",
                  "enabled_intent", "takeover_pending",
@@ -789,7 +789,7 @@ class RecoveryStatus(ControllerEntity):
         status = self.runtime.status
         return {key: status[key] for key in
                 ("phase", "waiting_devices", "recovery_details", "settle_remaining_seconds",
-                 "integration_recovery", "cycle_holds", "head_stop_reasons", "head_transition_history", "pending_head_commands",
+                 "integration_recovery", "cycle_holds", "head_stop_reasons", "head_transition_history", "pending_head_commands", "head_fan_trial",
                  "head_constraints", "head_protections", "unavailable_mode_requests", "mode_scores",
                  "shared_stop", "handoff", "unload", "auxiliary_manual", "notifications") if key in status} | heartbeat_attributes(status) | {
                     "head_transition_summary": head_transition_summary(

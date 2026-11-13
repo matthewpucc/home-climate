@@ -176,6 +176,9 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                                 entity_id=config.entity("auxiliary_authorization", "input_datetime"),
                                 timestamp=now.timestamp())
                         executor.step(plan, states, time.monotonic())
+                        fan_trial_step = getattr(ha, "fan_trial_step", None)
+                        if callable(fan_trial_step):
+                            fan_trial_step(executor, plan)
                         status = (f"Requested {plan.mode}; {executor.phase}. " + "; ".join(plan.reasons + plan.warnings))[:255]
                         if states.get(config.entity("status", "input_text"), {}).get("state") != status:
                             ha.service("input_text", "set_value", entity_id=config.entity("status", "input_text"), value=status)

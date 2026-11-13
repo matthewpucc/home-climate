@@ -211,3 +211,37 @@ class NativeDispatchTests(unittest.IsolatedAsyncioTestCase):
         finally:
             for coroutine in queued:
                 coroutine.close()
+
+    async def test_head_fan_requires_reservation_and_does_not_replace_hvac_pending(self):
+        runtime, executor, guest = await self.running_head()
+        await self.settle_watchdog(runtime.controls)
+        with self.assertRaises(HAActivationDeferred):
+            await asyncio.to_thread(runtime.api.service,"climate","set_fan_mode",entity_id=guest,fan_mode="low")
+        self.assertNotIn(guest,executor.pending)
+        self.assertTrue(runtime.controls.enabled)
+
+    async def test_optional_trial_wait_is_bounded_and_abandoned_work_fails_closed(self):
+        runtime, executor, guest = await self.running_head()
+        manager = Mock()
+        manager.trial = Mock(entity_id=guest, stage="active")
+        manager.error = None
+        manager.async_tick = Mock(return_value=asyncio.sleep(0))
+        runtime.api.head_fan_trials = manager
+        future = Mock()
+        future.result.side_effect = FutureTimeout()
+        queued=[]
+        def hold(coroutine,loop):
+            queued.append(coroutine)
+            return future
+        try:
+            with patch("custom_components.house_climate.runtime.asyncio.run_coroutine_threadsafe",side_effect=hold):
+                await asyncio.to_thread(runtime.api.fan_trial_step,executor,Mock())
+            future.result.assert_called_once_with(timeout=8)
+            self.assertIn("dispatch blocked",manager.error)
+            self.assertTrue(runtime.controls.enabled)
+            with patch("custom_components.house_climate.runtime.asyncio.run_coroutine_threadsafe") as schedule:
+                await asyncio.to_thread(runtime.api.fan_trial_step,executor,Mock())
+                schedule.assert_not_called()
+        finally:
+            for coro in queued: coro.close()
+            runtime.api.head_fan_trials = runtime.head_fan_trials

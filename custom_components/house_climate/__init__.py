@@ -108,6 +108,37 @@ async def async_setup_entry(hass, entry):
         except (OSError, ValueError, sqlite3.Error) as exc:
             raise HomeAssistantError("Thermal history query failed; check storage diagnostics") from exc
 
+    async def head_fan_trial(call):
+        manager = runtime.head_fan_trials
+        if hass.data.get(DOMAIN) is not runtime or manager is None or runtime.stop_event.is_set():
+            raise HomeAssistantError("Head fan trials unavailable")
+        try:
+            if call.service == "acknowledge_head_fan_restoration":
+                return await manager.async_acknowledge_restoration()
+            if call.service == "cancel_head_fan_trial":
+                return await manager.async_cancel()
+            data = dict(call.data)
+            data.pop("confirm")
+            return await manager.async_enroll(**data)
+        except (ValueError, RuntimeError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
+    hass.services.async_register(DOMAIN, "start_head_fan_trial", head_fan_trial,
+        schema=vol.Schema({
+            vol.Required("confirm"): vol.All(bool, vol.In((True,))),
+            vol.Required("entity_id"): str,
+            vol.Required("room_ids"): [str],
+            vol.Required("mode"): str,
+            vol.Required("duration_minutes"): vol.All(vol.Coerce(int), vol.Range(min=10, max=720)),
+            vol.Optional("sleep_sensitive", default=True): bool,
+            vol.Optional("overnight_authorized", default=False): bool,
+        }), supports_response=SupportsResponse.OPTIONAL)
+    hass.services.async_register(DOMAIN, "acknowledge_head_fan_restoration", head_fan_trial,
+        schema=vol.Schema({vol.Required("confirm"):vol.All(bool, vol.In((True,)))}),
+        supports_response=SupportsResponse.OPTIONAL)
+    hass.services.async_register(DOMAIN, "cancel_head_fan_trial", head_fan_trial,
+        schema=vol.Schema({}), supports_response=SupportsResponse.OPTIONAL)
+
     hass.services.async_register(DOMAIN, "thermal_history_query", thermal_history_query,
         schema=vol.Schema({vol.Required("start"):vol.Coerce(float),
                            vol.Required("end"):vol.Coerce(float),
@@ -145,6 +176,9 @@ async def async_unload_entry(hass, entry):
         runtime._set_unload_phase("platforms")
         unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         if unloaded:
+            hass.services.async_remove(DOMAIN, "acknowledge_head_fan_restoration")
+            hass.services.async_remove(DOMAIN, "start_head_fan_trial")
+            hass.services.async_remove(DOMAIN, "cancel_head_fan_trial")
             hass.services.async_remove(DOMAIN, "generate_package")
             hass.services.async_remove(DOMAIN, "thermal_history_query")
             hass.services.async_remove(DOMAIN, "commission_heater_relay")
