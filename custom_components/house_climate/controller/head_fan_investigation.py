@@ -1,7 +1,8 @@
 """Read-only fan investigation evidence. Never generates actuator requests.
 
 HA fan_mode is a cached report, not proof of fan RPM or command acceptance.
-The future executor must obtain an independent post-command physical poll.
+The optional trial adapter labels cached corroboration unverified; no physical
+poll provenance is inferred.
 """
 from __future__ import annotations
 

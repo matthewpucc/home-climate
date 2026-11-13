@@ -16,7 +16,7 @@ from .controller.thermal_history import ThermalHistory, digest, encode
 
 BACKUP_FENCE = "house_climate_history_backup_fence"
 _LOGGER = logging.getLogger(__name__)
-_FIELDS = ("rooms", "room_targets", "head_fan_investigation", "head_call_targets_f",
+_FIELDS = ("head_fan_trial", "rooms", "room_targets", "head_fan_investigation", "head_call_targets_f",
            "mode", "phase", "window_states", "outdoor_source_evidence", "fans",
            "inhibited_heads", "device_issues", "pending_head_commands", "warnings")
 

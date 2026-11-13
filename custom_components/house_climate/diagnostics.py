@@ -10,7 +10,8 @@ async def async_get_config_entry_diagnostics(hass, entry):
     runtime = entry.runtime_data
     heads = getattr(getattr(runtime, "config", None), "heads", {})
     history = getattr(runtime, "thermal_storage", None)
-    return {"thermal_storage": history.diagnostics if history else {"status": "unavailable"},
+    return {"head_fan_trial": getattr(runtime, "status", {}).get("head_fan_trial"),
+            "thermal_storage": history.diagnostics if history else {"status": "unavailable"},
             "head_transitions": {
                 "history_limit_per_head": HEAD_TRANSITION_LIMIT,
                 "persistence": "process_local",

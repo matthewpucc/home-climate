@@ -62,3 +62,51 @@ thermal_history_query:
           min: 1
           max: 1000
           mode: box
+start_head_fan_trial:
+  name: Start bounded heat pump fan trial
+  description: Explicitly enroll one natural conditioning call. Does not force HVAC demand. Cached reports do not prove physical fan speed. Default disabled; all served rooms must be listed.
+  fields:
+    confirm:
+      required: true
+      selector:
+        boolean:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          domain: climate
+    room_ids:
+      required: true
+      example: [synthetic_room]
+      selector:
+        object:
+    mode:
+      required: true
+      selector:
+        text:
+    duration_minutes:
+      required: true
+      selector:
+        number:
+          min: 10
+          max: 720
+          unit_of_measurement: min
+    sleep_sensitive:
+      default: true
+      selector:
+        boolean:
+    overnight_authorized:
+      default: false
+      selector:
+        boolean:
+cancel_head_fan_trial:
+  name: Cancel heat pump fan trial
+  description: End enrollment or request baseline restoration under the existing ownership lease. Does not bypass safety or replay uncertain writes.
+acknowledge_head_fan_restoration:
+  name: Acknowledge heat pump fan restoration review
+  description: After human inspection/restoration, retire an interrupted trial only when the baseline is reported and no device service remains pending. Does not operate equipment or prove physical fan speed.
+  fields:
+    confirm:
+      required: true
+      selector:
+        boolean:

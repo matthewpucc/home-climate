@@ -113,6 +113,10 @@ class ThermalHistory:
             inserted = db.execute("INSERT OR IGNORE INTO decisions VALUES (?,?,?,?,?)", (entry,session,at,regime,body)).rowcount
             if not inserted:
                 return
+            # Trial lifecycle journal entries are durable events, not empty
+            # room samples; do not break otherwise continuous demand episodes.
+            if payload.get("event") == "fan_trial":
+                return
             latest = db.execute("SELECT max(at) FROM decisions WHERE entry=?", (entry,)).fetchone()[0]
             if latest > at:
                 # Preserve out-of-order evidence as a decision, but do not let a
@@ -133,6 +137,9 @@ class ThermalHistory:
                 fan = payload.get("head_fan_investigation", {}).get("heads", {}).get(head, {})
                 context = encode({"event":payload.get("event"),"mode":payload.get("mode"),
                     "phase":payload.get("phase"),"target":targets,
+                    "fan_trial": {k: payload.get("head_fan_trial", {}).get("trial", {}).get(k)
+                        for k in ("trial_id", "entity_id", "mode", "stage")}
+                        if isinstance(payload.get("head_fan_trial", {}).get("trial"), dict) else None,
                     "fan":{k:fan.get(k) for k in ("entity_id","reported_mode","physical_confirmation","reason")},
                     "head_call_target":payload.get("head_call_targets_f", {}).get(head),
                     "windows":payload.get("window_states", {}),

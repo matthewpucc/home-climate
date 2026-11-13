@@ -165,3 +165,14 @@ class ThermalHistoryTests(unittest.TestCase):
         self.store.open()
         self.store.cleanup(32*DAY)
         self.assertEqual(len(self.store.lookback(0,2000)["summaries"]),1)
+
+    def test_trial_journal_roundtrip_does_not_break_room_episode(self):
+        self.append(1000)
+        trial = {"trial_id":"synthetic-trial", "entity_id":"climate.test", "mode":"low", "stage":"request_reserved"}
+        self.store.append("entry", "session", 1005, REGIME,
+                          {"event":"fan_trial", "head_fan_trial":{"trial":trial,"physical_confirmation":"unknown"}})
+        self.append(1010)
+        rows = self.store.lookback(900,1100)
+        self.assertEqual(len(rows["episodes"]),1)
+        self.assertEqual(rows["episodes"][0]["decisions"],2)
+        self.assertIn("synthetic-trial",str(rows["decisions"]))

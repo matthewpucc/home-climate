@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add opt-in, journaled one-call heat-pump blower trials with native ownership/interlock gates, bounded expiry and baseline restoration; installation starts no trial.
+- Keep cached fan reports explicitly physically unverified, record trial lifecycle in thermal history, and retain interrupted/uncertain restoration for review without replay.
+- Add explicit sleep-sensitive/overnight scope, joint shared-head room enrollment, and manual fan-service precedence.
+
+
 ## 0.9.17
 
 - Add persistent per-room purifier minimum speed controls without reload, preserving schedule and thermal boosts, exact overrides, existing defaults, and recovery safeguards.

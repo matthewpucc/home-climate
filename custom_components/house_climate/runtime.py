@@ -13,7 +13,7 @@ import threading
 import time
 from types import SimpleNamespace
 
-from homeassistant.core import callback
+from homeassistant.core import callback, Context
 from homeassistant.components.climate.const import DATA_COMPONENT
 from homeassistant.helpers.temperature import display_temp
 from homeassistant.util.unit_conversion import TemperatureConverter
@@ -94,7 +94,8 @@ def controller_entity_ids(config):
 class NativeActivationDispatch:
     """Serialize worker abandonment with HA-loop dispatch for one positive call."""
 
-    def __init__(self, deadline, window_authorization=None, auxiliary_target=None, airflow_authorization=None):
+    def __init__(self, deadline, window_authorization=None, auxiliary_target=None, airflow_authorization=None, fan_trial_token=None):
+        self.fan_trial_token = fan_trial_token
         self.deadline = deadline
         self.window_authorization = window_authorization
         self.auxiliary_target = auxiliary_target
@@ -152,9 +153,10 @@ class NativeAPI:
         # on this runtime, without becoming a persisted emergency-guard latch.
         self.auxiliary_startup_failure = None
         self._auxiliary_target_snapshot = None
+        self.head_fan_trials = None
 
     def request(self, path, body=None, *, window_authorization=None,
-                activation_deadline=None, auxiliary_target=None, airflow_authorization=None):
+                activation_deadline=None, auxiliary_target=None, airflow_authorization=None, fan_trial_token=None):
         if body is not None and not self.live:
             raise HAError("Shadow mode forbids all service calls")
         if threading.get_ident() == self.hass.loop_thread_id:
@@ -189,7 +191,7 @@ class NativeAPI:
             deadline = min(deadline, self._activation_deadline(activation_deadline))
             if deadline <= time.monotonic():
                 raise HAActivationDeferred("Activation deadline expired before dispatch")
-        dispatch = (NativeActivationDispatch(deadline, window_authorization, auxiliary_target, airflow_authorization)
+        dispatch = (NativeActivationDispatch(deadline, window_authorization, auxiliary_target, airflow_authorization, fan_trial_token)
                     if activation and (self.controls is not None or window_authorization is not None
                                        or bounded_activation or auxiliary_target is not None
                                        or airflow_authorization is not None) else None)
@@ -574,6 +576,11 @@ class NativeAPI:
             from .airflow_adapter import validate_dispatch
             actual_domain, actual_service, actual_body = validate_dispatch(
                 self, dispatch.airflow_authorization, service, body)
+        if domain == "climate" and service == "set_fan_mode":
+            if self.head_fan_trials is None or dispatch is None:
+                raise HAActivationDeferred("Fan dispatch requires a current trial reservation")
+            self.head_fan_trials.validate_dispatch(dispatch.fan_trial_token,
+                                                   body.get("entity_id"), body.get("fan_mode"))
         if dispatch is not None:
             dispatch.begin()
         if controls and activation:
@@ -601,7 +608,8 @@ class NativeAPI:
                 if auxiliary_off:
                     operation.observation = controls.observations.record(
                         controls, "off_dispatched", command=operation.observation)
-                await self.hass.services.async_call(actual_domain, actual_service, actual_body, blocking=True)
+                await self.hass.services.async_call(actual_domain, actual_service, actual_body, blocking=True,
+                    context=Context(id=dispatch.fan_trial_token) if dispatch and dispatch.fan_trial_token else None)
                 if auxiliary_off:
                     controls.observations.record(controls, "off_completed",
                                                  command=operation.observation, receipt=off_receipt)
@@ -728,6 +736,27 @@ class NativeAPI:
             raise HAActivationDeferred("Activation deadline must be a finite monotonic time")
         return deadline
 
+    def fan_trial_step(self, executor, plan):
+        manager = self.head_fan_trials
+        if (manager is None or manager.trial is None or manager.error
+                or manager.trial.stage in {"complete", "cancelled", "needs_attention"}):
+            return
+        entity = manager.trial.entity_id
+        pending = (entity in executor.pending or entity in executor.recoveries
+                   or bool(self.service_jobs({entity}) or self.uncertain_service_jobs({entity})))
+        safe = (executor.phase == "running" and not executor.device_issues.get(entity)
+                and entity not in executor.capability_blocks)
+        future = asyncio.run_coroutine_threadsafe(
+            manager.async_tick(pending=pending, safe=safe, plan=plan), self.hass.loop)
+        # The ordinary executor has finished this cycle before optional fan work.
+        # Safety watchdogs remain independent on the HA loop.
+        try:
+            future.result(timeout=8)
+        except Exception:
+            # Optional experimentation must not take down ordinary climate control.
+            manager.error = "Fan trial processing failed; dispatch blocked and review required"
+            _LOGGER.exception("Head fan trial processing failed")
+
     def service_before(self, domain, service, *, deadline, auxiliary_target=None, **data):
         """Bound positive dispatch without leaking controller metadata to HA."""
         path = f"services/{domain}/{service}"
@@ -766,6 +795,7 @@ class ControllerRuntime:
         self.notification_settings = notification_settings
         self.seasonal_state = None
         self.thermal_storage = None
+        self.head_fan_trials = None
         self.api = NativeAPI(hass, live, self.stop_event, config)
         self.api.heartbeat_notify = self._async_heartbeat_changed
         self.thread = None
@@ -835,6 +865,10 @@ class ControllerRuntime:
                     self.controls.auxiliary_limit_provider = self._auxiliary_room_limit
                     self.controls.auxiliary_context_provider = self._auxiliary_room_context
                 await self.controls.async_load()
+                from .head_fan_trials import HeadFanTrials
+                self.head_fan_trials = HeadFanTrials(self, entry_id)
+                await self.head_fan_trials.async_load()
+                self.api.head_fan_trials = self.head_fan_trials
             if self.house_policy:
                 from .power_guard import HeaterPowerGuard
                 self.power_guard = HeaterPowerGuard(
@@ -1079,6 +1113,9 @@ class ControllerRuntime:
             }
         if self.controls and event == "live" and not self.controls.enabled:
             event = "stopping" if self.controls.owned else "shadow"
+        if self.head_fan_trials is not None:
+            self.head_fan_trials.check_lifecycle()
+            data["head_fan_trial"] = self.head_fan_trials.diagnostics
         self.status = {"event": event, **data, **self.last_fault}
         if self.thermal_storage is not None:
             self.thermal_storage.observe(event, data)
@@ -1408,6 +1445,12 @@ class ControllerRuntime:
                     self._update_power_guard_status()
             if closed:
                 self._logged_unload_blockers = None
+                if self.head_fan_trials is not None:
+                    try:
+                        async with asyncio.timeout(1):
+                            await self.head_fan_trials.async_close()
+                    except Exception:
+                        self.head_fan_trials.error = "Trial shutdown journal unresolved; review before further trials"
                 if self.seasonal_state is not None:
                     self._set_unload_phase("seasonal_storage")
                     await self.seasonal_state.async_close()
