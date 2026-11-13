@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add persistent per-room purifier minimum speed controls without reload, preserving schedule and thermal boosts, exact overrides, existing defaults, and recovery safeguards.
+
 ## 0.9.16
 
 - Add a bounded, Home Climate-only head-fan command evidence lifecycle with fixed deadlines, cancellation and cached-report consistency checks. Physical confirmation remains unknown. Document explicit non-sleep-sensitive overnight trial eligibility while protecting Primary; no runtime dispatch, fan experiment, learned actuation, or Kumo change is enabled.

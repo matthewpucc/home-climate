@@ -1311,6 +1311,8 @@ class Executor:
                 plan.reasons.append(message)
         for entity, percentage in plan.fans.items():
             fan = next((fan for fan in self.config.fan_controls.values() if fan.entity_id == entity), None)
+            if fan and entity in plan.fan_minimum_percentages:
+                fan = replace(fan, minimum_percentage=plan.fan_minimum_percentages[entity])
             if fan and entity in plan.fan_speed_overrides:
                 fan = replace(fan, speed_override=plan.fan_speed_overrides[entity])
             minimum = fan.purification_minimum if fan else 0

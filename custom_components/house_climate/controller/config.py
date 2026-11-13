@@ -181,15 +181,17 @@ class PurifierPolicy:
     living_percentage: float = 100
     airflow_profiles: dict = field(default_factory=dict)
     room_overrides: dict[str, float] = field(default_factory=dict)
+    room_minimums: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self):
         from .bindings import ROOM_ROLES
-        if not isinstance(self.room_overrides, dict) or set(self.room_overrides) - ROOM_ROLES:
-            raise ValueError("Purifier room overrides must name configured house room roles")
-        for value in self.room_overrides.values():
-            if (isinstance(value, bool) or not isinstance(value, (int, float))
-                    or not math.isfinite(value) or not 0 <= value <= 100):
-                raise ValueError("Purifier room overrides must be finite percentages from 0 to 100")
+        for label, values in (("overrides", self.room_overrides), ("minimums", self.room_minimums)):
+            if not isinstance(values, dict) or set(values) - ROOM_ROLES:
+                raise ValueError(f"Purifier room {label} must name configured house room roles")
+            for value in values.values():
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or not 0 <= value <= 100):
+                    raise ValueError(f"Purifier room {label} must be finite percentages from 0 to 100")
 
 
 @dataclass(frozen=True)
@@ -625,6 +627,7 @@ class Settings:
     room_profiles: dict[str, Profile] = field(default_factory=dict)
     seasonal_profile: str = "cool"
     room_fan_overrides: dict[str, float | None] = field(default_factory=dict)
+    room_fan_minimums: dict[str, float] = field(default_factory=dict)
 
     @classmethod
     def read(cls, states, config, strict=False):

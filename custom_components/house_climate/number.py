@@ -13,12 +13,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
                 for room_id in entry.runtime_data.config.zones]
     entities.extend(RoomPurifierSpeed(entry, room_id)
                     for room_id in getattr(getattr(entry.runtime_data, "purifier_speeds", None), "rooms", ()))
+    entities.extend(RoomPurifierMinimum(entry, room_id)
+                    for room_id in getattr(getattr(entry.runtime_data, "purifier_speeds", None), "rooms", ()))
     registry = er.async_get(hass)
     current = {entity.unique_id for entity in entities}
     prefix = f"{entry.entry_id}_desired_"
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if (entity.domain == "number" and entity.platform == DOMAIN
-                and entity.unique_id.startswith((prefix, f"{entry.entry_id}_purifier_speed_")) and entity.unique_id not in current):
+                and entity.unique_id.startswith((prefix, f"{entry.entry_id}_purifier_speed_",
+                                                        f"{entry.entry_id}_purifier_minimum_")) and entity.unique_id not in current):
             registry.async_remove(entity.entity_id)
     async_add_entities(entities)
 
@@ -85,5 +88,30 @@ class RoomPurifierSpeed(RoomControl, NumberEntity):
             raise ServiceValidationError("Use Resume automatic purifier speed to clear the override")
         try:
             await self.runtime.purifier_speeds.async_set(self.room_id, value)
+        except (ValueError, OSError) as exc:
+            raise ServiceValidationError(str(exc)) from exc
+
+
+class RoomPurifierMinimum(RoomPurifierSpeed):
+    """Persistent automatic baseline, independent from the exact speed override."""
+
+    def __init__(self, entry, room_id):
+        RoomControl.__init__(self, entry, room_id, f"purifier_minimum_{room_id}")
+        room = self.runtime.config.zones[room_id]
+        self._attr_name = f"{room.name or room_id} purifier minimum speed"
+
+    @property
+    def native_value(self):
+        return self.runtime.purifier_speeds.minimum(self.room_id)
+
+    @property
+    def extra_state_attributes(self):
+        return {"room_id": self.room_id, "speed_mode": "automatic_minimum"}
+
+    async def async_set_native_value(self, value):
+        if self.runtime.stop_event.is_set():
+            raise ServiceValidationError("Purifier controls are stopping")
+        try:
+            await self.runtime.purifier_speeds.async_set_minimum(self.room_id, value)
         except (ValueError, OSError) as exc:
             raise ServiceValidationError(str(exc)) from exc

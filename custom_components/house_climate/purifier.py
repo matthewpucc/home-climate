@@ -16,9 +16,17 @@ class RoomPurifierSpeeds:
         self.config, self.notify, self.wake_event = config, notify, wake_event
         self.store = Store(hass, 1, f"house_climate.{entry_id}.purifier_speeds")
         self.rooms = tuple(sorted({fan.room for fan in config.fan_controls.values()}))
-        self._snapshot = MappingProxyType({})
+        self._state = (MappingProxyType({}), MappingProxyType({}))
         self._lock = asyncio.Lock()
         self._closed = False
+
+    @property
+    def _snapshot(self):
+        return self._state[0]
+
+    @property
+    def _minimums(self):
+        return self._state[1]
 
     def _fingerprint(self, room):
         # An intentional configuration/wiring change supersedes dashboard intent.
@@ -38,18 +46,31 @@ class RoomPurifierSpeeds:
         values = {fan.speed_override for fan in self.config.fan_controls.values() if fan.room == room}
         return values.pop() if len(values) == 1 else None
 
+    def minimum(self, room):
+        if room in self._minimums:
+            return self._minimums[room]
+        values = [fan.minimum_percentage for fan in self.config.fan_controls.values() if fan.room == room]
+        return max(values, default=0)
+
     def fan_controls(self):
-        snapshot = self._snapshot
-        return {key: replace(fan, speed_override=snapshot[fan.room])
-                if fan.room in snapshot else fan
+        snapshot, minimums = self._state
+        return {key: replace(fan,
+                             minimum_percentage=minimums.get(fan.room, fan.minimum_percentage),
+                             speed_override=snapshot.get(fan.room, fan.speed_override))
                 for key, fan in self.config.fan_controls.items()}
 
     def settings(self, settings):
-        return replace(settings, room_fan_overrides=dict(self._snapshot))
+        snapshot, minimums = self._state
+        return replace(settings, room_fan_overrides=dict(snapshot),
+                       room_fan_minimums=dict(minimums))
 
-    def _data(self, values):
-        return {"rooms": {room: {"percentage": value, "fingerprint": self._fingerprint(room)}
-                          for room, value in values.items()}}
+    def _data(self, values, minimums=None):
+        result = {"rooms": {room: {"percentage": value, "fingerprint": self._fingerprint(room)}
+                            for room, value in values.items()}}
+        if minimums:
+            result["minimums"] = {room: {"percentage": value, "fingerprint": self._fingerprint(room)}
+                                  for room, value in minimums.items()}
+        return result
 
     async def async_load(self):
         async with self._lock:
@@ -64,10 +85,21 @@ class RoomPurifierSpeeds:
                             values[room] = saved["percentage"]
                     except (KeyError, TypeError, ValueError):
                         continue
-            normalized = self._data(values)
+            minimums = {}
+            saved_minimums = data.get("minimums", {}) if isinstance(data, dict) else {}
+            if isinstance(saved_minimums, dict):
+                for room, saved in saved_minimums.items():
+                    try:
+                        value = saved["percentage"]
+                        self._validate(room, value)
+                        if value is not None and saved["fingerprint"] == self._fingerprint(room):
+                            minimums[room] = value
+                    except (KeyError, TypeError, ValueError):
+                        continue
+            normalized = self._data(values, minimums)
             if data is not None and data != normalized:
                 await self.store.async_save(normalized)
-            self._snapshot = MappingProxyType(values)
+            self._state = (MappingProxyType(values), MappingProxyType(minimums))
 
     async def async_set(self, room, value):
         """None explicitly resumes automatic policy, including configured floors."""
@@ -76,8 +108,22 @@ class RoomPurifierSpeeds:
                 raise ValueError("Purifier controls are stopping")
             self._validate(room, value)
             values = {**self._snapshot, room: value}
-            await self.store.async_save(self._data(values))
-            self._snapshot = MappingProxyType(values)
+            await self.store.async_save(self._data(values, self._minimums))
+            self._state = (MappingProxyType(values), self._minimums)
+            self.wake_event.set()
+            self.notify()
+
+    async def async_set_minimum(self, room, value):
+        """Set a baseline without replacing automatic demand or an exact override."""
+        async with self._lock:
+            if self._closed:
+                raise ValueError("Purifier controls are stopping")
+            self._validate(room, value)
+            if value is None:
+                raise ValueError("Purifier minimum must be a percentage")
+            minimums = {**self._minimums, room: value}
+            await self.store.async_save(self._data(self._snapshot, minimums))
+            self._state = (self._snapshot, MappingProxyType(minimums))
             self.wake_event.set()
             self.notify()
 

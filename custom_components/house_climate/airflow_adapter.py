@@ -145,6 +145,8 @@ def validate_dispatch(api, ticket, service, body):
     config = replace(api.config, timezone=api.hass.config.time_zone)
     settings = (api.settings_provider(states, config, now) if api.settings_provider
                 else Settings.read(states, config))
+    if fan.room in settings.room_fan_minimums:
+        fan = replace(fan, minimum_percentage=settings.room_fan_minimums[fan.room])
     if fan.room in settings.room_fan_overrides:
         fan = replace(fan, speed_override=settings.room_fan_overrides[fan.room])
     policy = Policy(config)

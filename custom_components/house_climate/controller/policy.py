@@ -95,6 +95,7 @@ class Plan:
     fan_head_assists: dict[str, str] = field(default_factory=dict)
     fan_airflow: dict[str, dict] = field(default_factory=dict)
     fan_speed_overrides: dict[str, float | None] = field(default_factory=dict)
+    fan_minimum_percentages: dict[str, float] = field(default_factory=dict)
     outdoor_source_evidence: dict = field(default_factory=dict)
     rooms: dict = field(default_factory=dict)
     room_targets: dict = field(default_factory=dict)
@@ -354,9 +355,11 @@ class Policy:
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F", *, context=None,
                monotonic_now=None) -> Plan:
         settings = self.seasonal_settings(states, now, settings)
-        self.fan_controls = {key: replace(fan, speed_override=settings.room_fan_overrides[fan.room])
-                             if fan.room in settings.room_fan_overrides else fan
-                             for key, fan in self.config.fan_controls.items()}
+        self.fan_controls = {
+            key: replace(fan,
+                         minimum_percentage=settings.room_fan_minimums.get(fan.room, fan.minimum_percentage),
+                         speed_override=settings.room_fan_overrides.get(fan.room, fan.speed_override))
+            for key, fan in self.config.fan_controls.items()}
         self.context = context if context is not None else self.operating.environment(states, now)
         LOW, HIGH = limits(self.config, self.context)
         profiles = {key: settings.profile(room, now, self.config.timezone, key) for key, room in self.config.zones.items()}
@@ -376,7 +379,9 @@ class Policy:
         self.head_guard.context = self.context
         plan = Plan(rooms={k: asdict(v) for k, v in rooms.items()}, warnings=warnings,
                     fan_speed_overrides={fan.entity_id: fan.speed_override
-                                         for fan in self.fan_controls.values()})
+                                         for fan in self.fan_controls.values()},
+                    fan_minimum_percentages={fan.entity_id: fan.minimum_percentage
+                                             for fan in self.fan_controls.values()})
         if self.operating.outdoor_observation is not None:
             sampled_at, samples = self.operating.outdoor_observation
             plan.outdoor_source_evidence = {"sampled_at": sampled_at,

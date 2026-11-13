@@ -219,7 +219,8 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
                 else:
                     rooms[identities[name]][field] = deepcopy(value)
     purifiers = data["purifiers"]
-    overrides = PurifierPolicy(**purifiers).room_overrides
+    purifier_policy = PurifierPolicy(**purifiers)
+    overrides = purifier_policy.room_overrides
     from .airflow_defaults import house_airflow
     for device in ("office", "entertainment"):
         rooms[identities[device]]["fans"][0]["airflow"] = house_airflow(
@@ -233,6 +234,9 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
             "percentage": purifiers["living_percentage"],
             "minimum_percentage": purifiers["living_percentage"],
         }]
+    for role, percentage in purifier_policy.room_minimums.items():
+        for fan in rooms[identities[role]].get("fans", ()):
+            fan["minimum_percentage"] = percentage
     for role, percentage in overrides.items():
         for fan in rooms[identities[role]].get("fans", ()):
             fan["speed_override"] = percentage
@@ -268,6 +272,8 @@ def editable_policy_settings(config, bindings):
     purifiers = asdict(config.purifiers)
     if not purifiers["airflow_profiles"]:
         purifiers.pop("airflow_profiles")
+    if not purifiers["room_minimums"]:
+        purifiers.pop("room_minimums")
     if not purifiers["room_overrides"]:
         purifiers.pop("room_overrides")
     return {"rooms": rooms, "auxiliary_policy": asdict(config.auxiliary_policy),

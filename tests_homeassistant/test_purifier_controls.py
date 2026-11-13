@@ -143,3 +143,61 @@ class PurifierControlTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ha.data[FAN]["attributes"]["percentage"], value if value is not None else 20)
         self.assertEqual(self.cfg.fan_controls[FAN].speed_override, None)
         self.assertEqual(self.cfg.fan_controls["fan.synthetic_beta"].speed_override, 65)
+
+    async def test_room_minimum_is_live_persistent_and_does_not_cap_demand(self):
+        from custom_components.house_climate.number import RoomPurifierMinimum
+        minimum = RoomPurifierMinimum(self.entry, "alpha")
+        self.assertEqual(minimum.native_value, 20)
+        cadence = DecisionCadence(self.cfg, clock=lambda: 0)
+        data = states(self.cfg, {"alpha": 73, "beta": 72, "gamma": 68})
+        for tick, value in enumerate((0, 75, 10)):
+            await minimum.async_set_native_value(value)
+            settings = self.manager.settings(Settings.read(data, self.cfg))
+            plan = cadence.decide(data, NOW + timedelta(seconds=tick), settings, monotonic_now=tick)
+            self.assertEqual(plan.fans[FAN], max(value, 60))
+            self.assertEqual((await self.make_manager()).minimum("alpha"), value)
+            self.assertEqual(self.manager.minimum("beta"), 20)
+        await self.number.async_set_native_value(5)
+        await minimum.async_set_native_value(80)
+        settings = self.manager.settings(Settings.read(data, self.cfg))
+        plan = cadence.decide(data, NOW + timedelta(seconds=4), settings, monotonic_now=4)
+        self.assertEqual(plan.fans[FAN], 5)
+        await self.resume.async_press()
+        self.assertEqual(self.manager.minimum("alpha"), 80)
+        self.assertEqual(self.manager.fan_controls()[FAN].requested_percentage(60), 80)
+
+    async def test_minimum_storage_validation_and_old_override_migration(self):
+        from custom_components.house_climate.number import RoomPurifierMinimum
+        minimum = RoomPurifierMinimum(self.entry, "alpha")
+        await self.number.async_set_native_value(10)
+        restored = await self.make_manager()  # Old store shape contains only rooms.
+        self.assertEqual(restored.effective("alpha"), 10)
+        self.assertEqual(restored.minimum("alpha"), 20)
+        await asyncio.gather(self.manager.async_set("alpha", 30), self.manager.async_set_minimum("beta", 40))
+        restored = await self.make_manager()
+        self.assertEqual(restored.effective("alpha"), 30)
+        self.assertEqual(restored.minimum("beta"), 40)
+        for value in (True, False, "70", None, -1, 101, float("nan"), float("inf")):
+            with self.subTest(value=value), self.assertRaises(ServiceValidationError):
+                await minimum.async_set_native_value(value)
+        with patch.object(self.manager.store, "async_save", new=AsyncMock(side_effect=OSError("disk full"))):
+            with self.assertRaises(ServiceValidationError):
+                await minimum.async_set_native_value(60)
+        self.assertEqual(minimum.native_value, 20)
+        await self.manager.async_close()
+        with self.assertRaises(ServiceValidationError):
+            await minimum.async_set_native_value(60)
+
+    async def test_minimum_recovery_and_configuration_invalidation(self):
+        from custom_components.house_climate.handoff import arm
+        await self.manager.async_set_minimum("alpha", 70)
+        controls = SimpleNamespace(config=replace(self.cfg, fallback=FallbackPolicy()), live=True,
+                                   fan_controls_provider=self.manager.fan_controls)
+        plan = arm(controls, self.cfg.fans.values())
+        self.assertEqual(plan["fan_minimum_percentages"][FAN], 70)
+        await self.manager.async_set_minimum("alpha", 0)
+        self.assertEqual(plan["fan_minimum_percentages"][FAN], 70)
+        changed = replace(self.cfg, fan_controls={key: replace(fan, minimum_percentage=25)
+                          if fan.room == "alpha" else fan for key, fan in self.cfg.fan_controls.items()})
+        restored = await self.make_manager(changed)
+        self.assertEqual(restored.minimum("alpha"), 25)
