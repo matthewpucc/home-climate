@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.17
 
 - Add persistent per-room purifier minimum speed controls without reload, preserving schedule and thermal boosts, exact overrides, existing defaults, and recovery safeguards.
 
