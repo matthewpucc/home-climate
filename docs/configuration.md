@@ -96,6 +96,39 @@ Generic room configurations keep a zero `minimum_percentage` on each fan control
 
 Existing unfinished recovery plans retain their saved targets; upgrading does not rewrite them. The native integration checks HA registry identities before dispatch. The standalone HTTP/CLI controller cannot establish those device associations, so its operator must verify that ordinary fan bindings are independent purifiers and never heater aliases.
 
+### Room minimum speeds
+
+Each configured purifier room has a **<Room> purifier minimum speed** number in
+Home Climate. This is the automatic baseline, not an exact speed or a cap.
+Changing it saves immediately, survives restart, and wakes the controller without
+a reload. Automatic operation requests the higher of the room minimum and the
+existing schedule/thermal request. A minimum of **0% allows Off** when nothing
+else requests airflow; it does not force Off. For example, a Primary minimum of
+0% still permits its Sleep schedule to request 60%.
+
+The separate **purifier speed override** remains an exact override, with higher
+priority than both the minimum and automatic demand. Resume automatic clears only
+that override, not your room minimum. Device rounding, direction checks, control
+ownership, and safety checks are unchanged. This controls purifiers, not the heat
+pump blower or auxiliary heater.
+
+Existing installations keep their configured floors (house default 20%; generic
+fan default 0%). Living's separate always-on policy still requests
+`living_percentage` (default 100%): lowering its minimum alone will **not** lower
+that 100% request. Use its exact override for a deliberate fixed speed, or edit the
+Living policy. Recovery remains the higher of the effective baseline and recovery
+speed, and already armed recovery plans are not rewritten by dashboard edits.
+
+For baseline configuration, `purifiers.room_minimums` accepts the same canonical
+room keys as `room_overrides`, for example `{"primary": 0, "office": 30}`.
+Missing rooms inherit `minimum_percentage` (Living inherits `living_percentage`).
+An explicit zero replaces the fallback. The map is replaced when supplied;
+omitting it retains the saved map. Dashboard minima take precedence while the
+room's fan configuration and wiring remain unchanged; intentional configuration
+changes invalidate that room's saved dashboard settings. Settings changes in the
+configuration editor still use the normal reload. Existing saved exact overrides
+are retained when upgrading.
+
 ### Room speed overrides
 
 For routine changes, open the **Home Climate device** in Devices & services

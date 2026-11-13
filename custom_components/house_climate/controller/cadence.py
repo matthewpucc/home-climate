@@ -76,7 +76,8 @@ class DecisionCadence:
         return (tuple(profiles), tuple(sorted(settings.numbers.items())),
                 tuple(sorted((key, value.isoformat()) for key, value in settings.times.items())),
                 tuple(sorted(settings.toggles.items())), effects, protection,
-                context.confirmed_open_rooms, tuple(sorted(settings.room_fan_overrides.items())))
+                context.confirmed_open_rooms, tuple(sorted(settings.room_fan_overrides.items())),
+                tuple(sorted(settings.room_fan_minimums.items())))
 
     def _warning(self, message):
         if message not in self._safety_warnings:
