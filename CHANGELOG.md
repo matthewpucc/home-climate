@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.19
 
 - Distinguish expected dedicated heater meter silence after physically verified relay isolation from a powered meter fault. Keep raw evidence, explicit recovery, and post-restoration low-load checks intact; do not invent zero draw.
 
