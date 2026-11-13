@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.18
 
 - Add opt-in, journaled one-call heat-pump blower trials with native ownership/interlock gates, bounded expiry and baseline restoration; installation starts no trial.
 - Keep cached fan reports explicitly physically unverified and record trial lifecycle in thermal history.
