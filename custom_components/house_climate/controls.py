@@ -107,6 +107,12 @@ class NativeControls:
             if self.handoff is not None:
                 from .handoff import restored
                 self.handoff = restored(self.handoff)
+                from .handoff_blower import pending as blower_pending
+                if blower_pending(self.handoff):
+                    # A crash must not supersede the saved Auto fallback with
+                    # ordinary takeover while an experimental fan may remain.
+                    self._resume_requested = False
+                    self.takeover_pending = False
             devices = data.get("devices", [])
             if not isinstance(devices, list) or any(
                 not isinstance(entity, str) or not entity.startswith(("climate.", "fan."))
@@ -310,6 +316,9 @@ class NativeControls:
     async def _set_enabled(self, enabled, *, preserve_intent=False):
         self._resume_requested = False
         if enabled:
+            from .handoff_blower import pending as blower_pending
+            if blower_pending(self.handoff) and (self.recovering or not self.enabled):
+                raise HAError("Interrupted blower trial must finish native Auto recovery before control resumes")
             if (self.power_guard is not None
                     and getattr(self.power_guard, "commissioning_busy",
                                 getattr(self.power_guard, "commissioning_active", False))):
@@ -412,6 +421,16 @@ class NativeControls:
                                 "applying_started": None}
                 self.handoff.pop("interrupted", None)
                 self.handoff.pop("resume_after", None)
+                if plan.get("blower_recovery"):
+                    # This service is explicit renewed recovery intent, after
+                    # actual jobs ended and fresh shared-head Off was checked.
+                    self.handoff["blower_recovery"] = {}
+                    for entity, record in plan["blower_recovery"].items():
+                        state = self.hass.states.get(entity)
+                        self.handoff["blower_recovery"][entity] = {
+                            "trial_id": record["trial_id"], "mode": record["mode"],
+                            "baseline": state.attributes.get("fan_mode") or record["baseline"],
+                            "armed_at": instant, "stage": "pending", "attempts": 0}
                 try:
                     await self._save(self.owned, self.pending_fans)
                 except BaseException:

@@ -48,18 +48,38 @@ restore is never blindly replayed. A user/other automation fan service supersede
 the trial, even if it requests the same value; a return from observed trial mode
 to baseline also ends it without overwriting the external choice.
 
-On controller shutdown, lost ownership, reconfiguration, or restart, old intent
-**does not grant new actuator authority**. Unused enrollment is cancelled;
-interrupted attempts are retained as `needs_attention` for baseline review.
-Shutdown does not wait for experimental restoration before emergency Off or
-normal handoff. This conservative boundary means the current implementation is
-not suitable for unattended experiments that require guaranteed automatic
-restoration through a restart. Inspect/restore the desired baseline manually
-before calling `house_climate.acknowledge_head_fan_restoration` with
-`confirm: true`. This acknowledgment checks that the baseline is reported and
-no device operation remains pending/uncertain, then retires the obligation as
-human-reviewed, still physically unverified. It never operates equipment or
-silently clears a corrupt/unwritable journal.
+Before the first experimental write, a separate blower-Auto cleanup obligation
+is saved in native ownership storage. On shutdown, lost ownership, or restart,
+the experiment is never resumed. The native watchdog uses its existing shared-
+head Off and pending-job barriers, restores the affected blower to `fan_mode:
+auto`, and applies the normal saved HVAC fallback (`heat_cool` / Auto with the
+saved low/high temperature range). These are **two different settings**.
+Neither setpoints from the experiment nor a stale experimental fan command are
+replayed. Ordinary end/cancel still restores the pre-test fan baseline.
+
+An interrupted trial inhibits saved Controller-On takeover until recovery has
+finished; the controller remains stopped in native HVAC Auto rather than
+resuming the experiment. Re-enable ordinary Home Climate control explicitly
+when ready. Automatic recovery is not an absolute guarantee: offline equipment,
+missing Auto capability, changed bindings, unresolved service jobs, or an
+interrupted recovery command without a completion receipt retain an actionable
+obligation. Fresh Auto reports can reconcile an interrupted write; ambiguous
+writes are not blindly replayed. Blower failure does not withhold an otherwise
+safe HVAC Auto handoff, but final cleanup ownership remains until resolved.
+
+Later observed fan services take precedence, including same-value services.
+Explicit user HVAC changes inhibit the shared-system fallback rather than
+being overwritten; independent auxiliary safety Off remains active. Changes
+made while HA is down, particularly same-value changes, cannot reliably be
+distinguished from the experimental setting. Fresh reported state is checked,
+but this is not a claim that every offline manual action is observable.
+
+If recovery cannot finish, inspect the reported blocker. The existing
+`house_climate.acknowledge_head_fan_restoration` remains a human-review tool,
+not an equipment command or physical acknowledgment. Never use it to bypass an
+unresolved native handoff obligation. After inspecting the equipment and
+restoring fresh shared-head Off, the existing explicit recovery-retry action
+can renew the normal Auto handoff; it does not restart the experiment.
 
 ## Persistence and lookback
 

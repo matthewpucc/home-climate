@@ -48,6 +48,10 @@ def notification_disposition(controls):
     result = {}
     current = now()
     for entity in plan.get("problems", {}):
+        if entity.endswith(":blower"):
+            from .handoff_blower import notification_disposition as blower_disposition
+            result[entity] = blower_disposition(controls, plan, entity.removesuffix(":blower"))
+            continue
         disposition = "human_required"
         request = plan.get("requests", {}).get(entity)
         if (plan.get("stage") == "applying" and not plan.get("interrupted")
@@ -224,6 +228,8 @@ def validate(plan):
             or any(isinstance(value, bool) or not isinstance(value, (int, float))
                    or not math.isfinite(value) or not 0 <= value <= 100 for value in minimums.values())):
         raise ValueError("Invalid saved recovery purifier minimums")
+    from .handoff_blower import validate as validate_blower
+    validate_blower(plan)
     return deepcopy(plan)
 
 
@@ -315,6 +321,13 @@ async def step(controls):
     plan = controls.handoff
     if plan is None or controls.takeover_pending:
         return
+    # A later explicit HVAC action is not stale experimental authority. Do
+    # not overwrite it with even the usual shared-system Off/Auto sequence.
+    manual_heads = {entity for entity, record in plan.get("blower_recovery", {}).items()
+                    if record.get("manual_hvac")}
+    if manual_heads:
+        plan["problems"]["manual_hvac"] = "Operator took HVAC control during trial recovery; automatic handoff is inhibited"
+        plan["stage"] = "blocked"
     current = set(controls.config.heads.values()) | set(controls.config.fans.values())
     expected = set(plan["heads"]) | set(plan["fans"])
     if not expected <= current:
@@ -333,7 +346,7 @@ async def step(controls):
         except Exception as exc:
             save_error = exc
             plan["problems"]["persistence"] = f"Recovery persistence failed: {exc}"
-        stop_entities = [e for e in controls.owned if e.startswith("climate.")
+        stop_entities = [e for e in controls.owned if e.startswith("climate.") and e not in manual_heads
                          and not (controls.auxiliary_manual and e == controls.config.heater_entity)]
         await asyncio.gather(*(controls._off(e) for e in stop_entities
             if (not controls._is_off(e) or (e == controls.config.heater_entity
@@ -384,7 +397,14 @@ async def step(controls):
         await _save(controls)
     if plan["stage"] != "applying":
         return
+    from .handoff_blower import step as blower_step, pending as blower_pending
+    await blower_step(controls, plan)
+    if plan["stage"] != "applying":
+        return
     for entity in (*plan["heads"], *plan["fans"]):
+        blower_job = controls._handoff_jobs.get(entity)
+        if blower_job is not None and not blower_job.done():
+            continue
         if entity in plan["completed"]:
             continue
         request = plan["requests"].get(entity)
@@ -532,7 +552,7 @@ async def step(controls):
             controls._schedule_check()
         task.add_done_callback(finished)
         await asyncio.wait({task}, timeout=5)
-    if (set(plan["completed"]) >= expected
+    if (not blower_pending(plan) and set(plan["completed"]) >= expected
             and not controls.stop_jobs(expected) and not controls.pending_device_jobs(expected)
             and not any(not job.done() for entity, job in controls._handoff_jobs.items() if entity in expected)):
         previous = (controls.handoff, controls.owned, controls.pending_fans)

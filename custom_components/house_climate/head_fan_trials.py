@@ -1,7 +1,7 @@
 """Opt-in, one-call blower trial dispatch through the normal native interlocks.
 
 The journal is written before each attempt. Cached HA matches are never physical
-acknowledgments. Restart/ownership ambiguity requires review, never replay.
+acknowledgments. Interrupted trials use the separately armed native Auto handoff, never replay.
 """
 from __future__ import annotations
 
@@ -34,6 +34,8 @@ class HeadFanTrials:
         self.error = None
         self.command = None
         self._lock = asyncio.Lock()
+        self._journal_lock = asyncio.Lock()
+        self._fallback_resolution = None
         self._ticket = None
         self._call_mode = None
         self._cancel = False
@@ -63,9 +65,20 @@ class HeadFanTrials:
     @callback
     def _service_event(self, event):
         t = self.trial
-        if not t or t.stage in TERMINAL or event.data.get("domain") != "climate":
+        if not t or event.data.get("domain") != "climate":
             return
-        if event.data.get("service") != "set_fan_mode":
+        controls = self.runtime.controls
+        plan = getattr(controls, "handoff", None) or {}
+        recovery = plan.get("blower_recovery", {}).get(t.entity_id)
+        if t.stage in {"complete", "cancelled"} and not recovery:
+            return
+        if event.data.get("service") not in {"set_fan_mode", "set_hvac_mode", "set_temperature", "turn_off", "turn_on"}:
+            return
+        # Only explicit user HVAC commands are manual takeover; ordinary
+        # controller HVAC calls must not cancel their own fan experiment.
+        if event.data.get("service") != "set_fan_mode" and getattr(event.context, "user_id", None) is None:
+            return
+        if recovery and event.context.id == recovery.get("context_id"):
             return
         if self._ticket and event.context.id == self._ticket[0]:
             return
@@ -75,9 +88,19 @@ class HeadFanTrials:
             entities = [entities]
         if t.entity_id in entities or "all" in entities or not entities:
             self._external_change = True
+            if recovery:
+                # In-memory revocation happens before any persistence await.
+                recovery["stage"] = "superseded"
+                if event.data.get("service") != "set_fan_mode":
+                    recovery["manual_hvac"] = True
+                    plan["stage"] = "blocked"
+                self.hass.async_create_background_task(
+                    controls._save(controls.owned, controls.pending_fans),
+                    "Home Climate manual fan supersession", eager_start=False)
             self.runtime.wake_event.set()
 
     async def async_load(self):
+        self.runtime.controls.head_fan_trials = self
         self._remove_listener = self.hass.bus.async_listen(EVENT_CALL_SERVICE, self._service_event)
         try:
             raw = await self.store.async_load()
@@ -94,6 +117,13 @@ class HeadFanTrials:
                 self.error = "Trial restart journal write failed; experimental dispatch blocked"
 
     async def _save(self, trial):
+        async with self._journal_lock:
+            resolved = self._fallback_resolution
+            if resolved is not None and resolved.trial_id == trial.trial_id:
+                trial = resolved
+            await self._save_unlocked(trial)
+
+    async def _save_unlocked(self, trial):
         # Never change in-memory authority before durable intent succeeds.
         try:
             await self.store.async_save(asdict(trial))
@@ -101,6 +131,13 @@ class HeadFanTrials:
             self.error = "Trial journal write failed; dispatch blocked"
             raise
         self.trial = trial
+        if trial.stage in {"complete", "cancelled"}:
+            controls = self.runtime.controls
+            plan = getattr(controls, "handoff", None) or {}
+            recovery = plan.get("blower_recovery", {}).get(trial.entity_id)
+            if recovery and recovery.get("trial_id") == trial.trial_id:
+                recovery["stage"] = "complete" if trial.stage == "complete" else "superseded"
+                await controls._save(controls.owned, controls.pending_fans)
         storage = getattr(self.runtime, "thermal_storage", None)
         if storage is not None:
             storage.observe("fan_trial", {"timestamp": datetime.now(timezone.utc).isoformat(),
@@ -192,7 +229,9 @@ class HeadFanTrials:
     def validate_dispatch(self, token, entity, mode):
         """Recheck authority on HA's loop immediately before service dispatch."""
         t, r = self.trial, self.runtime
-        if self.error or self._external_change or not t or self._ticket != (token, entity, mode):
+        if (self.error or self._external_change or self._fallback_resolution is not None
+                and t and self._fallback_resolution.trial_id == t.trial_id
+                or not t or self._ticket != (token, entity, mode)):
             raise HAActivationDeferred("Fan trial ticket is no longer current")
         if r.stop_event.is_set() or self.binding(entity)[1] != t.binding_fingerprint:
             raise HAActivationDeferred("Fan trial configuration or lifecycle changed")
@@ -216,8 +255,47 @@ class HeadFanTrials:
         elif t.stage != "restore_reserved":
             raise HAActivationDeferred("Fan trial is not reserved for dispatch")
 
+    async def async_fallback_resolved(self, record):
+        """Blower cleanup evidence; native HVAC handoff remains independent."""
+        t = self.trial
+        if t and t.trial_id == record.get("trial_id") and t.stage not in {"complete", "cancelled"}:
+            self._fallback_resolution = replace(t,
+                stage="complete" if record["stage"] == "complete" else "cancelled",
+                reason="blower_auto_reported_native_handoff_independent" if record["stage"] == "complete"
+                       else "manual_setting_preserved_native_handoff_independent")
+            await self._save(self._fallback_resolution)
+
+    async def _arm_fallback(self):
+        """Persist native recovery authority before any experimental write.
+
+        This is a separate safety obligation, not permission to replay a trial.
+        The native watchdog owns all Off/Auto ordering and command tracking.
+        """
+        t, controls = self.trial, self.runtime.controls
+        async with controls._check_lock:
+            if (not controls.enabled or controls.recovering or controls.takeover_pending
+                    or t.entity_id not in controls.owned
+                    or controls.command_generation(t.entity_id) != t.ownership_generation):
+                raise HAActivationDeferred("Ownership changed before fallback was armed")
+            plan = controls.handoff
+            if not plan or not plan.get("authorized") or plan.get("stage") != "armed":
+                raise HAActivationDeferred("A native Auto recovery plan is required")
+            state = self.hass.states.get(t.entity_id)
+            if (not state or "auto" not in state.attributes.get("fan_modes", ())
+                    or "heat_cool" not in state.attributes.get("hvac_modes", ())):
+                raise HAActivationDeferred("Blower and HVAC Auto recovery capabilities are required")
+            from .recovery_capability import mode_issue
+            if issue := mode_issue(self.hass, t.entity_id):
+                raise HAActivationDeferred(issue)
+            plan.setdefault("blower_recovery", {})[t.entity_id] = {
+                "trial_id": t.trial_id, "mode": t.mode, "baseline": t.baseline,
+                "armed_at": time.time(), "stage": "pending", "attempts": 0}
+            await controls._save(controls.owned, controls.pending_fans)
+
     async def _dispatch(self, mode, *, restoring=False):
         t, r = self.trial, self.runtime
+        if not restoring:
+            await self._arm_fallback()
         await self._save(replace(t, stage="restore_reserved" if restoring else "request_reserved",
                                  reason="durable_attempt_reserved"))
         token = uuid4().hex
@@ -235,6 +313,13 @@ class HeadFanTrials:
             return False
         finally:
             self._ticket = None
+        if self.trial.stage in {"complete", "cancelled"}:
+            # Native cleanup or a newer manual action won while the service ran.
+            return False
+        if r.stop_event.is_set() or not r.controls.enabled:
+            await self._save(replace(self.trial, stage="needs_attention",
+                                     reason="native_auto_handoff_pending"))
+            return False
         self._restore_started = time.time() if restoring else None
         self._restore_monotonic = time.monotonic() if restoring else None
         await self._save(replace(self.trial, stage="active" if not restoring else "restore_reserved",

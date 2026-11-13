@@ -24,7 +24,9 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
         self.config = Config.from_dict(configuration())
         self.entity = self.config.heads["second"]
         self.controls = SimpleNamespace(enabled=True, owned={self.entity}, command_generation=Mock(return_value=7),
-                                        check_activation=Mock())
+                                        check_activation=Mock(), recovering=False, takeover_pending=False,
+                                        _check_lock=asyncio.Lock(), pending_fans=(), _save=AsyncMock(),
+                                        handoff={"authorized":True, "stage":"armed", "blower_recovery":{}})
         self.runtime = SimpleNamespace(hass=self.hass, config=self.config, controls=self.controls,
              thermal_storage=SimpleNamespace(diagnostics={"status":"recording", "last_commit":time.time(), "queue_depth":0}, observe=Mock()),
              live=True, stop_event=threading.Event(), wake_event=threading.Event(), api=SimpleNamespace())
@@ -43,7 +45,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
 
     def state(self, fan, hvac="cool"):
         self.hass.states.async_set(self.entity, hvac,
-            {"fan_mode":fan,"fan_modes":["auto","low"], "hvac_modes":["off","heat","cool"]})
+            {"fan_mode":fan,"fan_modes":["auto","low"], "hvac_modes":["off","heat","cool","heat_cool"]})
 
     async def enroll(self, **kw):
         data = dict(entity_id=self.entity,room_ids=["gamma"],mode="low",duration_minutes=20,
@@ -207,7 +209,7 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
     async def test_external_same_mode_service_supersedes_trial(self):
         await self.enroll()
         event=SimpleNamespace(data={"domain":"climate","service":"set_fan_mode", "service_data":{
-            "entity_id":self.entity,"fan_mode":"low"}},context=SimpleNamespace(id="external"))
+            "entity_id":self.entity,"fan_mode":"low"}},context=SimpleNamespace(id="external",user_id=None))
         self.manager._service_event(event)
         await self.tick()
         self.assertEqual(self.manager.trial.stage,"cancelled")
@@ -265,3 +267,42 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
         await self.manager.async_acknowledge_restoration()
         self.assertEqual(self.manager.trial.stage,"cancelled")
         self.runtime.api.request.assert_called_once()
+
+    async def test_native_resolution_wins_delayed_trial_journal_write(self):
+        await self.enroll()
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def save(data):
+            if data["stage"] == "needs_attention":
+                entered.set()
+                await release.wait()
+        self.manager.store.async_save.side_effect = save
+        stale = asyncio.create_task(self.manager._save(replace(self.manager.trial,
+            stage="needs_attention", reason="interrupted")))
+        await entered.wait()
+        resolved = asyncio.create_task(self.manager.async_fallback_resolved({
+            "trial_id":self.manager.trial.trial_id,"stage":"complete"}))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(stale,resolved)
+        self.assertEqual(self.manager.trial.stage,"complete")
+        self.assertEqual(self.manager.store.async_save.call_args.args[0]["stage"],"complete")
+        await self.manager._save(replace(self.manager.trial,stage="active"))
+        self.assertEqual(self.manager.trial.stage,"complete")
+
+    async def test_arming_failure_prevents_experimental_service(self):
+        await self.enroll()
+        self.controls._save.side_effect=OSError("ownership store unavailable")
+        with self.assertRaises(OSError):
+            await self.tick()
+        self.runtime.api.request.assert_not_called()
+
+    async def test_terminal_blower_resolution_still_observes_manual_hvac(self):
+        await self.enroll()
+        await self.tick()
+        self.manager.trial=replace(self.manager.trial,stage="complete")
+        self.manager._service_event(SimpleNamespace(data={"domain":"climate",
+            "service":"set_hvac_mode","service_data":{"entity_id":self.entity,"hvac_mode":"cool"}},
+            context=SimpleNamespace(id="manual",user_id="operator")))
+        record=self.controls.handoff["blower_recovery"][self.entity]
+        self.assertTrue(record["manual_hvac"])
+        self.assertEqual(self.controls.handoff["stage"],"blocked")
