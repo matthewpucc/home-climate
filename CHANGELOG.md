@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.22
+
+- Add a separate, on-site supervised recovery action for an isolated heater after ordinary restore attempts are exhausted. It requires three explicit attestations, consumes a durable one-shot grant, and accommodates one-minute dedicated watt telemetry under bounded monitoring. Ordinary recovery remains unchanged.
+
 ## 0.9.21
 
 - Allow the native heater watchdog to coordinate guarded restoration while the normal fallback plan is dormant and armed. Active, interrupted, uncertain or pending handoff work still prevents deferral; recovery evidence, deadlines, native Off and fresh low-load requirements are unchanged.

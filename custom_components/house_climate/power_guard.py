@@ -36,6 +36,7 @@ CHECK_SECONDS = 5
 COOLDOWN_SECONDS = 300.0
 SAFE_LOAD_SECONDS = 60.0
 MAX_RESTORE_ATTEMPTS = 3
+SUPERVISED_RECOVERY_METER_SECONDS = 70.0
 COMMISSIONING_MAX_SECONDS = 600.0
 COMMISSIONING_METER_ACQUIRE_SECONDS = 30.0
 COMMISSIONING_REPORT_GAP_SECONDS = 30.0
@@ -339,6 +340,9 @@ class HeaterPowerGuard:
         # Process-local supervision; a restart must never resume an energized
         # commissioning wait from cached low meter data.
         self._supervised_restore = None
+        self._supervised_recovery_task = None
+        self._supervised_preparation_observed = None
+        self._supervised_recovery = {"active": False, "used": False, "status": "idle"}
         self._commissioning = {"active": False, "status": "idle", "reason": None,
             "started_at": None, "finished_at": None,
             "restore_window_seconds": RESTORE_ACK_SECONDS,
@@ -493,8 +497,14 @@ class HeaterPowerGuard:
         return self._commissioning["active"]
 
     @property
+    def supervised_recovery_active(self):
+        return self._supervised_recovery["active"]
+
+    @property
     def commissioning_busy(self):
-        return bool(self.commissioning_active or (
+        return bool(self.supervised_recovery_active
+            or (self._supervised_recovery_task is not None and not self._supervised_recovery_task.done())
+            or self.commissioning_active or (
             self._commissioning["status"] != "idle" and (
                 self._restoring or self._positive_tasks or self._service_tasks or self._compensation_pending
                 or (self._commissioning_task is not None and not self._commissioning_task.done())
@@ -775,6 +785,7 @@ class HeaterPowerGuard:
                 "binding_identity_mismatch": self._identity_mismatch,
                 "persistence_error": self._persistence_error,
                 "commissioning": dict(self._commissioning),
+                "supervised_recovery": dict(self._supervised_recovery),
                 "circuit_power_w": r.circuit_w, "elite_input_w": r.input_w,
                 "elite_output_w": r.output_w, "battery_percent": r.battery_percent,
                 "battery_reserve_percent": BATTERY_RESERVE_PERCENT,
@@ -796,7 +807,7 @@ class HeaterPowerGuard:
             "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "manual_recovery_required",
             "retained_cut_recovery_pending", "shutdown_fault", "restore_approval_pending",
-            "binding_identity_mismatch", "emergency_notification_error", "commissioning")}
+            "binding_identity_mismatch", "emergency_notification_error", "commissioning", "supervised_recovery")}
         stable["ac_output_enabled"] = self._reading.ac_enabled
         stable["heater_draw_status"] = current["heater_draw_status"]
         stable["heater_meter_issue"] = current["heater_meter_issue"]
@@ -914,6 +925,21 @@ class HeaterPowerGuard:
         self._manual_recovery_required |= data.get("manual_recovery_required") is True
         self._manual_recovery_required |= self._emergency_ac_latched or self._shutdown_fault
         self._retained_cut_claim_after = loaded_at if self._cut_owned else None
+        prior_recovery = data.get("supervised_recovery")
+        if prior_recovery is not None:
+            valid = (isinstance(prior_recovery, dict)
+                and type(prior_recovery.get("active")) is bool
+                and type(prior_recovery.get("used")) is bool
+                and prior_recovery.get("status") in {"idle", "preparing", "passed", "failed", "interrupted"})
+            interrupted = not valid or prior_recovery["active"] or prior_recovery["status"] == "preparing"
+            self._supervised_recovery = {"active": False, "used": True,
+                "status": "interrupted" if interrupted else prior_recovery["status"]}
+            if (valid and not interrupted and prior_recovery["used"] is False
+                    and prior_recovery["status"] == "idle"):
+                self._supervised_recovery["used"] = False
+            if interrupted:
+                self._manual_recovery_required = True
+                self._latched = True
         prior_test = data.get("commissioning")
         valid_test = (isinstance(prior_test, dict) and type(prior_test.get("active")) is bool
                       and prior_test.get("status") in {"idle", "preparing", "waiting_for_recovery",
@@ -974,6 +1000,9 @@ class HeaterPowerGuard:
         def changed(_event=None):
             if _event is not None:
                 self.shutdown_observations.ha_state(_event, self.bindings)
+            if _event and self.supervised_recovery_active and self._supervised_restore is None:
+                self._supervised_preparation_check(
+                    entity=_event.data.get("entity_id"), state=_event.data.get("new_state"))
             if _event and self._supervised_restore is not None:
                 self._supervised_restore_check(
                     entity=_event.data.get("entity_id"), state=_event.data.get("new_state"))
@@ -1270,7 +1299,12 @@ class HeaterPowerGuard:
         if watch is None or watch["failure"] is not None:
             return False
         watch["failure"] = str(reason)[:240]
-        self._commissioning_failed(watch["failure"])
+        if watch.get("retained_recovery"):
+            self._supervised_recovery.update(active=False, status="failed", reason=watch["failure"])
+            self._manual_recovery_required = self._restore_interrupted = True
+            self._save()
+        else:
+            self._commissioning_failed(watch["failure"])
         # A service call can be blocked while these event callbacks run. Do
         # not wait for its completion or for native Off before requesting cut.
         self._invalid_positive.update(self._positive_tasks)
@@ -1285,32 +1319,42 @@ class HeaterPowerGuard:
         if watch["failure"] is not None:
             return False
         now, wall = self._clock(), self._wall_clock()
+        retained = watch.get("retained_recovery", False)
+        gap = SUPERVISED_RECOVERY_METER_SECONDS if retained else COMMISSIONING_REPORT_GAP_SECONDS
+        confirm_seconds = SUPERVISED_RECOVERY_METER_SECONDS if retained else COMMISSIONING_METER_CONFIRM_SECONDS
         if (not math.isfinite(now) or not math.isfinite(wall)
                 or now < watch["checked_clock"] or wall < watch["checked_wall"]
                 or now - watch["checked_clock"] >= COMMISSIONING_REPORT_GAP_SECONDS
+                or (retained and now - watch["session_clock"] >= COMMISSIONING_MAX_SECONDS)
                 or self._commissioning_expired()):
             return self._supervised_restore_abort("Supervised restoration observation deadline expired")
         watch["checked_clock"], watch["checked_wall"] = now, wall
         if (not self.live or self._closing or self._closed or self._restore_interrupted
                 or self._manual_recovery_required or self._identity_mismatch
-                or self._persistence_error or not self.commissioning_active
+                or self._persistence_error
+                or not (self.supervised_recovery_active if retained else self.commissioning_active)
                 or not self._commissioning_controller_stopped()
-                or watch["identity"] != self._binding_identity()):
+                or watch["identity"] != self._binding_identity()
+                or (retained and (self.pending_external_jobs() or not self._cut_owned
+                    or self._saved_binding_identity != self._binding_identity()))):
             return self._supervised_restore_abort("Supervised restoration was interrupted")
         # Test deadlines before accepting a newly arrived good packet. Late
         # data cannot erase a real gap merely by arriving ahead of a timer job.
         if (watch["last_report"] is None
-                and now - watch["requested_clock"] >= COMMISSIONING_METER_ACQUIRE_SECONDS):
+                and (now - watch.get("on_clock", watch["requested_clock"]) >=
+                     (SUPERVISED_RECOVERY_METER_SECONDS if retained else COMMISSIONING_METER_ACQUIRE_SECONDS)
+                     or (retained and now - watch["requested_clock"] >=
+                         RESTORE_ACK_SECONDS + SUPERVISED_RECOVERY_METER_SECONDS))):
             return self._supervised_restore_abort("Fresh low heater watts did not arrive before the startup deadline")
         if (watch["last_report"] is not None
-                and (now - watch["seen_clock"] >= COMMISSIONING_REPORT_GAP_SECONDS
-                     or wall - watch["last_report"] >= COMMISSIONING_REPORT_GAP_SECONDS)):
+                and (now - watch["seen_clock"] >= gap
+                     or wall - watch["last_report"] >= gap)):
             return self._supervised_restore_abort("Fresh low heater watt reports stopped during restoration")
         off_clock, off_task = watch.get("off_clock"), watch.get("off_task")
         if (not watch["off_acknowledged"] and watch.get("off_ack_deadline") is not None
                 and time.monotonic() >= watch["off_ack_deadline"]):
             return self._supervised_restore_abort("Fresh native Off was not verified before its acknowledgement deadline")
-        if off_clock is not None and now - off_clock >= COMMISSIONING_METER_CONFIRM_SECONDS:
+        if off_clock is not None and now - off_clock >= confirm_seconds:
             return self._supervised_restore_abort("Post-command low heater watts were not verified before the deadline")
         if off_task is not None and off_task.done() and (off_task.cancelled() or off_task.exception() is not None):
             return self._supervised_restore_abort("Native Off service failed during supervised restoration")
@@ -1343,6 +1387,9 @@ class HeaterPowerGuard:
         if (attrs.get("restored") or attrs.get("assumed_state")
                 or relay not in ("off", "on") or (watch["on_wall"] is not None and relay != "on")):
             return self._supervised_restore_abort("Dedicated relay feedback is not trusted during restoration")
+        if (retained and entity == self.bindings.heater_switch and relay == "on"
+                and "on_clock" not in watch):
+            watch["on_clock"] = now
         observed = states.get(self.bindings.heater_power)
         _, attrs, reported = _state_parts(observed)
         try:
@@ -1353,7 +1400,7 @@ class HeaterPowerGuard:
             if new or entity == self.bindings.heater_power or watch["last_report"] is not None:
                 value = _measurement(states, self.bindings.heater_power,
                                      {"W": 1, "kW": 1000}, wall,
-                                     maximum_age=COMMISSIONING_REPORT_GAP_SECONDS)
+                                     maximum_age=gap)
                 if attrs.get("restored") or attrs.get("assumed_state"):
                     raise ValueError("Heater power report is not trusted")
                 if value >= HEATER_OFF_MAX_W:
@@ -1384,11 +1431,13 @@ class HeaterPowerGuard:
         return True
 
     def _supervised_phase(self, phase, reason):
-        if not self.commissioning_active:
+        if not self.commissioning_active and not self.supervised_recovery_active:
             return
-        remaining = max(0, COMMISSIONING_MAX_SECONDS - (
-            self._clock() - self._commissioning_started_clock))
-        self._commissioning.update(phase=phase, reason=reason,
+        retained = self.supervised_recovery_active
+        target = self._supervised_recovery if retained else self._commissioning
+        started = target["started_clock"] if retained else self._commissioning_started_clock
+        remaining = max(0, COMMISSIONING_MAX_SECONDS - (self._clock() - started))
+        target.update(phase=phase, reason=reason,
             phase_started_at=self._wall_clock(),
             session_deadline_at=self._wall_clock() + remaining)
         self._publish()
@@ -1436,7 +1485,8 @@ class HeaterPowerGuard:
                 if (self._supervised_restore_check() and self._heater_off(fresh=True)
                         and self._heater_meter_stopped() is True and not self._service_tasks):
                     return True
-            if self._clock() - watch["off_clock"] >= COMMISSIONING_METER_CONFIRM_SECONDS:
+            if self._clock() - watch["off_clock"] >= (SUPERVISED_RECOVERY_METER_SECONDS
+                    if watch.get("retained_recovery") else COMMISSIONING_METER_CONFIRM_SECONDS):
                 break
             await asyncio.sleep(.1)
         return self._supervised_restore_abort("Post-command low heater watts were not verified before the deadline")
@@ -1514,6 +1564,209 @@ class HeaterPowerGuard:
             self._persistence_error = "Cannot persist relay commissioning before its deadline"
             return False
         return self._persistence_error is None
+
+    def _supervised_preparation_check(self, *, entity=None, state=None):
+        """Observe isolated preparation continuously, including coalesced events."""
+        if not self.supervised_recovery_active:
+            return False
+        try:
+            now, wall = self._clock(), self._wall_clock()
+            checked, checked_wall = self._supervised_preparation_observed
+            if (not math.isfinite(now) or not math.isfinite(wall) or now < checked
+                    or wall < checked_wall or now - checked >= COMMISSIONING_REPORT_GAP_SECONDS
+                    or now - self._supervised_recovery["started_clock"] >= COMMISSIONING_MAX_SECONDS):
+                raise RuntimeError("Supervised preparation observation deadline expired")
+            self._supervised_recovery_prerequisites()
+            states = self._states()
+            if entity is not None:
+                states[entity] = state
+            external = replace(self.bindings, heater_current=None, heater_power=None)
+            if not evaluate_power(states, external, wall).safe_to_rearm:
+                raise RuntimeError("Electrical protection interrupted supervised preparation")
+            relay, attrs, _ = _state_parts(states.get(self.bindings.heater_switch))
+            if relay != "off" or attrs.get("restored") or attrs.get("assumed_state"):
+                raise RuntimeError("Relay isolation changed during supervised preparation")
+            if entity == self.bindings.heater_power:
+                value = _measurement(states, entity, {"W": 1, "kW": 1000}, wall)
+                _, attrs, _ = _state_parts(state)
+                if attrs.get("restored") or attrs.get("assumed_state") or value >= HEATER_OFF_MAX_W:
+                    raise RuntimeError("New heater meter evidence contradicts supervised isolation")
+            native, attrs, _ = _state_parts(states.get(self.bindings.heater))
+            if attrs.get("hvac_action") in ("heating", "cooling"):
+                raise RuntimeError("Native heating contradicts supervised isolation")
+            self._supervised_preparation_observed = now, wall
+            return True
+        except (RuntimeError, ValueError, TypeError, OverflowError) as exc:
+            self._supervised_recovery.update(active=False, status="failed", reason=str(exc)[:240])
+            self._restore_interrupted = self._manual_recovery_required = True
+            self._reason = str(exc)[:240]
+            self._save()
+            self._publish()
+            return False
+
+    def _supervised_recovery_prerequisites(self):
+        if (not self.live or self._closed or self._closing or self.manual_control
+                or self._identity_mismatch or self._saved_binding_identity != self._binding_identity()
+                or self._emergency_ac_latched or self._emergency_enabled
+                or not self._cut_owned or not self._latched
+                or self._restore_attempts < MAX_RESTORE_ATTEMPTS
+                or self._store is None or self._persistence_error
+                or self._positive_tasks or self._service_tasks or self._compensation_pending
+                or self.pending_external_jobs() or self._manual_power_seen
+                or not self._commissioning_controller_stopped()
+                or self._heater_meter()[3] != "power"
+                or not self._external_power().safe_to_rearm
+                or not self._commissioning_external_trusted()):
+            raise RuntimeError("Supervised recovery requires matching exhausted guard-owned isolation, healthy supply, a dedicated watt meter and Controller Off without jobs")
+
+    async def async_supervised_recovery(self, *, confirm=False, operator_present=False,
+                                        local_cutoff_available=False):
+        """One explicit supervised attempt from an exhausted guard-owned cutoff."""
+        if any(value is not True for value in (confirm, operator_present, local_cutoff_available)):
+            raise RuntimeError("Explicit confirmation, a present operator and an available local cutoff are required")
+        if (self._supervised_recovery["used"] or self.commissioning_busy
+                or self._restoring or self._cutting or self._restore_intent
+                or (self._action_task is not None and not self._action_task.done())
+                or (self._recovery_task is not None and not self._recovery_task.done())
+                or (self._save_task is not None and not self._save_task.done())):
+            raise RuntimeError("Supervised recovery is unavailable or already consumed for this lockout")
+        self._supervised_recovery_prerequisites()
+        # Reserve synchronously before any await. Persist this one-shot before
+        # any positive command; its historical use survives failures/restarts.
+        self._supervised_recovery = {"active": True, "used": True, "status": "preparing",
+            "started_at": self._wall_clock(), "started_clock": self._clock(),
+            "ordinary_attempts": self._restore_attempts,
+            "relay_ack_seconds": RESTORE_ACK_SECONDS,
+            "meter_acquire_seconds": SUPERVISED_RECOVERY_METER_SECONDS,
+            "meter_report_gap_seconds": SUPERVISED_RECOVERY_METER_SECONDS,
+            "post_off_meter_seconds": SUPERVISED_RECOVERY_METER_SECONDS,
+            "native_reconnect_seconds": COMMISSIONING_RECONNECT_SECONDS,
+            "maximum_seconds": COMMISSIONING_MAX_SECONDS}
+        self._restoring = True
+        self._restore_interrupted = False
+        self._supervised_preparation_observed = self._clock(), self._wall_clock()
+        self._publish()
+        task = self.hass.async_create_task(self._run_supervised_recovery(), eager_start=False)
+        self._supervised_recovery_task = task
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._restore_interrupted = self._manual_recovery_required = True
+            self._supervised_recovery.update(active=False, status="interrupted",
+                reason="Supervised recovery caller cancelled")
+            self._save()
+            if self._supervised_restore is not None:
+                self._supervised_restore_abort("Supervised recovery caller cancelled")
+            raise
+
+    async def _run_supervised_recovery(self):
+        success = on_attempted = False
+        original_attempts = self._restore_attempts
+        try:
+            if not await self._persist_commissioning():
+                raise RuntimeError("Cannot persist the supervised one-shot; no On permitted")
+            self._supervised_phase("waiting_for_recovery", "Waiting for stable supply and existing cutoff cooldown")
+            started = self._supervised_recovery["started_clock"]
+            while True:
+                if not self._supervised_preparation_check():
+                    raise RuntimeError(self._supervised_recovery.get("reason", "Supervised preparation interrupted"))
+                now = self._clock()
+                if (not self.supervised_recovery_active or self._restore_interrupted
+                        or not self._switch_observed("off") or not math.isfinite(now)
+                        or now < started or now - started >= COMMISSIONING_MAX_SECONDS
+                        or self._tripped_at is None or now < self._tripped_at):
+                    raise RuntimeError("Supervised recovery interrupted during isolated preparation")
+                if now - started >= SAFE_LOAD_SECONDS and now - self._tripped_at >= COOLDOWN_SECONDS:
+                    break
+                await asyncio.sleep(.1)
+            await self._refresh_recovery_feedback()
+            if not self._supervised_preparation_check():
+                raise RuntimeError(self._supervised_recovery.get("reason", "Supervised preparation interrupted"))
+            if not self.supervised_recovery_active or self._restore_interrupted:
+                raise RuntimeError("Supervised recovery interrupted before preparation")
+            barrier = max(self._retained_cut_claim_after or 0, self._cut_request_wall or 0,
+                          self._manual_recovery_wall or 0)
+            relay, stamp = _device_feedback(self._state(self.bindings.heater_switch),
+                                            self._wall_clock(), after=barrier)
+            if relay != "off" or self._heater_meter_stopped(after=stamp) is False:
+                raise RuntimeError("Fresh physical dedicated Off proof is required")
+            changed = self._switch_changed()
+            self._manual_recovery_required = False
+            self._restoring = True
+            self._restore_interrupted = self._restore_on_requested = False
+            self._publish()
+            if not await self._persist_restore_intent():
+                raise RuntimeError("Cannot persist supervised restore intent")
+            if not self._supervised_preparation_check():
+                raise RuntimeError(self._supervised_recovery.get("reason", "Supervised preparation interrupted"))
+            if not self.supervised_recovery_active or self._restore_interrupted:
+                raise RuntimeError("Supervised recovery interrupted before relay On")
+            requested, requested_clock = self._wall_clock(), self._clock()
+            self._supervised_restore = {"retained_recovery": True,
+                "session_clock": self._supervised_recovery["started_clock"],
+                "requested_wall": requested, "requested_clock": requested_clock,
+                "checked_clock": requested_clock, "checked_wall": requested,
+                "on_wall": None, "last_report": None, "last_value": None,
+                "seen_clock": None, "failure": None, "identity": self._binding_identity(),
+                "native_ready": False, "off_acknowledged": False}
+            self._restore_deadline = time.monotonic() + RESTORE_ACK_SECONDS
+            self._supervised_phase("relay_on", "Requesting dedicated relay On under operator supervision")
+            def before_dispatch():
+                if (not self._supervised_restore_check() or self._switch_changed() != changed
+                        or not self._switch_observed("off") or self.pending_external_jobs()
+                        or self._compensation_pending or not self._cut_owned
+                        or _device_feedback(self._state(self.bindings.heater_switch),
+                            self._wall_clock(), after=barrier)[0] != "off"):
+                    raise RuntimeError("Supervised recovery evidence changed before On dispatch")
+            on_attempted = self._restore_on_requested = True
+            if not await self._bounded_service("switch", "turn_on", self.bindings.heater_switch,
+                    timeout=RESTORE_ACK_SECONDS, _before_dispatch=before_dispatch):
+                raise RuntimeError("Supervised relay On service did not complete")
+            while not self._switch_observed("on", after=requested):
+                if time.monotonic() >= self._restore_deadline or not self._supervised_restore_check():
+                    raise RuntimeError("Fresh relay On was not confirmed within its deadline")
+                await asyncio.sleep(.1)
+            if time.monotonic() >= self._restore_deadline:
+                raise RuntimeError("Fresh relay On arrived after its deadline")
+            watch = self._supervised_restore
+            watch["on_wall"] = _timestamp(_state_parts(self._state(self.bindings.heater_switch))[2])
+            # Capture the first qualifying On event's monotonic receipt. A
+            # slow handler cannot restart the window at its later completion.
+            # Without an event, use dispatch time conservatively, never wall
+            # timestamp arithmetic as authority to extend a deadline.
+            watch.setdefault("on_clock", requested_clock)
+            if not await self._supervised_reconnect():
+                raise RuntimeError(watch["failure"] or "Supervised verification failed")
+            if (not self._supervised_restore_check() or self.pending_external_jobs()
+                    or self._positive_tasks or self._service_tasks or self._compensation_pending
+                    or not self._switch_observed("on", after=requested)
+                    or not self._heater_off(fresh=True) or self._heater_meter_stopped() is not True):
+                raise RuntimeError("Final supervised evidence did not remain valid")
+            self._clear()
+            success = True
+            self._supervised_recovery.update(active=False, status="passed",
+                reason="Fresh native Off and post-command low watts verified")
+            return True
+        except (Exception, asyncio.CancelledError) as exc:
+            self._supervised_recovery.update(active=False, status="failed", reason=str(exc)[:240])
+            self._latched = self._blocked = self._manual_recovery_required = True
+            if on_attempted or self._positive_tasks:
+                self._invalid_positive.update(self._positive_tasks)
+                self._schedule_compensating_cut()
+                await asyncio.wait((self._compensating_task,), timeout=2 * SERVICE_TIMEOUT_SECONDS + .1)
+            return False
+        finally:
+            if not success:
+                self._restore_attempts = original_attempts
+            self._supervised_recovery.update(active=False, finished_at=self._wall_clock())
+            self._restoring = self._restore_on_requested = False
+            self._restore_deadline = self._supervised_restore = None
+            self._restore_intent = False
+            if not success:
+                self._latched = self._blocked = self._manual_recovery_required = True
+            self._save()
+            self._publish()
 
     async def async_commission_relay(self, *, confirm=False):
         """Explicit supervised maintenance; returns after cut, not after cooldown."""
@@ -1848,6 +2101,8 @@ class HeaterPowerGuard:
             self.shutdown_observations.record('guard_trip', at=self._trip_wall,
                                                reason=reason, trigger='guard_latch')
             self._restore_attempts = 0
+            if not self.supervised_recovery_active:
+                self._supervised_recovery = {"active": False, "used": False, "status": "idle"}
             self._off_confirmed = False
             _LOGGER.warning("Living-room heater power guard: %s; heater Off requested", reason)
             self._save()
@@ -1871,6 +2126,8 @@ class HeaterPowerGuard:
             self._commissioning_failed("Observation continuity was lost during relay commissioning", status="interrupted")
         if self.commissioning_active and not self._commissioning_controller_stopped():
             self._commissioning_failed("Comfort controller is no longer stopped", status="interrupted")
+        if self.supervised_recovery_active and self._supervised_restore is None:
+            self._supervised_preparation_check()
         self._supervised_restore_check()
         if (self.commissioning_active and not self._commissioning_preparing
                 and not self._restoring and not self._cutting):
@@ -2140,7 +2397,8 @@ class HeaterPowerGuard:
                 "restoring": self._restore_intent, "trip_wall": self._trip_wall,
                 "restore_attempts": self._restore_attempts,
                 "binding_identity": self._saved_binding_identity,
-                "manual_recovery_required": self._manual_recovery_required,
+                "manual_recovery_required": self._manual_recovery_required or self.supervised_recovery_active,
+                "supervised_recovery": dict(self._supervised_recovery),
                 "shutdown_fault": self._shutdown_fault,
                 "emergency_ac_latched": self._emergency_ac_latched,
                 "emergency_ac_reason": self._emergency_ac_reason,
@@ -2604,7 +2862,8 @@ class HeaterPowerGuard:
         first = not self._closing
         self._closing = True
         self._blocked = True
-        tasks = [t for t in (self._check_task, self._action_task, self._commissioning_task) if t and not t.done()]
+        tasks = [t for t in (self._check_task, self._action_task, self._commissioning_task,
+                             self._supervised_recovery_task) if t and not t.done()]
         if first:
             if self._check_task is not None and not self._check_task.done():
                 self._check_task.cancel()
@@ -2613,6 +2872,8 @@ class HeaterPowerGuard:
             # Positive restoration still gets cancelled and compensated.
             if self._restoring and self._action_task is not None:
                 self._action_task.cancel()
+            if self._supervised_recovery_task is not None and not self._supervised_recovery_task.done():
+                self._supervised_recovery_task.cancel()
             self._invalid_positive.update(self._positive_tasks)
         if tasks:
             await asyncio.wait(tasks, timeout=SERVICE_TIMEOUT_SECONDS + .5)

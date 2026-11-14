@@ -320,6 +320,9 @@ class NativeControls:
             if blower_pending(self.handoff) and (self.recovering or not self.enabled):
                 raise HAError("Interrupted blower trial must finish native Auto recovery before control resumes")
             if (self.power_guard is not None
+                    and getattr(self.power_guard, "supervised_recovery_active", False) is True):
+                raise HAError("Supervised heater recovery must finish before enabling comfort control")
+            if (self.power_guard is not None
                     and getattr(self.power_guard, "commissioning_busy",
                                 getattr(self.power_guard, "commissioning_active", False))):
                 raise HAError("Dedicated heater relay commissioning must finish before enabling comfort control")
@@ -461,7 +464,8 @@ class NativeControls:
                 async with self._lock:
                     guard = self.power_guard
                     guard_busy = bool(guard is not None and (
-                        getattr(guard, "_restoring", False) or getattr(guard, "_cutting", False)
+                        getattr(guard, "supervised_recovery_active", False) is True
+                        or getattr(guard, "_restoring", False) or getattr(guard, "_cutting", False)
                         or getattr(guard, "_restore_intent", False) or getattr(guard, "_positive_tasks", ())
                         or getattr(guard, "_compensation_pending", False) or getattr(guard, "_service_tasks", ())
                         or any(task is not None and not task.done() for task in (

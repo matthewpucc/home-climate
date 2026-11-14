@@ -26,7 +26,8 @@ class RelayCommissioningServiceTests(unittest.IsolatedAsyncioTestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.hass = HomeAssistant(self.directory.name)
         self.config = house_configuration(bindings=example_bindings())
-        self.guard = SimpleNamespace(async_commission_relay=AsyncMock(), async_approve_restore=AsyncMock())
+        self.guard = SimpleNamespace(async_commission_relay=AsyncMock(), async_approve_restore=AsyncMock(),
+                                     async_supervised_recovery=AsyncMock())
         self.runtime = ControllerRuntime(self.hass, self.config, True)
         self.runtime.power_guard = self.guard
         self.runtime.async_setup_controls = AsyncMock()
@@ -135,11 +136,54 @@ class RelayCommissioningServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await asyncio.wait_for(asyncio.shield(self.runtime._unload_task), 1))
         self.assertTrue(self.hass.services.has_service(DOMAIN, "commission_heater_relay"))
         self.assertTrue(self.hass.services.has_service(DOMAIN, "approve_heater_restore"))
+        self.assertTrue(self.hass.services.has_service(DOMAIN, "supervised_heater_restore"))
         self.runtime.async_stop.return_value = True
         self.assertTrue(await integration.async_unload_entry(self.hass, self.entry))
         self.assertFalse(self.hass.services.has_service(DOMAIN, "commission_heater_relay"))
         self.assertFalse(self.hass.services.has_service(DOMAIN, "approve_heater_restore"))
+        self.assertFalse(self.hass.services.has_service(DOMAIN, "supervised_heater_restore"))
         self.assertNotIn(DOMAIN, self.hass.data)
+
+    async def test_supervised_restore_requires_all_three_explicit_attestations(self):
+        valid = {"confirm": True, "operator_present": True, "local_cutoff_available": True}
+        required = "supervised_heater_restore"
+        self.assertTrue(self.hass.services.has_service(DOMAIN, required))
+        self.guard.async_supervised_recovery.assert_not_awaited()
+        async def invoke(data):
+            return await self.hass.services.async_call(DOMAIN, required, data, blocking=True)
+        for name in valid:
+            for invalid in (None, False, 1, "true"):
+                with self.subTest(name=name, invalid=invalid), self.assertRaises(vol.Invalid):
+                    await invoke({**valid, name: invalid})
+            with self.subTest(name=name, omission=True), self.assertRaises(vol.Invalid):
+                await invoke({key: value for key, value in valid.items() if key != name})
+        with self.assertRaises(vol.Invalid):
+            await invoke({**valid, "extend_deadline": 1000})
+        self.guard.async_supervised_recovery.assert_not_awaited()
+        self.runtime.live = False
+        with self.assertRaisesRegex(HomeAssistantError, "Enable live"):
+            await invoke(valid)
+        self.runtime.live = True
+        self.runtime.stop_event.set()
+        with self.assertRaisesRegex(HomeAssistantError, "unavailable"):
+            await invoke(valid)
+        self.runtime.stop_event.clear()
+        self.hass.data[DOMAIN] = object()
+        with self.assertRaisesRegex(HomeAssistantError, "unavailable"):
+            await invoke(valid)
+        self.hass.data[DOMAIN] = self.runtime
+        self.guard.async_supervised_recovery.assert_not_awaited()
+        self.guard.async_supervised_recovery.side_effect = RuntimeError("One-shot recovery already consumed")
+        with self.assertRaisesRegex(HomeAssistantError, "already consumed"):
+            await invoke(valid)
+        self.guard.async_supervised_recovery.assert_awaited_once_with(**valid)
+        self.guard.async_supervised_recovery.reset_mock()
+        self.guard.async_supervised_recovery.side_effect = [False, True]
+        with self.assertRaisesRegex(HomeAssistantError, "did not complete"):
+            await invoke(valid)
+        self.guard.async_supervised_recovery.assert_awaited_once_with(**valid)
+        await invoke(valid)
+        self.assertEqual(self.guard.async_supervised_recovery.await_count, 2)
 
 
 class RelayCommissioningOwnershipTests(unittest.IsolatedAsyncioTestCase):
@@ -156,6 +200,17 @@ class RelayCommissioningOwnershipTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.hass.async_stop(force=True)
         self.directory.cleanup()
+
+    async def test_supervised_recovery_preparation_blocks_control_and_manual_takeover(self):
+        self.controls.power_guard = SimpleNamespace(supervised_recovery_active=True,
+                                                   _schedule_check=Mock())
+        with self.assertRaisesRegex(HAError, "Supervised heater recovery must finish"):
+            await self.controls.async_set_enabled(True)
+        self.assertFalse(self.controls.enabled)
+        with self.assertRaisesRegex(HAError, "Wait for actual auxiliary commands"):
+            await self.controls.async_set_auxiliary_manual(True)
+        self.assertFalse(self.controls.auxiliary_manual)
+        self.assertFalse(self.controls._manual_transition)
 
     async def test_only_an_idle_disabled_native_controller_qualifies(self):
         self.assertTrue(self.runtime._commissioning_controller_off())
