@@ -514,6 +514,20 @@ Dedicated-outlet restoration requires explicit `house_climate.approve_heater_res
 approval, verified supply, a dedicated meter, stable safe load and cooldown. It
 can restore only matching guard-owned power. See the [approval procedure](auxiliary-supply-policy.md#shutdown-and-explicit-recovery); shared AC is never restored.
 
+During an approved restore, saving the restoration intent does not itself
+energize the plug. The native watchdog can retain fresh physical dedicated-Off
+evidence during this preparation phase without declaring the whole shutdown
+transaction complete. That evidence is withdrawn before any relay-On command
+is queued. Once On may execute, the active recovery owns the bounded native-Off
+sequence; only routine owned heartbeat-watchdog Off requests defer without
+being acknowledged. Unsafe-probe stops after On, takeover, ownership cleanup,
+manual paths and pending auxiliaries are not deferred. The
+watchdog still records an expired heating lease and inhibits new heating.
+Controller shutdown, an expired recovery deadline/approval, lost supply,
+contradictory load or uncertain cleanup do not gain this deferral. Fresh native
+Off and low dedicated load after power returns remain mandatory; failure still
+recuts and retains the lockout. No clock or cooldown is extended.
+
 Stored cutoff claims are tied to heater/cutoff/meter identities. An old claim
 without matching identity is quarantined for manual acknowledgement rather than
 transferred to new equipment. Disabling the shared fallback in JSON does not

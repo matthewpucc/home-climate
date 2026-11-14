@@ -295,6 +295,7 @@ class HeaterPowerGuard:
         self._last_observation_wall = None
         self._restore_interrupted = False
         self._restore_on_requested = False
+        self._restore_deadline = None
         self._save_retry_at = 0.0
         self._last_diagnostics = None
         self._emergency_ac_latched = False
@@ -510,6 +511,48 @@ class HeaterPowerGuard:
                      or self._emergency_cut_observed())
                 and not self._positive_tasks and not self._emergency_service_tasks
                 and not self._compensation_pending and not self._restoring)
+
+    @property
+    def recovery_isolation_confirmed(self):
+        """Physical dedicated Off during restore preparation, not stop completion.
+
+        Saving intent does not energize the relay. Withdraw this narrow proof
+        before queueing any positive command; never use it to release a cut claim.
+        """
+        if (not self._restoring or self._restore_on_requested or not self._cut_owned
+                or not self._restore_authorized() or self._identity_mismatch
+                or self._saved_binding_identity != self._binding_identity()
+                or self._shutdown_contradicted or self._manual_recovery_required
+                or self._positive_tasks or self._emergency_service_tasks
+                or self._compensation_pending or self._persistence_error):
+            return False
+        barrier = max(self._retained_cut_claim_after or 0, self._cut_request_wall or 0,
+                      self._isolation_after)
+        relay, stamp = _device_feedback(self._state(self.bindings.heater_switch),
+                                        self._wall_clock(), after=barrier)
+        return (relay == "off" and self._heater_meter_stopped(after=stamp) is not False)
+
+    @property
+    def recovery_native_off_managed(self):
+        """The active bounded recovery owns native Off; this is NOT isolation.
+
+        Routine watchdog stops may defer to this task, never acknowledge it. Any
+        expired approval, uncertain cleanup, fault or lost supply ends deferral.
+        """
+        return bool(self._restoring and self._restore_on_requested
+                    and self._restore_deadline is not None
+                    and time.monotonic() < self._restore_deadline
+                    and self._action_task is not None and not self._action_task.done()
+                    and self.live and not self._closing and not self._closed
+                    and self._restore_authorized() and not self._restore_interrupted
+                    and self._cut_owned and not self._identity_mismatch
+                    and self._saved_binding_identity == self._binding_identity()
+                    and not self._manual_power_seen and not self._manual_recovery_required
+                    and not self._emergency_ac_latched and not self._shutdown_contradicted
+                    and not self._compensation_pending and not self._invalid_positive
+                    and not self._persistence_error and not self.pending_external_jobs()
+                    and self._heater_meter_stopped() is not False
+                    and self._external_power().safe_to_rearm)
 
     @property
     def shutdown_confirmed(self):
@@ -2451,6 +2494,7 @@ class HeaterPowerGuard:
             if commissioning:
                 remaining = COMMISSIONING_MAX_SECONDS - (self._clock() - self._commissioning_started_clock)
                 deadline = min(deadline, time.monotonic() + max(0, remaining))
+            self._restore_deadline = deadline
             on_attempted = True
             self._restore_on_requested = True
             if staged:
@@ -2548,6 +2592,7 @@ class HeaterPowerGuard:
                 self._save()
             self._restoring = False
             self._restore_on_requested = False
+            self._restore_deadline = None
             self._supervised_restore = None
             self._publish()
 

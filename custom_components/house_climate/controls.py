@@ -650,6 +650,23 @@ class NativeControls:
                 state.attributes.get("temperature"), state.last_reported,
                 state.last_updated, state.last_changed)
 
+    def _guarded_recovery_watchdog(self, *, preparing_only=False):
+        """Coordinate only routine owned watchdog work, never shutdown proof."""
+        heater, guard = self.config.heater_entity, self.power_guard
+        if (guard is None or not self.active or not self.enabled or not self.live
+                or self.recovering or self._closing or self._claiming
+                or self.takeover_pending or self.handoff is not None
+                or self.auxiliary_manual or heater not in self.owned
+                or heater in self.pending_auxiliaries or self.auxiliary_inflight
+                or heater in self._uncertain_device_jobs
+                or self.pending_device_jobs({heater})
+                or not 0 <= time.monotonic() - self.heartbeat_monotonic
+                    <= self.config.heartbeat_timeout_seconds):
+            return False
+        return (getattr(guard, "recovery_isolation_confirmed", False) is True
+                or (not preparing_only
+                    and getattr(guard, "recovery_native_off_managed", False) is True))
+
     def _auxiliary_could_heat(self):
         if (self.power_guard is not None
                 and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
@@ -756,7 +773,8 @@ class NativeControls:
         if (not self.auxiliary_heartbeat_blocked
                 and not 0 <= age <= self.config.auxiliary_heartbeat_timeout_seconds
                 and (self.auxiliary_inflight or self._auxiliary_heat_possible
-                     or self._auxiliary_could_heat())):
+                     or (self._auxiliary_could_heat()
+                         and not self._guarded_recovery_watchdog(preparing_only=True)))):
             self.auxiliary_heartbeat_blocked = True
             self._auxiliary_stop_epoch += 1
             self._auxiliary_heartbeat_baseline = self._auxiliary_marker()
@@ -1181,10 +1199,12 @@ class NativeControls:
                         self._publish()
                 elif self.config.heater_entity in self.owned:
                     if self.auxiliary_heartbeat_blocked:
-                        if not self._ack_auxiliary_heartbeat_off():
+                        if (not self._ack_auxiliary_heartbeat_off()
+                                and not self._guarded_recovery_watchdog()):
                             await self._off(self.config.heater_entity)
                             self._ack_auxiliary_heartbeat_off()
-                    elif self._auxiliary_could_heat() and not self.probes_safe(self._probe_states()):
+                    elif (self._auxiliary_could_heat() and not self.probes_safe(self._probe_states())
+                          and not self._guarded_recovery_watchdog(preparing_only=True)):
                         if not self._auxiliary_probe_stop_pending:
                             self._auxiliary_probe_stop_pending = True
                             self.auxiliary_stop_revision += 1
