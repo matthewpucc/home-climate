@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.20
 
 - Coordinate the native heater watchdog with explicitly approved, bounded dedicated-relay recovery. Preserve physical isolation during pre-dispatch persistence, defer competing routine Off jobs to the active recovery, and retain fresh post-On Off/low-load proof, deadlines and compensating cutoff.
 
