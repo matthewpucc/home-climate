@@ -653,9 +653,21 @@ class NativeControls:
     def _guarded_recovery_watchdog(self, *, preparing_only=False):
         """Coordinate only routine owned watchdog work, never shutdown proof."""
         heater, guard = self.config.heater_entity, self.power_guard
+        # An ordinary ownership claim arms its eventual fallback immediately.
+        # That dormant plan is not an executing handoff. Retain the exclusion
+        # for every started/interrupted plan and any outstanding handoff work.
+        plan = self.handoff
+        handoff_pending = plan is not None and (
+            not isinstance(plan, dict) or plan.get("stage") != "armed"
+            or plan.get("authorized") is not True
+            or plan.get("requests") != {} or plan.get("completed") != []
+            or plan.get("problems") != {} or plan.get("interrupted")
+            or plan.get("resume_after") is not None or plan.get("blower_recovery")
+            or any(plan.get(key) is not None for key in
+                   ("stop_started", "settle_until", "applying_started")))
         if (guard is None or not self.active or not self.enabled or not self.live
                 or self.recovering or self._closing or self._claiming
-                or self.takeover_pending or self.handoff is not None
+                or self.takeover_pending or handoff_pending or self._handoff_jobs
                 or self.auxiliary_manual or heater not in self.owned
                 or heater in self.pending_auxiliaries or self.auxiliary_inflight
                 or heater in self._uncertain_device_jobs

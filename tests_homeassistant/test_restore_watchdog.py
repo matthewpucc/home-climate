@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from custom_components.house_climate.controls import NativeControls
+from house_climate.config import FallbackPolicy
 from tests.test_controller import config
 from tests_homeassistant import test_heater_power_guard as fixture
 
@@ -39,14 +40,24 @@ class RestoreWatchdogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.guard._reading.heater_w)
         self.calls.clear()
 
-    async def wired_restore(self, *, native_delay=0, on_delay=0, missing_watts=False, missing_native=False, already_latched=False):
+    async def wired_restore(self, *, native_delay=0, on_delay=0, missing_watts=False, missing_native=False, already_latched=False, claim_fallback=False):
         await self.prepare()
-        controls = NativeControls(self.hass, replace(config(), heater_entity=self.b.heater),
+        controls = NativeControls(self.hass, replace(config(), heater_entity=self.b.heater,
+                                  fallback=FallbackPolicy() if claim_fallback else None),
                                   True, "restore-watchdog", lambda: None)
         controls.active = controls.enabled = controls.enabled_intent = True
-        controls.owned = (self.b.heater,)
         controls.power_guard = self.guard
         controls.store.async_save = AsyncMock()
+        if claim_fallback:
+            # Exercise the real ownership claim, including durable arm(),
+            # rather than constructing the formerly incomplete owned fixture.
+            await controls.async_service("input_boolean", "turn_on", {})
+            await self.hass.async_block_till_done()
+            self.assertEqual(controls.handoff["stage"], "armed")
+            self.assertFalse(controls.handoff["requests"])
+            self.assertIn(self.b.heater, controls.owned)
+        else:
+            controls.owned = (self.b.heater,)
         controls.heartbeat_monotonic = 1000
         controls.auxiliary_authorized_at = 0  # No valid heating authorization.
         controls.auxiliary_heartbeat_blocked = already_latched
@@ -129,6 +140,9 @@ class RestoreWatchdogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_watchdog_does_not_cancel_restore_during_intent_save(self):
         await self.wired_restore(native_delay=.001)
+
+    async def test_claimed_armed_fallback_does_not_compete_with_guarded_restore(self):
+        await self.wired_restore(native_delay=.005, on_delay=.005, claim_fallback=True)
 
     async def test_already_latched_watchdog_defers_without_fake_acknowledgement(self):
         await self.wired_restore(native_delay=.001, already_latched=True)
@@ -287,6 +301,68 @@ class RestoreWatchdogTests(unittest.IsolatedAsyncioTestCase):
             await controls.async_check()
             self.assertEqual([c[1] for c in self.calls], ["set_hvac_mode"])
             self.assertTrue(controls._auxiliary_probe_stop_pending)
+        finally:
+            controls.active = False
+            await self.hass.async_block_till_done()
+
+    async def test_only_dormant_armed_handoff_allows_watchdog_coordination(self):
+        from custom_components.house_climate.handoff import arm
+
+        await self.prepare()
+        controls = NativeControls(self.hass, replace(config(), heater_entity=self.b.heater,
+                                  fallback=FallbackPolicy()), True, "handoff-scope", lambda: None)
+        controls.active = controls.enabled = controls.enabled_intent = True
+        controls.owned = (self.b.heater,)
+        controls.heartbeat_monotonic = time.monotonic()
+        controls.power_guard = SimpleNamespace(
+            recovery_isolation_confirmed=True, recovery_native_off_managed=True)
+        plan = arm(controls, controls.owned)
+        controls.handoff = plan
+        self.assertTrue(controls._guarded_recovery_watchdog())
+        for malformed in ([], "armed", {"stage": "armed", "authorized": True}):
+            with patch.object(controls, "handoff", malformed):
+                self.assertFalse(controls._guarded_recovery_watchdog())
+        for stage in ("stopping", "settling", "applying", "blocked", "superseded", "unknown"):
+            with patch.dict(plan, stage=stage):
+                self.assertFalse(controls._guarded_recovery_watchdog(), stage)
+        for field, value in (("requests", {"some_request": {}}), ("completed", ["some_device"]),
+                             ("problems", {"some_device": "unconfirmed"}), ("interrupted", True),
+                             ("stop_started", 0), ("settle_until", 0), ("applying_started", 0),
+                             ("resume_after", True), ("blower_recovery", {"some_device": {}}),
+                             ("authorized", False), ("requests", []), ("completed", {}),
+                             ("problems", None)):
+            with patch.dict(plan, {field: value}):
+                self.assertFalse(controls._guarded_recovery_watchdog(), field)
+        for field, value in (("recovering", True), ("enabled", False), ("takeover_pending", True),
+                             ("_handoff_jobs", {"some_device": object()})):
+            with patch.object(controls, field, value):
+                self.assertFalse(controls._guarded_recovery_watchdog(), field)
+        # The same exclusion applies once power may be On, not just preparation.
+        controls.power_guard.recovery_isolation_confirmed = False
+        self.assertTrue(controls._guarded_recovery_watchdog())
+        with patch.dict(plan, stage="stopping"):
+            self.assertFalse(controls._guarded_recovery_watchdog())
+
+    async def test_active_handoff_still_dispatches_auxiliary_off(self):
+        from custom_components.house_climate.handoff import arm
+
+        await self.prepare()
+        controls = NativeControls(self.hass, replace(config(), heater_entity=self.b.heater,
+                                  fallback=FallbackPolicy()), True, "active-handoff", lambda: None)
+        controls.active = controls.recovering = True
+        controls.enabled = False
+        controls.owned = (self.b.heater,)
+        controls.store.async_save = AsyncMock()
+        controls.power_guard = SimpleNamespace(
+            recovery_isolation_confirmed=True, recovery_native_off_managed=True,
+            emergency_fallback_enabled=False, power_cut_confirmed=False)
+        controls.handoff = arm(controls, controls.owned)
+        controls.handoff["stage"] = "stopping"
+        try:
+            await controls.async_check()
+            self.assertIn("set_hvac_mode", [c[1] for c in self.calls])
+            self.assertGreater(controls.observations.counts["off_requested"], 0)
+            self.assertFalse(controls._guarded_recovery_watchdog())
         finally:
             controls.active = False
             await self.hass.async_block_till_done()
