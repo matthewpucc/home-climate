@@ -34,6 +34,32 @@ approve_heater_restore:
       selector:
         boolean:
 
+supervised_heater_restore:
+  name: Run one supervised heater recovery from lockout
+  description: >-
+    Attempt one guarded restoration after the ordinary retry limit, using the matching
+    isolated dedicated relay and trusted watt meter. Requires live permission and the
+    comfort controller stopped, with shared AC fallback already disabled. Remain
+    beside the heater with a local cutoff for the entire attempt; the heater can
+    draw power before the first meter report. Does not request heat or switch shared
+    AC. No automatic retries.
+  fields:
+    confirm:
+      name: Confirm one supervised recovery attempt
+      required: true
+      selector:
+        boolean:
+    operator_present:
+      name: I am beside the heater and will remain present
+      required: true
+      selector:
+        boolean:
+    local_cutoff_available:
+      name: I can immediately cut power locally if needed
+      required: true
+      selector:
+        boolean:
+
 thermal_history_query:
   name: Query thermal evidence history
   description: Read bounded raw source reports, summaries and planned-demand episodes from Home Climate's private SQLite history. Timestamps are UTC Unix seconds. Does not operate equipment.

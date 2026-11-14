@@ -233,7 +233,10 @@ class CommissioningDiagnosticPublicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(attrs), ORIGINAL_GUARD_KEYS | {
             "shutdown_active", "commissioning", "retained_cut_recovery_pending",
             "supply_evidence", "shutdown_evidence", "shutdown_contradicted", "manual_override",
-            "heater_meter_expectation", "heater_meter_raw_issue", "heater_meter_silence_expected"})
+            "heater_meter_expectation", "heater_meter_raw_issue", "heater_meter_silence_expected",
+            "supervised_recovery"})
+        self.assertEqual(state.attributes["supervised_recovery"],
+                         {"active": False, "used": False, "status": "idle"})
         result = state.attributes["commissioning"]
         self.assertTrue(set(result) <= COMMISSIONING_KEYS)
         self.assertLessEqual(len(result["reason"]), 240)

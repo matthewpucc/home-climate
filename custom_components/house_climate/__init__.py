@@ -97,6 +97,22 @@ async def async_setup_entry(hass, entry):
         except (RuntimeError, ValueError) as exc:
             raise HomeAssistantError(str(exc)) from exc
 
+    async def supervised_heater_restore(call):
+        if (hass.data.get(DOMAIN) is not runtime or runtime.stop_event.is_set()
+                or runtime.power_guard is None):
+            raise HomeAssistantError("Supervised heater recovery is unavailable")
+        if not runtime.live:
+            raise HomeAssistantError("Enable live equipment commands before supervised heater recovery")
+        try:
+            completed = await runtime.power_guard.async_supervised_recovery(
+                confirm=call.data["confirm"], operator_present=call.data["operator_present"],
+                local_cutoff_available=call.data["local_cutoff_available"],
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
+        if completed is not True:
+            raise HomeAssistantError("Supervised heater recovery did not complete; check Heater power guard")
+
     async def thermal_history_query(call):
         history = runtime.thermal_storage
         if hass.data.get(DOMAIN) is not runtime or history is None:
@@ -147,6 +163,9 @@ async def async_setup_entry(hass, entry):
 
     hass.services.async_register(DOMAIN, "approve_heater_restore", approve_heater_restore,
         schema=vol.Schema({vol.Required("confirm"): vol.All(bool, vol.In((True,)))}))
+    hass.services.async_register(DOMAIN, "supervised_heater_restore", supervised_heater_restore,
+        schema=vol.Schema({vol.Required(field): vol.All(bool, vol.In((True,))) for field in
+                           ("confirm", "operator_present", "local_cutoff_available")}))
     hass.services.async_register(DOMAIN, "generate_package", generate_package)
     hass.services.async_register(
         DOMAIN, "commission_heater_relay", commission_heater_relay,
@@ -183,6 +202,7 @@ async def async_unload_entry(hass, entry):
             hass.services.async_remove(DOMAIN, "thermal_history_query")
             hass.services.async_remove(DOMAIN, "commission_heater_relay")
             hass.services.async_remove(DOMAIN, "approve_heater_restore")
+            hass.services.async_remove(DOMAIN, "supervised_heater_restore")
             # A timed-out caller still owns this retained runtime until its
             # actual operation completes. Never remove a replacement runtime.
             if hass.data.get(DOMAIN) is runtime:

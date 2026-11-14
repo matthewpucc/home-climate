@@ -146,6 +146,51 @@ verify units, freshness, ownership and any required acknowledgement before
 coordinating live use. This feature never enables shared AC fallback or
 automatically restores shared AC.
 
+### Supervised recovery after the ordinary attempt limit
+
+Use this separate maintenance action only after the three ordinary restore
+attempts are exhausted and the guard still owns a matching, physically
+verified Off dedicated relay. It does not require manually cycling the outlet
+and does not change ordinary recovery. Keep the comfort controller stopped
+and live protection enabled. Wait for the applicable cooldown, healthy supply,
+a matching trusted dedicated watt meter, and no unresolved equipment jobs.
+Shared AC fallback must already be disabled; the action does not change it.
+Remain beside the heater for the entire session and have a reliable local
+means to cut power immediately if it unexpectedly heats or you must leave.
+
+```yaml
+action: house_climate.supervised_heater_restore
+data:
+  confirm: true
+  operator_present: true
+  local_cutoff_available: true
+```
+
+Each field requires an explicit boolean true. Home Climate consumes a separate
+one-shot grant durably before sending relay On. Interruption or restart does
+not re-arm the grant or authorize another On. A failed attempt retains the
+lockout and the history of exhausted ordinary attempts; it never restores shared AC.
+
+The relay still has a short On acknowledgement deadline. After verified On,
+the starter window is 70 seconds for a first fresh low-watt report (a full
+one-minute reporting period plus margin). Observations are checked frequently,
+but checking a cached state never makes it fresh. A zero from before On or
+after cutoff cannot qualify. A slow meter cannot detect heat continuously:
+the appliance may heat before the first reading or between readings. The
+operator must be present, watching the unit and ready to cut power locally.
+
+Only trusted, fresh dedicated draw strictly below 100 W permits the longer
+native reconnect phase. The watt reports must keep arriving within their
+cadence deadline. Observed heating, unsafe or invalid powered data, loss of
+supply, or an interruption ends the attempt immediately. A missing report
+alone is allowed only until its deadline. Home Climate requests native Off
+after reconnect and requires a fresh Off acknowledgement and a new low-watt
+report after Off dispatch. Successful service completion by itself proves
+neither. Any failed phase requests a dedicated cutoff; if the cutoff itself
+cannot be verified, use the local cutoff and verify the heater is off. Progress
+and result are exposed as `supervised_recovery` on **Heater power guard**.
+The action does not start heater demand or re-enable the comfort controller.
+
 ### Supervised dedicated-relay commissioning
 
 The new `house_climate.commission_heater_relay` action is a deliberate physical

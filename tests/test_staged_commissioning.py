@@ -348,9 +348,18 @@ class StagedCommissioningTests(unittest.IsolatedAsyncioTestCase):
                 self.guard._action_task.cancel()
 
         self.hass.frame_hook = cancel_after_fresh_low_reports
-        await self.prepare_restore()
-        with self.assertRaises(asyncio.CancelledError):
-            await self.run_restore()
+        # This pair tests cancellation/restart after reaching energized
+        # supervision, not the independent real-time service/On deadlines.
+        # Give those fixture startup waits headroom under a busy test runner;
+        # otherwise the 25/40 ms defaults can cut off before the frame hook
+        # ever runs. The synthetic phase hook still cancels at exactly 10 s,
+        # and all production constants and deadline-specific tests are intact.
+        with (patch.object(power, "SERVICE_TIMEOUT_SECONDS", 1),
+              patch.object(power, "RESTORE_ACK_SECONDS", 1)):
+            await self.prepare_restore()
+            with self.assertRaises(asyncio.CancelledError):
+                await self.run_restore()
+        self.assertEqual(len(captured), 1)
         await self.real_sleep(.02)
         self.assertEqual(self.hass.data[B.heater_switch]["state"], "off")
         self.assertTrue(self.guard.diagnostics["manual_recovery_required"])

@@ -627,6 +627,9 @@ class HeaterPowerStatus(ControllerEntity):
     @property
     def native_value(self):
         guard = self.captured_guard()
+        supervised = guard.get("supervised_recovery") or {}
+        if supervised.get("active") and not guard.get("power_restore_cleanup_pending"):
+            return short(supervised.get("reason") or "Supervised heater recovery in progress")
         if guard.get("power_restore_inflight") or guard.get("power_restore_cleanup_pending"):
             return "Waiting for heater outlet restoration to stop safely"
         if guard.get("shutdown_evidence") == "contradictory":
@@ -662,7 +665,8 @@ class HeaterPowerStatus(ControllerEntity):
                  "shutdown_active", "shutdown_stage", "shutdown_confirmation", "aggregate_stop", "wall_power_budget",
                  "emergency_ac_enabled", "emergency_ac_latched", "emergency_ac_status",
             "emergency_ac_attempts", "emergency_ac_inflight", "emergency_notification_error", "manual_recovery_required",
-                 "retained_cut_recovery_pending", "binding_identity_mismatch", "commissioning") if key in guard}
+                 "retained_cut_recovery_pending", "binding_identity_mismatch", "commissioning",
+                 "supervised_recovery") if key in guard}
 
 
 class Overview(ControllerEntity):
