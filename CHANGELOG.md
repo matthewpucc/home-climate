@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.21
+
+- Allow the native heater watchdog to coordinate guarded restoration while the normal fallback plan is dormant and armed. Active, interrupted, uncertain or pending handoff work still prevents deferral; recovery evidence, deadlines, native Off and fresh low-load requirements are unchanged.
+
 ## 0.9.20
 
 - Coordinate the native heater watchdog with explicitly approved, bounded dedicated-relay recovery. Preserve physical isolation during pre-dispatch persistence, defer competing routine Off jobs to the active recovery, and retain fresh post-On Off/low-load proof, deadlines and compensating cutoff.
