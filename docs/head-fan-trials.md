@@ -97,6 +97,11 @@ diagnostics expose current intent, uncertainty, and restoration blockers.
 
 Optional fan work has a bounded worker wait. Journal failure or abandonment
 blocks experimental dispatch without shutting down normal climate control.
+An enrollment that reaches its deadline before any command reservation can
+still be closed by a journal update, without reading or operating the head.
+A processing fault does not clear the dispatch block. If a write was reserved
+or native cleanup is already armed and unresolved, retain that recovery
+obligation and require review instead of assuming the blower was restored.
 
 ## Next stage
 

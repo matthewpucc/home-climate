@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.23
+
+- Close expired heat-pump blower trials that never reserved a command even when dispatch is blocked, and retain native cleanup and explicit review if a write may have reached the head.
+
 ## 0.9.22
 
 - Add a separate, on-site supervised recovery action for an isolated heater after ordinary restore attempts are exhausted. It requires three explicit attestations, consumes a durable one-shot grant, and accommodates one-minute dedicated watt telemetry under bounded monitoring. Ordinary recovery remains unchanged.

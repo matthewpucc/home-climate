@@ -154,6 +154,7 @@ class NativeAPI:
         self.auxiliary_startup_failure = None
         self._auxiliary_target_snapshot = None
         self.head_fan_trials = None
+        self._fan_trial_future = None
 
     def request(self, path, body=None, *, window_authorization=None,
                 activation_deadline=None, auxiliary_target=None, airflow_authorization=None, fan_trial_token=None):
@@ -738,15 +739,18 @@ class NativeAPI:
 
     def fan_trial_step(self, executor, plan):
         manager = self.head_fan_trials
-        if (manager is None or manager.trial is None or manager.error
-                or manager.trial.stage in {"complete", "cancelled", "needs_attention"}):
+        if manager is None or not manager.tick_needed():
+            return
+        # A timed-out tick may still be completing a durable write or an HA
+        # job. Do not cancel it or queue other ticks behind its trial lock.
+        if self._fan_trial_future is not None and not self._fan_trial_future.done():
             return
         entity = manager.trial.entity_id
         pending = (entity in executor.pending or entity in executor.recoveries
                    or bool(self.service_jobs({entity}) or self.uncertain_service_jobs({entity})))
         safe = (executor.phase == "running" and not executor.device_issues.get(entity)
                 and entity not in executor.capability_blocks)
-        future = asyncio.run_coroutine_threadsafe(
+        future = self._fan_trial_future = asyncio.run_coroutine_threadsafe(
             manager.async_tick(pending=pending, safe=safe, plan=plan), self.hass.loop)
         # The ordinary executor has finished this cycle before optional fan work.
         # Safety watchdogs remain independent on the HA loop.
@@ -754,7 +758,8 @@ class NativeAPI:
             future.result(timeout=8)
         except Exception:
             # Optional experimentation must not take down ordinary climate control.
-            manager.error = "Fan trial processing failed; dispatch blocked and review required"
+            if not manager.error:
+                manager.error = "Fan trial processing failed; dispatch blocked and review required"
             _LOGGER.exception("Head fan trial processing failed")
 
     def service_before(self, domain, service, *, deadline, auxiliary_target=None, **data):

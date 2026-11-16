@@ -295,9 +295,20 @@ class HeadFanTrials:
     async def _dispatch(self, mode, *, restoring=False):
         t, r = self.trial, self.runtime
         if not restoring:
-            await self._arm_fallback()
+            try:
+                await self._arm_fallback()
+            except HAActivationDeferred:
+                # Expected loss of eligibility before reservation is not a
+                # processing fault. No experimental service was attempted.
+                return False
+        if self.error:
+            return False
         await self._save(replace(t, stage="restore_reserved" if restoring else "request_reserved",
                                  reason="durable_attempt_reserved"))
+        if self.error:
+            # The worker may have timed out while the journal was being saved.
+            # Keep the reservation for reconciliation; do not submit a service.
+            return False
         token = uuid4().hex
         self._ticket = (token, t.entity_id, mode)
         def send():
@@ -326,10 +337,45 @@ class HeadFanTrials:
                                  reason="awaiting_restore_report" if restoring else "service_returned_unverified"))
         return True
 
+    def _deadline_reached(self, trial):
+        return (time.time() >= trial.ends_at
+                or (self._trial_deadline_monotonic is not None
+                    and time.monotonic() >= self._trial_deadline_monotonic))
+
+    def tick_needed(self):
+        """Worker hint only; authoritative state is checked under the trial lock."""
+        t = self.trial
+        return bool(t and t.stage not in TERMINAL
+                    and (not self.error or t.stage != "enrolled" or self._deadline_reached(t)))
+
+    async def _expire_enrollment(self, trial):
+        controls = self.runtime.controls
+        plan = getattr(controls, "handoff", None) or {}
+        recovery = plan.get("blower_recovery", {}).get(trial.entity_id)
+        if recovery and recovery.get("trial_id") == trial.trial_id:
+            # The experiment never got a ticket, but arming native fallback
+            # may have persisted before an error. Do not supersede its record
+            # or any independent handoff in progress.
+            await self._save(replace(trial, stage="needs_attention",
+                                     reason="expired_before_dispatch_native_handoff_unresolved"))
+        else:
+            await self._save(replace(trial, stage="cancelled", reason="expired_before_dispatch"))
+
     async def async_tick(self, *, pending, safe, plan):
         async with self._lock:
             t, r = self.trial, self.runtime
-            if not t or t.stage in TERMINAL or self.error:
+            if not t or t.stage in TERMINAL:
+                return
+            if t.stage == "enrolled" and self._deadline_reached(t):
+                await self._expire_enrollment(t)
+                return
+            if self.error:
+                if t.stage != "enrolled":
+                    # A durable reservation may have reached the head. Keep
+                    # native cleanup armed; a fault does not authorize a retry
+                    # or let a cached baseline count as a restoration receipt.
+                    await self._save(replace(t, stage="needs_attention",
+                                             reason="processing_failed_restoration_unresolved"))
                 return
             if time.time() < t.starts_at:
                 await self._save(replace(t, stage="needs_attention", reason="wall_clock_reversed_no_write"))
@@ -365,13 +411,11 @@ class HeadFanTrials:
                     await self._save(replace(t, stage="needs_attention", reason="restoration_report_unconfirmed"))
                 return
             key = next(k for k, entity in r.config.heads.items() if entity == t.entity_id)
-            ended = (t.expired(time.time()) or self._cancel or not self.storage_healthy()
-                     or (self._trial_deadline_monotonic is not None
-                         and time.monotonic() >= self._trial_deadline_monotonic) or
+            ended = (self._deadline_reached(t) or self._cancel or not self.storage_healthy() or
                      (t.stage == "active" and (state.get("state") != self._call_mode
                       or key not in plan.head_targets_f)))
             if t.stage == "enrolled" and ended:
-                await self._save(replace(t, stage="cancelled", reason="expired_before_dispatch"))
+                await self._expire_enrollment(t)
                 return
             if t.stage == "active" and ended:
                 if pending or not safe:
