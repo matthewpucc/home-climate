@@ -96,6 +96,102 @@ class TrialTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.trial.stage,"cancelled")
         self.runtime.api.request.assert_not_called()
 
+    async def test_pre_reservation_deferral_does_not_latch_and_expires(self):
+        await self.enroll()
+        self.controls.handoff["authorized"] = False
+        await self.tick()
+        self.assertIsNone(self.manager.error)
+        self.assertEqual(self.manager.trial.stage, "enrolled")
+        self.manager._trial_deadline_monotonic = time.monotonic() - 1
+        await self.tick()
+        self.assertEqual(self.manager.trial.stage, "cancelled")
+        self.assertEqual(self.manager.trial.reason, "expired_before_dispatch")
+        self.runtime.api.request.assert_not_called()
+
+    async def test_expiry_reconciles_latched_enrollment_without_device_state(self):
+        await self.enroll()
+        old = self.manager.trial
+        self.manager.error = "unexpected processing fault"
+        self.assertFalse(self.manager.tick_needed())
+        with patch("custom_components.house_climate.head_fan_trials.time.time", return_value=old.ends_at):
+            self.assertTrue(self.manager.tick_needed())
+            self.runtime.controls = None
+            self.state("unknown")
+            await self.tick(pending=True, safe=False, plan=None)
+        self.assertEqual(self.manager.trial.stage, "cancelled")
+        self.assertEqual(self.manager.store.async_save.call_args.args[0]["reason"], "expired_before_dispatch")
+        self.assertEqual(self.manager.error, "unexpected processing fault")
+        self.assertFalse(self.manager.tick_needed())
+        self.runtime.api.request.assert_not_called()
+
+    async def test_failed_expiry_save_does_not_claim_cancelled(self):
+        await self.enroll()
+        self.manager.error = "unexpected processing fault"
+        self.manager._trial_deadline_monotonic = time.monotonic() - 1
+        self.manager.store.async_save.side_effect = OSError("write failed")
+        with self.assertRaises(OSError):
+            await self.tick()
+        self.assertEqual(self.manager.trial.stage, "enrolled")
+        self.assertIn("journal write failed", self.manager.error)
+        self.runtime.api.request.assert_not_called()
+        with self.assertRaises(ValueError):
+            await self.enroll()
+
+    async def test_fault_after_fallback_arming_does_not_erase_native_obligation(self):
+        await self.enroll()
+        self.controls._save.side_effect = OSError("ownership store unavailable")
+        with self.assertRaises(OSError):
+            await self.tick()
+        self.manager.error = "unexpected processing fault"
+        self.manager._trial_deadline_monotonic = time.monotonic() - 1
+        await self.tick()
+        self.assertEqual(self.manager.trial.stage, "needs_attention")
+        self.assertEqual(self.manager.trial.reason, "expired_before_dispatch_native_handoff_unresolved")
+        self.assertEqual(self.controls.handoff["blower_recovery"][self.entity]["stage"], "pending")
+        self.runtime.api.request.assert_not_called()
+
+    async def test_faulted_possible_writes_require_review_even_with_reported_auto(self):
+        await self.enroll()
+        await self.tick()
+        self.runtime.api.request.reset_mock()
+        original = self.manager.trial
+        for stage in ("request_reserved", "active", "restore_reserved"):
+            with self.subTest(stage=stage):
+                self.manager.trial = replace(original, stage=stage)
+                self.manager.error = "unexpected processing fault"
+                self.assertTrue(self.manager.tick_needed())
+                await self.tick()
+                self.assertEqual(self.manager.trial.stage, "needs_attention")
+                self.assertEqual(self.manager.trial.reason, "processing_failed_restoration_unresolved")
+                self.assertEqual(self.controls.handoff["blower_recovery"][self.entity]["stage"], "pending")
+                self.assertFalse(self.manager.tick_needed())
+        self.runtime.api.request.assert_not_called()
+
+    async def test_fault_during_durable_reservation_does_not_submit_service(self):
+        await self.enroll()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def save(data):
+            if data["stage"] == "request_reserved":
+                entered.set()
+                await release.wait()
+
+        self.manager.store.async_save.side_effect = save
+        original = asyncio.create_task(self.tick())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            # The native worker can time out while HA is still saving intent.
+            self.manager.error = "unexpected processing fault"
+            self.manager._trial_deadline_monotonic = time.monotonic() - 1
+            self.assertEqual(self.manager.trial.stage, "enrolled")
+        finally:
+            release.set()
+            await original
+        self.assertEqual(self.manager.trial.stage, "request_reserved")
+        await self.tick()
+        self.assertEqual(self.manager.trial.stage, "needs_attention")
+        self.runtime.api.request.assert_not_called()
+
     async def test_cancel_restores_once_never_claims_physical(self):
         await self.enroll()
         await self.tick()

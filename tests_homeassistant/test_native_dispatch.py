@@ -225,10 +225,11 @@ class NativeDispatchTests(unittest.IsolatedAsyncioTestCase):
         manager = Mock()
         manager.trial = Mock(entity_id=guest, stage="active")
         manager.error = None
-        manager.async_tick = Mock(return_value=asyncio.sleep(0))
+        manager.async_tick = Mock(side_effect=lambda **kwargs: asyncio.sleep(0))
         runtime.api.head_fan_trials = manager
         future = Mock()
         future.result.side_effect = FutureTimeout()
+        future.done.return_value = False
         queued=[]
         def hold(coroutine,loop):
             queued.append(coroutine)
@@ -242,6 +243,14 @@ class NativeDispatchTests(unittest.IsolatedAsyncioTestCase):
             with patch("custom_components.house_climate.runtime.asyncio.run_coroutine_threadsafe") as schedule:
                 await asyncio.to_thread(runtime.api.fan_trial_step,executor,Mock())
                 schedule.assert_not_called()
+            # Once the outstanding work settles, housekeeping can run even
+            # though the eligibility latch is still set.
+            future.done.return_value = True
+            future.result.side_effect = None
+            with patch("custom_components.house_climate.runtime.asyncio.run_coroutine_threadsafe",side_effect=hold):
+                await asyncio.to_thread(runtime.api.fan_trial_step,executor,Mock())
+            self.assertEqual(len(queued), 2)
+            self.assertIn("dispatch blocked", manager.error)
         finally:
             for coro in queued: coro.close()
             runtime.api.head_fan_trials = runtime.head_fan_trials
