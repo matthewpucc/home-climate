@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.26
+
+- Make single-setpoint HomeKit room thermostat edits select durable Hold, retaining Protection Only and idempotent Auto behavior. Existing HA range and desired-number edits keep their prior semantics.
+- Remind once per continuous room Hold after more than 24 hours through the configured non-critical normal route, with independent persistent HA notices until each room exits Hold. Setpoint changes preserve age; restart preserves age and the at-most-once dispatch claim. Legacy Holds begin their reminder clock at migration.
+- Verify atomic comfort saves against uncached disk state before publishing intent or dispatching a reminder, including Home Assistant silently logged write failures. Drain cancelled saves before releasing the room-edit lock.
+- Reconcile dismissed or stale room notices without touching unrelated notices; unavailable routes retain eligibility, while critical/provider-payload routes are never used for Hold reminders. No HA deployment, bridge changes, or phone delivery claim is implied by this release.
+
 ## 0.9.25
 
 - Replace thermal-history backup writer pauses with bounded online SQLite snapshots, so missing post-backup callbacks or another integration's preparation failure cannot freeze Home Climate recording or poison retries. No Core or Supervisor changes are required.

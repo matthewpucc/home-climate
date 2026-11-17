@@ -797,6 +797,7 @@ class ControllerRuntime:
         self.power_bindings = power_bindings
         self.power_guard = None
         self.notifications = None
+        self.hold_notifications = None
         self.notification_settings = notification_settings
         self.seasonal_state = None
         self.thermal_storage = None
@@ -855,6 +856,9 @@ class ControllerRuntime:
                 from .notifications import AlertManager
                 self.notifications = AlertManager(self.hass, entry_id, self.notification_settings,
                                                   self._notification_changed)
+            from .hold_notifications import HoldNotificationManager
+            self.hold_notifications = HoldNotificationManager(
+                self.hass, entry_id, self.comfort, self.notification_settings)
             self.api.settings_provider = self._settings
             await self.recovery.capabilities.async_load(entry_id)
             if not self.config.legacy:
@@ -893,7 +897,10 @@ class ControllerRuntime:
                 if self.controls is not None:
                     self.controls.power_guard = self.power_guard
                 await self.power_guard.async_load()
+            self.hold_notifications.start()
         except BaseException:
+            if self.hold_notifications is not None:
+                await self.hold_notifications.async_close()
             if self.power_guard is not None:
                 await self.power_guard.async_close()
             await self.comfort.async_close()
@@ -1018,6 +1025,8 @@ class ControllerRuntime:
 
     @callback
     def _async_comfort_changed(self):
+        if self.hold_notifications is not None:
+            self.hold_notifications.request_reconcile()
         self.wake_event.set()
         async_dispatcher_send(self.hass, SIGNAL_STATUS)
 
@@ -1416,6 +1425,8 @@ class ControllerRuntime:
         self.stop_event.set()
         self.wake_event.set()
         self._set_unload_phase("comfort_storage")
+        if self.hold_notifications is not None:
+            await self.hold_notifications.async_close()
         if self.comfort:
             await self.comfort.async_close()
             if self.purifier_speeds:

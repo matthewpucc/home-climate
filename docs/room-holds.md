@@ -1,6 +1,6 @@
 # Room holds and scoped restoration
 
-Each virtual room thermostat has three presets. These are requests to Home Climate, not physical equipment modes.
+Each virtual room thermostat has four presets. These are requests to Home Climate, not physical equipment modes.
 
 | Preset | Meaning | Expiry |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ Holds and Protection Only do not enable Controller or Allow Live, bypass protect
 
 ## Persistence and errors
 
-The mode and temperatures are saved together before new intent is published or the worker is woken. A storage error leaves the prior durable intent in effect and reports a service error; failed release cannot display Schedule. Retrying release after it succeeded is a no-op. The climate card exposes `comfort_mode` (`schedule`, `temporary`, `hold`) and `override_expires_at`; Hold always has a null expiry. A separate room comfort-mode sensor exposes `Schedule`, `Temporary` or `Hold` as its primary state for integrations that omit climate attributes.
+The mode and temperatures are saved together before new intent is published or the worker is woken. An atomic save is checked against the uncached on-disk record before publishing. A failed or unconfirmed save leaves the prior in-memory intent in effect and reports a service error; failed release cannot display Schedule. If the write succeeded but its verification could not be read, the saved intent is uncertain until a successful read or reload. Retrying release after it succeeded is a no-op. The climate card exposes `comfort_mode` (`schedule`, `temporary`, `hold`) and `override_expires_at`; Hold always has a null expiry. A separate room comfort-mode sensor exposes `Schedule`, `Temporary` or `Hold` as its primary state for integrations that omit climate attributes.
 
 Legacy records without a mode remain Temporary, including their existing behavior when no schedule transition exists. Normal restarts with unchanged valid configuration preserve Hold. Existing room-identity/configuration fingerprints and temperature bounds still reject mismatched or invalid saved requests; removing a room or deliberately changing incompatible wiring, schedules or bounds can invalidate a saved hold. Known supported house-policy migration retains an explicitly valid Hold. Downgrading to code that predates this preset is not a supported way to retain Hold. Inspect the actual mode after upgrades, deliberate configuration changes or storage errors.
 
@@ -52,3 +52,7 @@ await codemode.hass_mcp_homeassistant__GetLiveContext({
 The connector calls this action “Turn on/opens/presses”; Home Assistant's `HassTurnOn` handler maps a button specifically to `button.press`. It does not energize equipment directly. Synthetic tests exercise that installed HA intent handler, durable release, repeated release, one-room scope, failure readback and independent auxiliary manual storage. This verifies the implementation path, not live exposure or end-to-end access in a particular home. After installation and explicit exposure, rediscover both entities and the current connector schema, then test an authorized release with readback. Missing/ambiguous entities, service errors or a readback other than Schedule mean restoration has not been verified; never substitute a broad area command or controller toggle.
 
 For a future supervised experiment, restoration may release the room Hold at the agreed time. Manual auxiliary ownership is a separate decision and remains untouched by this action. Do not assume a scheduled remote task replaces local temperature protection or that an unconfigured MCP exposure is available.
+
+## Holds over 24 hours
+
+A continuous Hold older than 24 hours produces a persistent notice for that room and one dispatch through the configured normal, non-critical notification route. Changing its temperature or range preserves its age. Exiting Hold clears the notice; a new Hold starts a new clock. The durable episode and dispatch claim survive restart. Legacy Holds without a reliable stored age start their clock at migration. Missing or unavailable routes do not prevent the HA notice; delivery is never upgraded to critical or sent to a guessed recipient. Dispatch is at-most-once, not guaranteed phone delivery. See [the thermostat reminder contract](homekit-room-thermostats.md#long-running-holds).

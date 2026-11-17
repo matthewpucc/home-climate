@@ -28,7 +28,7 @@ class HouseHoldMigrationTests(unittest.IsolatedAsyncioTestCase):
         self.previous = Config.from_dict(raw)
         self.fixed = house_configuration(raw, self.bindings)
         self.store = SimpleNamespace(async_load=AsyncMock(return_value=None), async_save=AsyncMock())
-        self.enterContext(patch("custom_components.house_climate.comfort.Store", return_value=self.store))
+        self.enterContext(patch("custom_components.house_climate.comfort._VerifiedComfortStore", return_value=self.store))
         self.old = RoomComfort(self.hass, self.previous, "existing_entry", lambda: None)
         self.new = RoomComfort(self.hass, self.fixed, "existing_entry", lambda: None)
 
