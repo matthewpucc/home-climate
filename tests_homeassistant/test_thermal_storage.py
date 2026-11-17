@@ -47,6 +47,7 @@ class StorageTests(unittest.IsolatedAsyncioTestCase):
     async def test_open_failure_isolated(self):
         with patch("custom_components.house_climate.thermal_storage.ThermalHistory.open",side_effect=OSError):
             self.storage.start()
+            await self.hass.async_add_executor_job(self.storage._thread.join, 2)
             await self.storage.async_close()
         self.assertEqual(self.storage.diagnostics["error"],"OSError")
 
@@ -130,129 +131,150 @@ class BackupTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = StorageTests.asyncSetUp
     asyncTearDown = StorageTests.asyncTearDown
 
-    async def test_backup_pauses_only_writer_and_restores_standalone_file(self):
-        import shutil
-        from custom_components.house_climate import backup
-        from custom_components.house_climate.const import DOMAIN
-        from types import SimpleNamespace
-        self.hass.data[DOMAIN]=SimpleNamespace(thermal_storage=self.storage)
+    async def ready(self):
         self.storage.start()
-        self.storage.observe("live",{"timestamp":"2026-11-12T12:00:00+00:00","rooms":{}})
-        for _ in range(100):
-            if self.storage.diagnostics["committed_records"]: break
+        await self.hass.async_add_executor_job(self.storage._storage_ready.wait, 10)
+        self.assertFalse(self.storage._failed, self.storage.diagnostics)
+
+    async def record(self, mode):
+        before = self.storage._committed
+        self.storage.observe("live", {"mode":mode})
+        for _ in range(200):
+            if self.storage._committed > before:
+                return
             await asyncio.sleep(.01)
-        self.assertGreater(Path(str(self.storage.path)+"-wal").stat().st_size, 0)
-        await backup.async_pre_backup(self.hass)
-        self.assertTrue(self.storage.diagnostics["backup_paused"])
-        snapshot=Path(self.temp.name)/"restored.sqlite"
-        await self.hass.async_add_executor_job(shutil.copy2,self.storage.path,snapshot)
-        self.storage.observe("shadow",{"timestamp":"2026-11-12T12:01:00+00:00","rooms":{}})
-        await asyncio.sleep(.05)
-        self.assertEqual(self.storage.diagnostics["committed_records"],1)
-        restored=await self.hass.async_add_executor_job(read_history,snapshot,0,9999999999)
-        self.assertEqual(len(restored["decisions"]),1)
-        await backup.async_post_backup(self.hass)
-        for _ in range(100):
-            if self.storage.diagnostics["committed_records"]==2: break
-            await asyncio.sleep(.01)
-        self.assertEqual(self.storage.diagnostics["committed_records"],2)
+        self.fail(str(self.storage.diagnostics))
 
-    async def test_backup_fails_instead_of_claiming_consistent_dead_writer(self):
-        from custom_components.house_climate import backup
-        from custom_components.house_climate.const import DOMAIN
-        from homeassistant.exceptions import HomeAssistantError
-        from types import SimpleNamespace
-        self.hass.data[DOMAIN]=SimpleNamespace(thermal_storage=self.storage)
-        with self.assertRaises(HomeAssistantError):
-            await backup.async_pre_backup(self.hass)
-
-    async def test_cancelled_pre_backup_releases_pause(self):
-        from unittest.mock import Mock
-        self.storage._thread=Mock()
-        self.storage._thread.is_alive.return_value=True
-        with patch.object(self.hass, "async_add_executor_job", side_effect=[asyncio.CancelledError, asyncio.sleep(0, result=True)]):
-            with self.assertRaises(asyncio.CancelledError):
-                await self.storage.async_pre_backup()
-        self.assertFalse(self.storage._backup_requested.is_set())
-        self.storage._thread=None
-
-    async def test_reload_during_backup_cannot_write_and_repeated_backup(self):
-        from custom_components.house_climate import backup
-        from custom_components.house_climate.const import DOMAIN
-        from types import SimpleNamespace
-        self.hass.data[DOMAIN]=SimpleNamespace(thermal_storage=self.storage)
-        self.storage.start()
-        self.storage.observe("live",{"timestamp":"2026-11-12T12:00:00+00:00","rooms":{}})
-        for _ in range(100):
-            if self.storage.diagnostics["committed_records"]: break
-            await asyncio.sleep(.01)
-        await backup.async_pre_backup(self.hass)
-        await backup.async_post_backup(self.hass)
-        # Immediate second backup must obtain a fresh acknowledgement.
-        await backup.async_pre_backup(self.hass)
-        await self.storage.async_close()
-        replacement=ThermalStorage(self.hass,config(),"entry")
-        self.hass.data[DOMAIN]=SimpleNamespace(thermal_storage=replacement)
-        replacement.start()
-        replacement.observe("live",{"timestamp":"2026-11-12T12:01:00+00:00","rooms":{}})
-        try:
-            await asyncio.sleep(.25)
-            self.assertEqual(replacement.diagnostics["committed_records"],0)
-            await backup.async_post_backup(self.hass)
-            for _ in range(100):
-                if replacement.diagnostics["committed_records"]: break
-                await asyncio.sleep(.01)
-            self.assertEqual(replacement.diagnostics["committed_records"],1)
-        finally:
-            await replacement.async_close()
-
-    async def test_prepare_timeout_releases_fence(self):
-        from unittest.mock import AsyncMock, Mock
-        from custom_components.house_climate import backup
-        from custom_components.house_climate.const import DOMAIN
-        from custom_components.house_climate.thermal_storage import BACKUP_FENCE
-        from homeassistant.exceptions import HomeAssistantError
-        from types import SimpleNamespace
-        self.storage._thread=Mock()
-        self.storage._thread.is_alive.return_value=True
-        self.hass.data[DOMAIN]=SimpleNamespace(thermal_storage=self.storage)
-        with patch.object(self.hass,"async_add_executor_job",AsyncMock(return_value=False)):
-            with self.assertRaises(HomeAssistantError):
-                await backup.async_pre_backup(self.hass)
-        self.assertFalse(self.hass.data[BACKUP_FENCE].is_set())
-        self.assertFalse(self.storage._backup_requested.is_set())
-        self.storage._thread=None
-
-    async def test_failed_checkpoint_cannot_acknowledge_backup(self):
-        from unittest.mock import Mock
-        store=Mock()
-        store.db.execute.side_effect=OSError("busy")
-        self.storage._backup_requested.clear()
-        self.storage._pause_for_backup(store)
-        self.assertEqual(self.storage._backup_error,"OSError")
-        store.close.assert_not_called()
-
-    async def test_cancel_after_ready_then_new_generation_is_safe(self):
-        self.storage.start()
-        self.storage.observe("live",{"timestamp":"2026-11-12T12:00:00+00:00","rooms":{}})
-        for _ in range(100):
-            if self.storage.diagnostics["committed_records"]: break
-            await asyncio.sleep(.01)
-        original=self.hass.async_add_executor_job
-        calls=0
-        def interrupted(function,*args):
-            nonlocal calls
-            calls+=1
-            if calls==1:
-                async def wait_then_cancel():
-                    await original(function,*args)
-                    raise asyncio.CancelledError
-                return wait_then_cancel()
-            return original(function,*args)
-        with patch.object(self.hass,"async_add_executor_job",interrupted):
-            with self.assertRaises(asyncio.CancelledError):
-                await self.storage.async_pre_backup()
+    async def test_snapshot_restores_and_missing_post_does_not_pause(self):
+        from custom_components.house_climate.controller import thermal_snapshot
+        await self.ready()
+        await self.record("heat")
         await self.storage.async_pre_backup()
-        self.assertEqual(self.storage._backup_ready_generation,2)
-        self.assertTrue(self.storage.diagnostics["backup_paused"])
-        await self.storage.async_post_backup()
+        snapshot_commit = self.storage._snapshot_info.last_commit
+        await self.record("cool")  # deliberately never call post
+        restored = Path(self.temp.name) / "restored.sqlite"
+        await self.hass.async_add_executor_job(thermal_snapshot.restore, self.storage.snapshot_path, restored)
+        result = await self.hass.async_add_executor_job(read_history, restored, 0, 9999999999)
+        self.assertEqual(len(result["decisions"]), 1)
+        self.assertIsNotNone(snapshot_commit)
+        await self.storage.async_pre_backup()  # no stale latch on retry
+        self.assertFalse(self.storage.diagnostics["backup_paused"])
+
+    async def test_dead_writer_rejects(self):
+        with self.assertRaises(RuntimeError):
+            await self.storage.async_pre_backup()
+
+    async def test_refresh_failure_preserves_snapshot_and_live_recording(self):
+        await self.ready()
+        old = self.storage.snapshot_path.stat()
+        with patch("custom_components.house_climate.thermal_storage.thermal_snapshot.publish", side_effect=OSError("full")):
+            with self.assertRaises(OSError):
+                await self.storage.async_pre_backup()
+        self.assertEqual(self.storage.snapshot_path.stat().st_ino, old.st_ino)
+        await self.record("heat")
+        await self.storage.async_pre_backup()
+        self.assertIsNone(self.storage.diagnostics["snapshot_error"])
+
+    async def test_reload_keeps_fresh_cache_without_post(self):
+        await self.ready()
+        await self.storage.async_pre_backup()
+        await self.record("heat")
+        await self.storage.async_close()
+        replacement = ThermalStorage(self.hass, config(), "entry")
+        self.storage = replacement
+        await self.ready()
+        result = await self.hass.async_add_executor_job(read_history, replacement.path, 0, 9999999999)
+        self.assertEqual(len(result["decisions"]), 1)
+        self.assertFalse(replacement.diagnostics["recovered_from_snapshot"])
+
+    async def test_restore_with_absent_cache_uses_snapshot(self):
+        import shutil
+        await self.ready()
+        await self.record("heat")
+        await self.storage.async_pre_backup()
+        await self.record("cool")
+        await self.storage.async_close()
+        shutil.rmtree(self.storage.path.parent)  # stock restore removes cache
+        self.storage = ThermalStorage(self.hass, config(), "entry")
+        await self.ready()
+        result = await self.hass.async_add_executor_job(read_history, self.storage.path, 0, 9999999999)
+        self.assertEqual(len(result["decisions"]), 1)
+        self.assertTrue(self.storage.diagnostics["recovered_from_snapshot"])
+
+    async def test_legacy_migration_keeps_committed_wal_and_rollback_copy(self):
+        from custom_components.house_climate.controller.thermal_history import ThermalHistory
+        legacy = ThermalHistory(self.storage.legacy_path)
+        legacy.open()
+        legacy.append("entry", "legacy", 10, {"rooms":{}}, {"mode":"heat"})
+        # Keep source connection open to prove online backup includes its WAL.
+        await self.ready()
+        legacy.close()
+        self.assertFalse(self.storage.legacy_path.exists())
+        self.assertTrue((self.storage.path.parent / "house_climate_thermal.legacy").exists())
+        result = await self.hass.async_add_executor_job(read_history, self.storage.path, 0, 100)
+        self.assertEqual(len(result["decisions"]), 1)
+
+    async def test_migration_publish_failure_preserves_legacy(self):
+        from custom_components.house_climate.controller.thermal_history import ThermalHistory
+        legacy = ThermalHistory(self.storage.legacy_path)
+        legacy.open()
+        legacy.append("entry", "legacy", 10, {"rooms":{}}, {"mode":"heat"})
+        legacy.close()
+        with patch("custom_components.house_climate.thermal_storage.thermal_snapshot.publish", side_effect=OSError("full")):
+            self.storage.start()
+            await self.hass.async_add_executor_job(self.storage._thread.join, 10)
+        self.assertTrue(self.storage._failed)
+        self.assertTrue(self.storage.legacy_path.exists())
+        self.assertFalse(self.storage.path.exists())
+
+    async def test_corrupt_restored_snapshot_never_initializes_empty_history(self):
+        self.storage.snapshot_path.parent.mkdir(parents=True)
+        self.storage.snapshot_path.write_bytes(b"invalid")
+        self.storage.start()
+        await self.hass.async_add_executor_job(self.storage._thread.join, 10)
+        self.assertTrue(self.storage._failed)
+        self.assertFalse(self.storage.path.exists())
+        self.assertEqual(self.storage.snapshot_path.read_bytes(), b"invalid")
+
+    async def test_cancelled_pre_refresh_does_not_freeze_writer(self):
+        await self.ready()
+        entered, release = threading.Event(), threading.Event()
+        original = self.storage._publish_snapshot
+        def slow():
+            entered.set()
+            release.wait(5)
+            original()
+        with patch.object(self.storage, "_publish_snapshot", slow):
+            task = asyncio.create_task(self.storage.async_pre_backup())
+            await self.hass.async_add_executor_job(entered.wait, 5)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            await self.record("heat")
+            release.set()
+            # Next pre waits for the detached executor to release only its
+            # snapshot lock, never a writer/control lease.
+            await self.storage.async_pre_backup()
+        self.assertFalse(self.storage.diagnostics["backup_paused"])
+
+    async def test_restart_snapshot_failure_keeps_valid_working_history_recording(self):
+        await self.ready()
+        await self.record("heat")
+        await self.storage.async_close()
+        self.storage = ThermalStorage(self.hass, config(), "entry")
+        with patch("custom_components.house_climate.thermal_storage.thermal_snapshot.publish", side_effect=OSError("full")):
+            await self.ready()
+            await self.record("cool")
+        self.assertEqual(self.storage.diagnostics["snapshot_error"], "OSError")
+        result = await self.hass.async_add_executor_job(read_history, self.storage.path, 0, 9999999999)
+        self.assertEqual(len(result["decisions"]), 2)
+
+    async def test_orphan_working_wal_never_initializes_empty_history(self):
+        self.storage.path.parent.mkdir(parents=True)
+        wal = Path(str(self.storage.path)+"-wal")
+        wal.write_bytes(b"preserve orphan recovery evidence")
+        self.storage.start()
+        await self.hass.async_add_executor_job(self.storage._thread.join, 10)
+        self.assertTrue(self.storage._failed)
+        self.assertFalse(self.storage.path.exists())
+        self.assertEqual(wal.read_bytes(), b"preserve orphan recovery evidence")

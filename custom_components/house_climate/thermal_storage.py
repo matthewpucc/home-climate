@@ -1,7 +1,6 @@
 """Bounded off-loop SQLite recording; never participates in control decisions."""
 from __future__ import annotations
 
-import asyncio
 from dataclasses import asdict
 from datetime import datetime, timezone
 import json
@@ -13,8 +12,8 @@ import time
 import uuid
 
 from .controller.thermal_history import ThermalHistory, digest, encode
+from .controller import thermal_snapshot
 
-BACKUP_FENCE = "house_climate_history_backup_fence"
 _LOGGER = logging.getLogger(__name__)
 _FIELDS = ("head_fan_trial", "rooms", "room_targets", "head_fan_investigation", "head_call_targets_f",
            "mode", "phase", "window_states", "outdoor_source_evidence", "fans",
@@ -29,22 +28,24 @@ class ThermalStorage:
     """
     def __init__(self, hass, config, entry_id):
         self.hass = hass
-        self._backup_fence = hass.data.setdefault(BACKUP_FENCE, threading.Event())
         self.entry_id = entry_id
         self.session = uuid.uuid4().hex
-        self.path = Path(hass.config.path(".storage", "house_climate_thermal.sqlite"))
+        # Supervisor excludes direct .cache children from every config archive.
+        # The mutable SQLite/WAL is never the backup authority.
+        self.path = Path(hass.config.path(".cache", "house_climate_thermal.sqlite"))
+        self.legacy_path = Path(hass.config.path(".storage", "house_climate_thermal.sqlite"))
+        self.snapshot_path = Path(hass.config.path(".storage", "house_climate_thermal.snapshot"))
         self.regime = {"configuration_hash":digest(config.to_dict()), "rooms": {
             name:{"head":room.head,"probes":[asdict(p) for p in room.probes]}
             for name,room in config.zones.items()}}
         self._queue = queue.Queue(maxsize=128)
         self._stop = threading.Event()
-        self._backup_state_lock = threading.Lock()
-        self._backup_active = threading.Event()
-        self._backup_generation = 0
-        self._backup_ready_generation = 0
-        self._backup_requested = threading.Event()
-        self._backup_ready = threading.Event()
-        self._backup_error = None
+        self._snapshot_lock = hass.data.setdefault("house_climate_snapshot_lock", threading.Lock())
+        self._storage_ready = threading.Event()
+        self._snapshot_info = None
+        self._snapshot_error = None
+        self._snapshot_in_progress = False
+        self._recovered_from_snapshot = False
         self._thread = None
         self._error = None
         self._last_commit = None
@@ -61,7 +62,12 @@ class ThermalStorage:
                 "error":self._error,"last_commit":self._last_commit,
                 "queue_depth":self._queue.qsize(),"dropped_records":self._dropped,
                 "committed_records":self._committed,"schema_version":1,
-                "backup_paused":self._backup_ready.is_set() and self._backup_error is None,
+                "backup_paused":False,
+                "snapshot_in_progress":self._snapshot_in_progress,
+                "snapshot_error":self._snapshot_error,
+                "snapshot_age_seconds":max(0, time.time()-self._snapshot_info.created_at) if self._snapshot_info else None,
+                "snapshot":asdict(self._snapshot_info) if self._snapshot_info else None,
+                "recovered_from_snapshot":self._recovered_from_snapshot,
                 "episodes":"planned room demand, not physical HVAC runtime",
                 "placement_note":"Physical relocation requires a configuration identity change; not auto-detected"}
 
@@ -103,24 +109,12 @@ class ThermalStorage:
         store = ThermalHistory(self.path)
         cleanup_at = 0
         try:
-            while self._backup_fence.is_set() and not self._stop.is_set():
-                self._stop.wait(.1)
+            self._prepare_storage()
             if self._stop.is_set():
                 return
             store.open()
             store.db.set_progress_handler(lambda: int(self._stop.is_set()), 1000)
             while not self._stop.is_set():
-                with self._backup_state_lock:
-                    pause = self._backup_requested.is_set()
-                    if pause:
-                        self._backup_active.set()
-                if pause:
-                    try:
-                        self._pause_for_backup(store)
-                    finally:
-                        self._backup_active.clear()
-                    if self._stop.is_set():
-                        break
                 try:
                     at,payload = self._queue.get(timeout=.2)
                 except queue.Empty:
@@ -152,68 +146,111 @@ class ThermalStorage:
             self._error = type(exc).__name__
             _LOGGER.warning("Thermal evidence storage unavailable; ordinary control is unaffected: %s", type(exc).__name__)
         finally:
+            self._storage_ready.set()
             store.close()
 
-    def _pause_for_backup(self, store):
+    def _acquire_snapshot_lock(self):
+        deadline = time.monotonic() + 60
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            if self._snapshot_lock.acquire(timeout=.1):
+                return
+        raise RuntimeError("Thermal snapshot refresh is busy or stopping")
+
+    def _prepare_storage(self):
+        self._acquire_snapshot_lock()
         try:
-            busy, _, _ = store.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
-            if busy:
-                raise OSError("Thermal database reader prevented checkpoint")
-            store.close()
-            self._backup_error = None
-        except Exception as exc:
-            self._backup_error = type(exc).__name__
+            self._prepare_storage_locked()
         finally:
-            with self._backup_state_lock:
-                self._backup_ready_generation = self._backup_generation
-                self._backup_ready.set()
-        while True:
-            with self._backup_state_lock:
-                if not self._backup_requested.is_set() or self._stop.is_set():
-                    self._backup_ready.clear()
-                    self._backup_ready_generation = 0
-                    break
-                # A new pre-backup may reuse this safely closed pause, but
-                # must receive its own generation's acknowledgement.
-                self._backup_ready_generation = self._backup_generation
-            self._stop.wait(.1)
-        if store.db is None and not self._stop.is_set():
-            store.open()
-            store.db.set_progress_handler(lambda: int(self._stop.is_set()), 1000)
+            self._snapshot_lock.release()
+
+    def _prepare_storage_locked(self):
+        """Establish both working storage and a verified backup before recording.
+
+        A stock Supervisor restore removes .cache, including with recorder DB
+        excluded. Normal restart retains it. Never select stale legacy storage
+        over an existing snapshot, or silently start empty after corrupt restore.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists() and any(Path(str(self.path)+suffix).exists()
+                                          for suffix in ("-wal", "-shm")):
+            raise RuntimeError("Thermal working database is missing but sidecars remain")
+        if self.path.exists():
+            thermal_snapshot.validate_database(self.path, self._stop)
+            had_snapshot = self.snapshot_path.exists()
+            try:
+                self._publish_snapshot()
+            except Exception:
+                # Already-migrated working history remains authoritative on an
+                # ordinary restart. A backup fault must not disable recording.
+                # A first-ever migration still requires a published artifact.
+                if not had_snapshot or self.legacy_path.exists() or self._stop.is_set():
+                    raise
+        elif self.snapshot_path.exists():
+            self._snapshot_info = thermal_snapshot.restore(
+                self.snapshot_path, self.path, self._stop)
+            self._recovered_from_snapshot = True
+        elif self.legacy_path.exists():
+            # Source may include committed WAL. SQLite backup captures both;
+            # no copy2 of a live SQLite file and no legacy deletion on failure.
+            self._snapshot_info = thermal_snapshot.publish(
+                self.legacy_path, self.snapshot_path, self.path.parent, self._stop)
+            thermal_snapshot.restore(self.snapshot_path, self.path, self._stop)
+        else:
+            if any(Path(str(self.legacy_path)+suffix).exists() for suffix in ("-wal", "-shm")):
+                raise RuntimeError("Legacy thermal database is missing but sidecars remain")
+            store = ThermalHistory(self.path)
+            try:
+                store.open()
+            finally:
+                store.close()
+            self._publish_snapshot()
+        thermal_snapshot.validate_database(self.path, self._stop)
+        # Retain migration rollback evidence outside the archive. A crash while
+        # moving these closed files cannot invalidate the verified snapshot.
+        for suffix in ("", "-wal", "-shm"):
+            source = Path(str(self.legacy_path) + suffix)
+            if source.exists():
+                target = self.path.parent / ("house_climate_thermal.legacy" + suffix)
+                if target.exists():
+                    raise RuntimeError("Thermal migration rollback file already exists")
+                source.replace(target)
+        self._storage_ready.set()
+
+    def _publish_snapshot(self):
+        self._snapshot_in_progress = True
+        try:
+            self._snapshot_info = thermal_snapshot.publish(
+                self.path, self.snapshot_path, self.path.parent, self._stop)
+            self._snapshot_error = None
+        except Exception as exc:
+            self._snapshot_error = type(exc).__name__
+            _LOGGER.warning("Thermal history snapshot failed; recording and control are unaffected: %s",
+                            type(exc).__name__)
+            raise
+        finally:
+            self._snapshot_in_progress = False
 
     async def async_pre_backup(self):
-        if self._closed or self._failed or not self._thread or not self._thread.is_alive():
-            raise RuntimeError("Thermal history writer is unavailable for a consistent backup")
-        with self._backup_state_lock:
-            self._backup_generation += 1
-            generation = self._backup_generation
-            self._backup_requested.set()
-        def prepared():
-            deadline = time.monotonic() + 5
-            while time.monotonic() < deadline:
-                with self._backup_state_lock:
-                    if self._backup_ready.is_set() and self._backup_ready_generation == generation:
-                        return True
-                time.sleep(.01)
-            return False
-        try:
-            ready = await self.hass.async_add_executor_job(prepared)
-            if not ready or self._backup_error:
-                raise RuntimeError("Could not prepare a consistent thermal history backup")
-        except BaseException:
-            await asyncio.shield(self.async_post_backup())
-            raise
+        """Refresh immutable evidence without pausing or taking a post-hook lease."""
+        def prepare():
+            if not self._thread or not self._thread.is_alive():
+                raise RuntimeError("Thermal history writer is not running")
+            if not self._storage_ready.wait(60):
+                raise RuntimeError("Thermal history initialization has not completed")
+            if self._closed or self._failed or self._stop.is_set():
+                raise RuntimeError("Thermal history is unavailable for a consistent snapshot")
+            self._acquire_snapshot_lock()
+            try:
+                if self._closed or self._stop.is_set():
+                    raise RuntimeError("Thermal history is stopping")
+                self._publish_snapshot()
+            finally:
+                self._snapshot_lock.release()
+        await self.hass.async_add_executor_job(prepare)
 
     async def async_post_backup(self):
-        with self._backup_state_lock:
-            self._backup_requested.clear()
-        def released():
-            deadline = time.monotonic() + 5
-            while self._backup_active.is_set() and time.monotonic() < deadline:
-                time.sleep(.01)
-            return not self._backup_active.is_set()
-        if not await self.hass.async_add_executor_job(released):
-            raise RuntimeError("Thermal backup writer did not acknowledge release")
+        """No lifetime is tied to Core/Supervisor's optional end notification."""
 
     async def async_close(self):
         if self._closed:
