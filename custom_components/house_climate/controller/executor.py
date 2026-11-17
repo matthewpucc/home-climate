@@ -638,7 +638,7 @@ class Executor:
         if not names or any(name not in plan.room_targets for name in names):
             return None
         return tuple((name, tuple(plan.room_targets[name].get(field) for field in
-                                 ("low_f", "high_f", "target_f", "comfort_enabled")),
+                                 ("low_f", "high_f", "target_f", "comfort_enabled", "protection_only")),
                       name in getattr(plan, "protection_context", {}).get("confirmed_open_rooms", ()),
                       tuple(sorted(mode for mode, detail in getattr(plan, "protection_context", {}).get("window_effects", {}).get(name, {}).items()
                                    if detail.get("active"))),

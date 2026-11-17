@@ -103,7 +103,8 @@ def _fingerprint(config, head, states, now, settings, climate_unit):
         for key in ("target_f", "half_band_f", "fan_percentage", "low_f", "high_f"):
             if profile[key] is not None:
                 profile[key] = settings.value(profile[key])
-        material.append((name, probes, contacts, name in settings.room_profiles, profile))
+        material.append((name, probes, contacts, name in settings.room_profiles,
+                         name in settings.protection_only_rooms, profile))
     protection = getattr(config, "protection", None)
     outdoor = None
     if protection is not None:

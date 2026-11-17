@@ -17,7 +17,7 @@ class DirectedAirflow:
         policy = self.policy
         destination, source = rooms.get(profile.destination), rooms.get(profile.source)
         target = plan.room_targets.get(profile.destination)
-        if destination is None or source is None or target is None:
+        if destination is None or source is None or target is None or target.get("protection_only"):
             return None
         band = target["low_f"], target["high_f"], target["target_f"]
         demands = policy.demand(profile.destination, destination, band, target["priority"], update=False)

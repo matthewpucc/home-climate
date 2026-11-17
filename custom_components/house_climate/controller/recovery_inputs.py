@@ -26,7 +26,7 @@ def signature(config, states, now, settings, climate_unit="°F"):
         for key in ("target_f", "half_band_f", "fan_percentage", "low_f", "high_f"):
             if profile[key] is not None:
                 profile[key] = settings.value(profile[key])
-        profiles.append((name, name in settings.room_profiles, profile))
+        profiles.append((name, name in settings.room_profiles, name in settings.protection_only_rooms, profile))
     heads = []
     for entity in config.climate_entities:
         state = states.get(entity, {})

@@ -87,7 +87,7 @@ class _Hold:
 
 
 class RoomComfort:
-    """Durable room targets with temporary or explicit persistent intent."""
+    """Durable room targets and explicit persistent Protection Only intent."""
 
     def __init__(self, hass, config, entry_id, notify, wake_event=None):
         self.hass, self.config, self.notify = hass, config, notify
@@ -215,7 +215,7 @@ class RoomComfort:
                 target = min(high, max(low, target))
         return {
             "low_f": low, "high_f": high, "target_f": target,
-            "comfort_enabled": bool(hold) or profile.comfort_enabled,
+            "comfort_enabled": (hold.mode != "protection_only" if hold else profile.comfort_enabled),
             "hold": hold is not None,
             "mode": hold.mode if hold else "schedule",
             "expires_at": hold.expires_at.isoformat() if hold and hold.expires_at else None,
@@ -226,18 +226,21 @@ class RoomComfort:
         settings = Settings.read(states, config, strict=strict)
         settings.seasonal_profile = self._seasonal_profile
         profiles = {}
+        protection_only = set()
         for room_id, room in config.zones.items():
             hold = self._active(room_id, now, config)
             if hold is None:
                 continue
             base = settings.profile(room, now, self._timezone)
+            if hold.mode == "protection_only":
+                protection_only.add(room_id)
             profiles[room_id] = replace(
                 base, low_f=hold.low_f, high_f=hold.high_f, target_f=hold.target_f,
-                target_offset_f=0, comfort_enabled=True,
+                target_offset_f=0, comfort_enabled=hold.mode != "protection_only",
                 half_band_f=settings.value(base.half_band_f),
                 fan_percentage=settings.value(base.fan_percentage),
             )
-        return replace(settings, room_profiles=profiles)
+        return replace(settings, room_profiles=profiles, protection_only_rooms=frozenset(protection_only))
 
     @staticmethod
     def _number(value):
@@ -259,10 +262,10 @@ class RoomComfort:
         # Legacy rooms without schedules already have expiry=None. Never infer
         # a new persistent Hold from that old Temporary representation.
         mode = value.get("mode", "temporary")
-        if mode not in ("temporary", "hold"):
+        if mode not in ("temporary", "hold", "protection_only"):
             raise ValueError("Unknown room override mode")
-        if mode == "hold" and value["expires_at"] is not None:
-            raise ValueError("A persistent Hold cannot have an expiry")
+        if mode in ("hold", "protection_only") and value["expires_at"] is not None:
+            raise ValueError("Persistent room intent cannot have an expiry")
         return mode
 
     def _new_hold(self, room_id, low, high, target, now, *, mode=None):
@@ -270,8 +273,8 @@ class RoomComfort:
         if mode is None:
             active = self._active(room_id, now)
             mode = active.mode if active else "temporary"
-        if mode not in ("temporary", "hold"):
-            raise ValueError("Choose Temporary or Hold")
+        if mode not in ("temporary", "hold", "protection_only"):
+            raise ValueError("Choose Temporary, Hold, or Protection Only")
         settings, _ = self._base(room_id, now)
         expiry = (next_schedule_change(self._room(room_id), settings, now, self._timezone)
                   if mode == "temporary" else None)
@@ -341,10 +344,26 @@ class RoomComfort:
             self._schedule_expiry()
             self._notify()
 
+    def _check_target_edit(self, room_id, now):
+        active = self._active(room_id, now)
+        if active and active.mode == "protection_only":
+            raise ValueError("Resume Schedule or choose Hold before changing a Protection Only room target")
+
+    async def async_set_protection_only(self, room_id):
+        """Suspend ordinary room conditioning, retaining native thermal protection."""
+        async with self._lock:
+            self._check_open()
+            now = self._now()
+            current = self.effective(room_id, now)
+            hold = self._new_hold(room_id, current["low_f"], current["high_f"],
+                                  current["target_f"], now, mode="protection_only")
+            await self._commit({**self._snapshot, room_id: hold})
+
     async def async_set_range(self, room_id, low_f, high_f):
         async with self._lock:
             self._check_open()
             now = self._now()
+            self._check_target_edit(room_id, now)
             low, high = self._number(low_f), self._number(high_f)
             current = self.effective(room_id, now)
             target = min(high, max(low, current["target_f"]))
@@ -369,6 +388,7 @@ class RoomComfort:
         async with self._lock:
             self._check_open()
             target, now = self._number(target_f), self._now()
+            self._check_target_edit(room_id, now)
             minimum, maximum = self.bounds(room_id)
             if not minimum <= target <= maximum:
                 raise ValueError(f"Desired temperature must be within {minimum:g}–{maximum:g}°F")

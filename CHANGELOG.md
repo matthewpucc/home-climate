@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.24
+
+- Add optional single-setpoint room thermostats for HomeKit Bridge, preserving the existing range controls and shifting the bounded comfort window with the desired temperature.
+- Add durable per-room Protection Only intent: suspend ordinary conditioning while retaining native thermal protection, shared-head safety, independent purifier minimums, and explicit Schedule/Hold reactivation.
+- Keep cached, queued, and auxiliary authorization checks aligned with room intent. No HomeKit pairing, bridge replacement, room mode change, or hardware experiment is performed by installing this update.
+- Test the HomeKit thermostat contract with Home Assistant and stabilize the staged commissioning persistence regression under slow test runners.
+
 ## 0.9.23
 
 - Close expired heat-pump blower trials that never reserved a command even when dispatch is blocked, and retain native cleanup and explicit review if a write may have reached the head.

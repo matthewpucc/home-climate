@@ -34,11 +34,14 @@ Native integration (Python 3.14):
 ```sh
 python -m pip install -e '.[test]' 'homeassistant==2026.11.1' 'prometheus-client==0.21.0'
 python tests_homeassistant/install_bluetooth_requirements.py
+python tests_homeassistant/install_homekit_requirements.py
 python -m unittest discover -s tests_homeassistant -v
 python scripts/package_hacs.py
 ```
 
 Tests cover arbitration, shared heads, sensor failures, schedules/DST, room edits, migration, shadow isolation, shutdown, unit conversion, and rendered watchdog templates. Native tests use a real HA state/service registry. No tests connect to physical equipment.
+
+The HomeKit contract test uses HA's own Thermostat bridge class, without running a bridge or pairing a device. This is not a substitute for the Apple Home and Siri pilot.
 
 ## Packaging
 
