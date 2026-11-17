@@ -62,7 +62,7 @@ class RoomThermostatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after["low_f"], before["low_f"] + 2)
         self.assertEqual(after["high_f"], before["high_f"] + 2)
         self.assertEqual((after["low_f"], after["high_f"]), (69, 73))
-        self.assertEqual(after["mode"], "temporary")
+        self.assertEqual(after["mode"], "hold")
         await comfort.async_hold("guest", persistent=True)
         await entity.async_set_hvac_mode(HVACMode.AUTO)
         await entity.async_set_temperature(temperature=71, hvac_mode=HVACMode.AUTO)
@@ -99,7 +99,7 @@ class RoomThermostatTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_set_hvac_mode(HVACMode.OFF)
         await entity.async_set_temperature(hvac_mode=HVACMode.AUTO, temperature=70)
         self.assertEqual(entity.hvac_mode, HVACMode.AUTO)
-        self.assertEqual(comfort.effective("guest")["mode"], "temporary")
+        self.assertEqual(comfort.effective("guest")["mode"], "hold")
         self.assertEqual(entity.target_temperature, 70)
         await entity.async_set_temperature(hvac_mode=HVACMode.OFF, temperature=71)
         self.assertEqual(entity.hvac_mode, HVACMode.OFF)
@@ -110,7 +110,7 @@ class RoomThermostatTests(unittest.IsolatedAsyncioTestCase):
         await entity.async_set_hvac_mode(HVACMode.OFF)
         await asyncio.gather(entity.async_set_hvac_mode(HVACMode.AUTO),
                              entity.async_set_temperature(hvac_mode=HVACMode.AUTO, temperature=70))
-        self.assertEqual(comfort.effective("guest")["mode"], "temporary")
+        self.assertEqual(comfort.effective("guest")["mode"], "hold")
         self.assertEqual(entity.target_temperature, 70)
 
     async def test_invalid_combined_target_does_not_resume_off(self):
@@ -199,7 +199,7 @@ class RoomThermostatTests(unittest.IsolatedAsyncioTestCase):
             else:
                 await entity.async_set_temperature(**args)
         self.assertEqual(entity.target_temperature, 68)
-        self.assertEqual(comfort.effective("guest")["mode"], "temporary")
+        self.assertEqual(comfort.effective("guest")["mode"], "hold")
         await comfort.async_hold("guest", persistent=True)
         publish()
         accessory.async_call_service.reset_mock()

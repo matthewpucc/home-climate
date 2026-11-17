@@ -318,6 +318,6 @@ class RoomThermostat(RoomClimate):
             if self.hvac_mode == HVACMode.OFF:
                 raise ServiceValidationError("Room is in Protection Only; select Auto before changing temperature")
             try:
-                await self.runtime.comfort.async_set_target(self.room_id, target)
+                await self.runtime.comfort.async_set_target(self.room_id, target, persistent=True)
             except ValueError as exc:
                 raise ServiceValidationError(str(exc)) from exc

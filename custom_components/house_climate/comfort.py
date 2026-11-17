@@ -24,6 +24,43 @@ from .controller.config import Settings
 _LOGGER = logging.getLogger(__name__)
 
 
+class _VerifiedComfortStore(Store):
+    """HA Store logs write errors; verify disk before publishing durable intent.
+
+    Read the serialized file directly, never Store's pending/preload cache.
+    Atomic replacement retains the previous envelope when a write fails.
+    Cancellation drains the write/verification before the caller releases its
+    room-edit lock, so an old executor write cannot land after a newer edit.
+    """
+
+    def _read_persisted(self):
+        with open(self.path, encoding="utf-8") as stored:
+            return json.load(stored)
+
+    async def _save_verified(self, data):
+        await super().async_save(data)
+        persisted = await self.hass.async_add_executor_job(self._read_persisted)
+        if (not isinstance(persisted, dict) or persisted.get("key") != self.key
+                or persisted.get("version") != self.version
+                or persisted.get("data") != data):
+            raise OSError("Home Climate comfort save was not confirmed on disk")
+
+    async def async_save(self, data):
+        task = self.hass.async_create_task(
+            self._save_verified(data), "Home Climate verified comfort save", eager_start=False)
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        # Retrieve failure even if the caller was cancelled; never publish or
+        # dispatch unless the normal await returns successfully.
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+
 async def async_migrate_house_holds(hass, entry_id, previous_config, fixed_config, *, now=None):
     """Preserve genuine dashboard holds while adopting the fixed house policy.
 
@@ -66,7 +103,8 @@ async def async_migrate_house_holds(hass, entry_id, previous_config, fixed_confi
                 fixed._room(room_id), settings, now, fixed._timezone)
             if mode == "temporary" and next_change is not None:
                 expiry = min(expiry, next_change) if expiry is not None else next_change
-            migrated[room_id] = _Hold(low, high, target, expiry, new_fingerprint, mode)
+            started, claimed = RoomComfort._hold_metadata(value, mode, now)
+            migrated[room_id] = _Hold(low, high, target, expiry, new_fingerprint, mode, started, claimed)
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
     result = RoomComfort._data(migrated)
@@ -84,6 +122,8 @@ class _Hold:
     expires_at: datetime | None
     fingerprint: str
     mode: str = "temporary"
+    started_at: datetime | None = None
+    notification_claimed: bool = False
 
 
 class RoomComfort:
@@ -92,7 +132,8 @@ class RoomComfort:
     def __init__(self, hass, config, entry_id, notify, wake_event=None):
         self.hass, self.config, self.notify = hass, config, notify
         self.wake_event = wake_event
-        self.store = Store(hass, 1, f"house_climate.{entry_id}.comfort")
+        self.store = _VerifiedComfortStore(
+            hass, 1, f"house_climate.{entry_id}.comfort", atomic_writes=True)
         self._lock = asyncio.Lock()
         self._snapshot = MappingProxyType({})
         self._remove_expiry = None
@@ -268,6 +309,46 @@ class RoomComfort:
             raise ValueError("Persistent room intent cannot have an expiry")
         return mode
 
+    @staticmethod
+    def _hold_metadata(value, mode, now):
+        """Legacy/invalid ages start now; never invent an already-overdue Hold."""
+        if mode != "hold":
+            return None, False
+        try:
+            started = datetime.fromisoformat(value.get("started_at"))
+            if started.tzinfo is None or started > now:
+                raise ValueError("Unreliable Hold start")
+            started = started.astimezone(timezone.utc)
+        except (TypeError, ValueError, OverflowError):
+            started = now
+        return started, value.get("notification_claimed") is True
+
+    def overdue_holds(self, now=None):
+        """Immutable episode metadata; no actuator operations or state changes."""
+        now = now or self._now()
+        return {room: {"started_at": hold.started_at,
+                       "notification_claimed": hold.notification_claimed}
+                for room, hold in self._snapshot.items()
+                if self._active(room, now) is hold and hold.mode == "hold"
+                and hold.started_at is not None
+                and now - hold.started_at > timedelta(hours=24)}
+
+    async def async_claim_hold_notification(self, room_id, episode_started_at):
+        """Save an at-most-once dispatch claim before any external service call."""
+        async with self._lock:
+            if self._closed:
+                return False
+            metadata = self.overdue_holds().get(room_id)
+            if (metadata is None or metadata["started_at"] != episode_started_at
+                    or metadata["notification_claimed"]):
+                return False
+            hold = self._snapshot[room_id]
+            # A claim changes no thermal intent and must not wake the controller.
+            holds = {**self._snapshot, room_id: replace(hold, notification_claimed=True)}
+            await self.store.async_save(self._data(holds))
+            self._snapshot = MappingProxyType(holds)
+            return True
+
     def _new_hold(self, room_id, low, high, target, now, *, mode=None):
         low, high, target = self._validate(room_id, low, high, target)
         if mode is None:
@@ -278,14 +359,26 @@ class RoomComfort:
         settings, _ = self._base(room_id, now)
         expiry = (next_schedule_change(self._room(room_id), settings, now, self._timezone)
                   if mode == "temporary" else None)
-        return _Hold(low, high, target, expiry, self._fingerprint(room_id), mode)
+        active = self._active(room_id, now)
+        continuing = mode == "hold" and active is not None and active.mode == "hold"
+        started = (active.started_at if continuing else now) if mode == "hold" else None
+        claimed = active.notification_claimed if continuing else False
+        return _Hold(low, high, target, expiry, self._fingerprint(room_id), mode, started, claimed)
 
     @staticmethod
     def _data(holds):
-        return {"rooms": {
-            room: {**asdict(hold), "expires_at": hold.expires_at.isoformat() if hold.expires_at else None}
-            for room, hold in holds.items()
-        }}
+        rooms = {}
+        for room, hold in holds.items():
+            value = asdict(hold)
+            value["expires_at"] = hold.expires_at.isoformat() if hold.expires_at else None
+            if hold.mode == "hold":
+                value["started_at"] = hold.started_at.isoformat() if hold.started_at else None
+            else:
+                # Leave historical Temporary/Protection Only records unchanged.
+                value.pop("started_at")
+                value.pop("notification_claimed")
+            rooms[room] = value
+        return {"rooms": rooms}
 
     def _notify(self):
         if self.wake_event is not None:
@@ -335,7 +428,8 @@ class RoomComfort:
                         fingerprint = self._fingerprint(room_id)
                         if value["fingerprint"] != fingerprint:
                             continue
-                        holds[room_id] = _Hold(low, high, target, expiry, fingerprint, mode)
+                        started, claimed = self._hold_metadata(value, mode, now)
+                        holds[room_id] = _Hold(low, high, target, expiry, fingerprint, mode, started, claimed)
                     except (KeyError, TypeError, ValueError, OverflowError):
                         continue
             if data is not None and data != self._data(holds):
@@ -384,7 +478,7 @@ class RoomComfort:
         low = min(max(low, minimum), maximum - width)
         return low, low + width
 
-    async def async_set_target(self, room_id, target_f):
+    async def async_set_target(self, room_id, target_f, *, persistent=False):
         async with self._lock:
             self._check_open()
             target, now = self._number(target_f), self._now()
@@ -393,7 +487,8 @@ class RoomComfort:
             if not minimum <= target <= maximum:
                 raise ValueError(f"Desired temperature must be within {minimum:g}–{maximum:g}°F")
             low, high = self._shifted_band(room_id, target, now)
-            hold = self._new_hold(room_id, low, high, target, now)
+            hold = self._new_hold(room_id, low, high, target, now,
+                                  mode="hold" if persistent else None)
             await self._commit({**self._snapshot, room_id: hold})
 
     async def async_hold(self, room_id, *, persistent=False):
