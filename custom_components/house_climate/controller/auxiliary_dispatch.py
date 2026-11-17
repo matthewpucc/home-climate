@@ -112,7 +112,7 @@ class AuxiliaryDispatch:
 
     def decide(self, reading, now, band, *, available=True, manual=False,
                heat_pump_selected=False, cooling_waiting=False, emergency=False,
-               comfort_enabled=True, allow_start=True):
+               comfort_enabled=True, allow_start=True, protection_only=False):
         low, high, target = band
         peak = self.peak(now)
         inside = min(self.setting("stop_inside_band_f", .5), max(0, (high - low) / 2))
@@ -144,6 +144,8 @@ class AuxiliaryDispatch:
             return result(False, "Auxiliary awaits qualified room and device/supply evidence")
         if reading.temperature >= stop:
             return result(False, "Auxiliary stopping point reached")
+        if protection_only and not emergency:
+            return result(False, "Protection Only: ordinary auxiliary demand suspended")
         if self.active:
             return result(True, "Completing supplementary heat to its stopping point")
         if emergency:

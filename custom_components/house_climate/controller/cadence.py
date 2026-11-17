@@ -77,7 +77,7 @@ class DecisionCadence:
                 tuple(sorted((key, value.isoformat()) for key, value in settings.times.items())),
                 tuple(sorted(settings.toggles.items())), effects, protection,
                 context.confirmed_open_rooms, tuple(sorted(settings.room_fan_overrides.items())),
-                tuple(sorted(settings.room_fan_minimums.items())))
+                tuple(sorted(settings.room_fan_minimums.items())), tuple(sorted(settings.protection_only_rooms)))
 
     def _warning(self, message):
         if message not in self._safety_warnings:
@@ -182,7 +182,8 @@ class DecisionCadence:
 
         for key, fan in self.policy.fan_controls.items():
             room = rooms.get(fan.room)
-            unsafe = not room
+            unsafe = not room or (fan.strategy != "directed"
+                                  and plan.room_targets.get(fan.room, {}).get("protection_only", False))
             if fan.strategy in ("cooling", "transfer"):
                 unsafe = unsafe or room.low <= low + .25
             if fan.strategy == "transfer":
@@ -231,8 +232,9 @@ class DecisionCadence:
         profiles = {name: settings.profile(room, now, self.config.timezone, name)
                     for name, room in self.config.zones.items()}
         self.policy._profiles = profiles
+        self.policy._protection_only = settings.protection_only_rooms
         bands = {name: self.policy.band(name, settings, now) for name in self.config.zones}
-        targets = {name: self.policy.stop_targets(band, comfort_enabled=profiles[name].comfort_enabled)
+        targets = {name: self.policy.stop_targets(band, comfort_enabled=profiles[name].comfort_enabled, protection_only=name in settings.protection_only_rooms)
                    for name, band in bands.items()}
         rooms, sensor_warnings = self.sensors.read(states, now, climate_unit,
                                                   targets=targets, calls=self.policy.calls,

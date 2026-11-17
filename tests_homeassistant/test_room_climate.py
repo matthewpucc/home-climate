@@ -16,7 +16,7 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.util.unit_system import METRIC_SYSTEM, US_CUSTOMARY_SYSTEM
 
 from custom_components.house_climate.climate import (
-    PRESET_SCHEDULE, PRESET_TEMPORARY, PRESET_HOLD, RoomClimate,
+    PRESET_SCHEDULE, PRESET_TEMPORARY, PRESET_HOLD, PRESET_PROTECTION_ONLY, RoomClimate,
     async_setup_entry as setup_climate,
 )
 from custom_components.house_climate.const import DOMAIN
@@ -161,7 +161,7 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.climate.preset_mode, PRESET_SCHEDULE)
 
     async def test_explicit_hold_preset_and_nonexpiring_state(self):
-        self.assertEqual(self.climate.preset_modes, [PRESET_SCHEDULE, PRESET_TEMPORARY, PRESET_HOLD])
+        self.assertEqual(self.climate.preset_modes, [PRESET_SCHEDULE, PRESET_TEMPORARY, PRESET_HOLD, PRESET_PROTECTION_ONLY])
         await self.climate.async_set_preset_mode(PRESET_HOLD)
         self.comfort.async_hold.assert_awaited_once_with("office", persistent=True)
         self.value.update(hold=True, mode="hold", expires_at=None)
@@ -276,7 +276,7 @@ class RoomClimateTests(unittest.IsolatedAsyncioTestCase):
             await setup_number(self.hass, self.entry, add_number)
         self.assertEqual([call.args[0] for call in registry.async_remove.call_args_list],
                          ["climate.removed", "number.removed"])
-        self.assertEqual(len(add_climate.call_args.args[0]), len(self.cfg.zones))
+        self.assertEqual(len(add_climate.call_args.args[0]), 2 * len(self.cfg.zones))
         self.assertEqual(len(add_number.call_args.args[0]), len(self.cfg.zones))
 
     async def test_room_controls_assign_configured_room_area(self):

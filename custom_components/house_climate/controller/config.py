@@ -628,6 +628,7 @@ class Settings:
     seasonal_profile: str = "cool"
     room_fan_overrides: dict[str, float | None] = field(default_factory=dict)
     room_fan_minimums: dict[str, float] = field(default_factory=dict)
+    protection_only_rooms: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod
     def read(cls, states, config, strict=False):

@@ -71,6 +71,8 @@ The [release acceptance checklist](docs/release-baseline-acceptance.md) separate
 
 The canonical pure controller is in [`custom_components/house_climate/controller`](custom_components/house_climate/controller). Private wiring is separate from explicit policy edits, and upgrades retain registered room identities and valid holds where possible. Room cards support Schedule, Temporary and explicit persistent [Hold](docs/room-holds.md), with a per-room Resume schedule button for scoped automation access.
 
+An optional [Apple Home room thermostat](docs/homekit-room-thermostats.md) exposes one comfort setpoint. Its Off mode pauses one room's comfort calls while keeping temperature protection active; it does not turn shared equipment off.
+
 Run core tests with `python -m unittest discover -s tests -v`. Native tests use Python 3.14 and Home Assistant 2026.10.4: `python -m unittest discover -s tests_homeassistant -v`. Follow [CONTRIBUTING](CONTRIBUTING.md) for the complete release and packaged-source checks. Synthetic tests establish software behavior, not field capacity, sensor representativeness, network reliability or physical compressor operation. This documentation does not assert that live acceptance has passed.
 
 The standalone CLI and container retain their file-configuration compatibility; they do not install the native house-specific electrical guard. Regenerate installed HA packages for this version: the generated watchdog now uses a separate auxiliary-authorization helper. Do not pair a new worker with an old generated watchdog. The configuration guide explains the house/generic dynamic-stop distinction.

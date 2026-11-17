@@ -933,7 +933,10 @@ class ControllerRuntime:
         target = settings.value(profile.target_f) + profile.target_offset_f
         high = settings.value(profile.high_f) if profile.high_f is not None else target + settings.value(profile.half_band_f)
         protection = self.config.protection
-        return min(high, protection.emergency_cooling_at_f - 1 if protection is not None else self.config.high_f - 1)
+        ceiling = protection.emergency_cooling_at_f - 1 if protection is not None else self.config.high_f - 1
+        if room_id in settings.protection_only_rooms:
+            return ceiling
+        return min(high, ceiling)
 
     def _auxiliary_room_context(self):
         """Compare the current profile/peak at dispatch without inventing trend evidence."""
@@ -947,6 +950,9 @@ class ControllerRuntime:
         target = settings.value(profile.target_f) + profile.target_offset_f
         half = settings.value(profile.half_band_f)
         low, high = limits(self.config, self.status.get("protection_context"))
+        if room_id in settings.protection_only_rooms:
+            return [low, high, (low + high) / 2, True,
+                    AuxiliaryDispatch(self.config).peak(instant), "protection_only"]
         return [max(low, settings.value(profile.low_f) if profile.low_f is not None else target - half),
                 min(high, settings.value(profile.high_f) if profile.high_f is not None else target + half),
                 target, not profile.comfort_enabled, AuxiliaryDispatch(self.config).peak(instant)]

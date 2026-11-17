@@ -7,10 +7,11 @@ Each virtual room thermostat has three presets. These are requests to Home Clima
 | Schedule | Use the room's current scheduled/seasonal profile | None |
 | Temporary | Use the edited desired temperature and range | That room's next scheduled profile change; none if the room has no transitions |
 | Hold | Keep the desired temperature and range until explicitly released | None; survives ordinary reloads and restarts |
+| Protection Only | Suspend ordinary comfort requests from this room without disabling temperature protection or affecting another room's requests | None for unchanged, valid room configuration |
 
 Select Hold before or after editing. While Hold is active, later desired-temperature and range edits remain in Hold. Changing the desired temperature shifts its range using the existing room-card behavior, so set the desired point first and then the final low/high range. Selecting Hold itself preserves all three current values, including a displayed limits-only range, and enables comfort for that room. The scheduled priority and fan settings can still change. Selecting Temporary explicitly returns to its ordinary expiry behavior. Selecting Schedule, or pressing that room's Resume schedule button, durably releases either kind of override.
 
-Holds do not enable Controller or Allow Live, bypass protection or equipment timers, change a regular schedule, or return a manually owned auxiliary to automation. A resumed room's new demand can affect shared-head arbitration through the normal policy; no other room's saved settings are edited. Restoring the schedule is not proof that physical equipment has reached its new target.
+Holds and Protection Only do not enable Controller or Allow Live, bypass protection or equipment timers, change a regular schedule, or return a manually owned auxiliary to automation. A resumed room's new demand can affect shared-head arbitration through the normal policy; no other room's saved settings are edited. Restoring the schedule is not proof that physical equipment has reached its new target. A temperature or range edit alone will not exit Protection Only. Select Schedule, Temporary or Hold explicitly to resume ordinary participation.
 
 ## Persistence and errors
 

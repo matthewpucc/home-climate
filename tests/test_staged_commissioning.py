@@ -283,8 +283,12 @@ class StagedCommissioningTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reconnect_phase_has_a_300_second_limit_even_if_low_watts_keep_reporting(self):
         self.hass.native_delay = 310
-        # Isolate the phase deadline from the independently tested600s limit.
-        with patch.object(power, "COMMISSIONING_MAX_SECONDS", 900):
+        # Isolate the fake-clock reconnect deadline from the overall cap and
+        # the real-time service/relay startup waits, which this test does not
+        # exercise. A busy runner can otherwise abort before the first frame.
+        with (patch.object(power, "COMMISSIONING_MAX_SECONDS", 900),
+              patch.object(power, "SERVICE_TIMEOUT_SECONDS", 1),
+              patch.object(power, "RESTORE_ACK_SECONDS", 1)):
             await self.prepare_restore()
             await self.run_restore()
         self.assertEqual(self.hass.data[B.heater_switch]["state"], "off")

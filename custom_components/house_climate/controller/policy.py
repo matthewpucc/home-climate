@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from .config import Config, Settings
 from .sensors import Reading, Sensors, forecast_slope, from_f, to_f
 from .temperature_guard import heating_cutoff_reached
-from .head_guard import HeadGuard
+from .head_guard import HeadGuard, protection_requested
 from .airflow import TransferAirflow
 from .operating_state import OperatingState, WINDOW_COMFORT_FACTOR
 from .auxiliary_dispatch import AuxiliaryDispatch, manual_auxiliary
@@ -138,6 +138,7 @@ class Policy:
         self.directed_airflow = DirectedAirflow(self)
         self.operating = OperatingState(config, clock=clock)
         self.context = initial_context(config)
+        self._protection_only = frozenset()
         self._profiles = {name: zone.profile for name, zone in config.zones.items()}
 
     def seasonal_settings(self, states, now, settings):
@@ -174,13 +175,18 @@ class Policy:
         head = self.config.zones[name].head
         cooling_waiting = any(key != name and detail.get("cool_requested")
                               for key, detail in plan.room_targets.items())
+        if target.get("protection_only") and not protective:
+            self.auxiliary_dispatch.active = False
         decision = self.auxiliary_dispatch.decide(reading, now, band,
             available=available, manual=manual,
             heat_pump_selected=plan.mode == "heat" and head in plan.head_targets_f,
             cooling_waiting=cooling_waiting, emergency=protective,
-            comfort_enabled=target["comfort_enabled"], allow_start=allow_start)
+            comfort_enabled=target["comfort_enabled"], allow_start=allow_start,
+            protection_only=target.get("protection_only", False))
         plan.auxiliary_policy = decision.as_dict()
         plan.auxiliary_policy["context"] = [*band, not target["comfort_enabled"], decision.peak]
+        if target.get("protection_only"):
+            plan.auxiliary_policy["context"].append("protection_only")
         plan.auxiliary_policy["stop_revision"] = attrs.get("home_climate_auxiliary_stop_revision", 0)
         if attrs.get("home_climate_auxiliary_blocked"):
             plan.auxiliary_policy["reason"] = attrs.get("home_climate_auxiliary_reason") or decision.reason
@@ -231,6 +237,8 @@ class Policy:
         low, high = limits(self.config, self.context)
         target = settings.value(profile.target_f) + profile.target_offset_f
         half = settings.value(profile.half_band_f)
+        if name in settings.protection_only_rooms:
+            return low, high, (low + high) / 2
         return (max(low, settings.value(profile.low_f) if profile.low_f is not None else target - half),
                 min(high, settings.value(profile.high_f) if profile.high_f is not None else target + half), target)
 
@@ -245,7 +253,8 @@ class Policy:
         # remain independent evidence for system-limit protection below.
         temperature = reading.temperature
         heat_edge, cool_edge = max(low, LOW + 1), min(high, HIGH - 1)
-        stops = self.stop_targets(band, comfort_enabled=self._profiles[name].comfort_enabled)
+        stops = self.stop_targets(band, comfort_enabled=self._profiles[name].comfort_enabled,
+                                  protection_only=name in self._protection_only)
         heat_stop, cool_stop = stops["heat"], stops["cool"]
         heat = self.calls.get((name, "heat"), False)
         cool = self.calls.get((name, "cool"), False)
@@ -259,6 +268,10 @@ class Policy:
                 cool = False
         heat = (temperature < heat_stop or future_low < LOW + 1) if heat else (temperature < heat_edge or future_low < LOW + 1)
         cool = (temperature > cool_stop or future_high > HIGH - 1) if cool else (temperature > cool_edge or future_high > HIGH - 1)
+        if name in self._protection_only:
+            # No ordinary band/target hysteresis survives entering Protection Only.
+            heat = protection_requested(self.config, reading, "heat", context=self.context, name=name)
+            cool = protection_requested(self.config, reading, "cool", context=self.context, name=name)
         if update:
             self.calls[name, "heat"], self.calls[name, "cool"] = heat, cool
             for mode, active in (("heat", heat), ("cool", cool)):
@@ -290,8 +303,12 @@ class Policy:
             }
         return output
 
-    def stop_targets(self, band, *, comfort_enabled=True):
+    def stop_targets(self, band, *, comfort_enabled=True, protection_only=False):
         low, high, target = band
+        if protection_only:
+            minimum, maximum = limits(self.config, self.context)
+            margin = self.context.release_hysteresis_f if self.context.enabled else 1.5
+            return {"heat": minimum + margin, "cool": maximum - margin}
         if not comfort_enabled:
             # Limits-only periods defend this room's scheduled bounds without
             # driving it to the ordinary comfort target. A small inward margin
@@ -364,9 +381,10 @@ class Policy:
         LOW, HIGH = limits(self.config, self.context)
         profiles = {key: settings.profile(room, now, self.config.timezone, key) for key, room in self.config.zones.items()}
         self._profiles = profiles
+        self._protection_only = settings.protection_only_rooms
         bands = {name: self.band(name, settings, now) for name in self.config.zones}
         rooms, warnings = self.sensors.read(states, now, climate_unit,
-                                            targets={name: self.stop_targets(band, comfort_enabled=profiles[name].comfort_enabled)
+                                            targets={name: self.stop_targets(band, comfort_enabled=profiles[name].comfort_enabled, protection_only=name in self._protection_only)
                                                      for name, band in bands.items()},
                                             calls=self.calls, head_requests=self.head_requests, protection=self.context)
         if context is None:
@@ -403,7 +421,8 @@ class Policy:
         # must not re-evaluate schedules in a different timezone or helper snapshot.
         plan.room_targets = {
             name: {"low_f": band[0], "high_f": band[1], "target_f": band[2],
-                   "comfort_enabled": profiles[name].comfort_enabled,
+                   "comfort_enabled": profiles[name].comfort_enabled and name not in self._protection_only,
+                   "protection_only": name in self._protection_only,
                    "priority": profiles[name].priority,
                    "effective_comfort_priority": {
                        mode: profiles[name].priority * (WINDOW_COMFORT_FACTOR if window_affected(self.context, name, mode) else 1)
@@ -475,6 +494,9 @@ class Policy:
                     useful = (room.temperature > target and delta > 0) or (room.temperature < target and delta < 0)
                     active = useful and abs(delta) > (.25 if self.transfer_on.get(key) else .75)
                 self.transfer_on[key] = active
+            if fan.room in self._protection_only:
+                active = False
+                self.transfer_on[key] = False
             plan.fans[fan.entity_id] = fan.requested_percentage(percentage if active else 0)
 
         eligible = {"heat": {}, "cool": {}}
@@ -604,7 +626,7 @@ class Policy:
         # area's ambient probe reflects the head's output. Only assist a head
         # that survived the complete shared-mode arbitration and safety checks.
         for key, fan in self.fan_controls.items():
-            if fan.strategy != "transfer":
+            if fan.strategy != "transfer" or fan.room in self._protection_only:
                 continue
             destination, source = rooms.get(fan.room), rooms.get(fan.source_room)
             if not destination or not source:

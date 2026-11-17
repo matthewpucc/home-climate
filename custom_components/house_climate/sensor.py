@@ -866,7 +866,7 @@ class RoomComfortMode(RoomEntity):
     """Plain state readback usable even when MCP omits climate attributes."""
     _attr_icon = "mdi:calendar-clock"
     _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = ["Schedule", "Temporary", "Hold"]
+    _attr_options = ["Schedule", "Temporary", "Hold", "Protection Only"]
 
     def __init__(self, entry, room_id):
         super().__init__(entry, room_id, f"comfort_mode_{room_id}")
@@ -879,7 +879,7 @@ class RoomComfortMode(RoomEntity):
 
     @property
     def native_value(self):
-        return self.runtime.comfort.effective(self.room_id)["mode"].title()
+        return self.runtime.comfort.effective(self.room_id)["mode"].replace("_", " ").title()
 
     @property
     def extra_state_attributes(self):
