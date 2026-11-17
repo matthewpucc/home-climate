@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.25
+
+- Replace thermal-history backup writer pauses with bounded online SQLite snapshots, so missing post-backup callbacks or another integration's preparation failure cannot freeze Home Climate recording or poison retries. No Core or Supervisor changes are required.
+- Archive a verified immutable fixed-size snapshot while excluding the working database/WAL; preserve fresh working history on ordinary restart and migrate legacy history with validated recovery and rollback evidence. Room settings, safety and control behavior are unchanged.
+- Document stock restore and downgrade requirements: allow over 2 GiB temporary restore space for the fixed envelope, stop the old writer cleanly before migration, and use explicit offline recovery when downgrading. Snapshot failures remain visible without silently discarding history.
+- Cover stock archive races, restore selection, migration, cancellation, failed peer preparation and retry with real Home Assistant and securetar regressions.
+
 ## 0.9.24
 
 - Add optional single-setpoint room thermostats for HomeKit Bridge, preserving the existing range controls and shifting the bounded comfort window with the desired temperature.
