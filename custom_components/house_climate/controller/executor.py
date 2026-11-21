@@ -11,7 +11,7 @@ from .head_guard import head_constraint
 from .protection_context import limits
 from .policy import Plan, call_target_f, native_target
 from .sensors import from_f, to_f
-from .auxiliary_dispatch import manual_auxiliary
+from .auxiliary_dispatch import manual_auxiliary, soc_grace_continuation, soc_grace_observed
 from .auxiliary_target import AuxiliaryTarget, trusted_auxiliary_state
 
 
@@ -991,7 +991,17 @@ class Executor:
             self._issue(entity, "Climate metadata incomplete; off acknowledgement required", states)
         if entity in self.recoveries and not self._recovery_off(entity, states, now):
             return
-        if plan.heater_on:
+        native = states.get(entity, {})
+        if soc_grace_observed(native) or plan.auxiliary_policy.get("soc_grace_retaining") is True:
+            if soc_grace_continuation(self.ha, self.config, plan, states):
+                self._consume_auxiliary_heat_ack(entity, states, now)
+                if (self._auxiliary_startup is None and entity not in self.pending
+                        and self._auxiliary_jobs_clear(entity)):
+                    # The refresh path can call auxiliary twice on one plan,
+                    # so prove continuation against this snapshot every time.
+                    return
+            self.off(entity, states, now)
+        elif plan.heater_on:
             self.climate(entity, "heat", self.config.heater_high_setpoint_f, states, now, heater=True)
         elif plan.auxiliary_fan_only:
             state = states.get(entity, {})

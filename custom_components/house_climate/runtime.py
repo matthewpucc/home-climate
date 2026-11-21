@@ -385,13 +385,17 @@ class NativeAPI:
         if self.controls is not None:
             states = self.controls.overlay({state["entity_id"]: state for state in result})
             heater = self.config.heater_entity
+            grace_deadline = getattr(self.power_guard, "soc_grace_until", None)
+            grace = (isinstance(grace_deadline, (int, float))
+                     and time.monotonic() < grace_deadline)
             if self.power_guard is not None and heater in states:
                 states[heater] = {**states[heater], "attributes": {
                     **states[heater].get("attributes", {}),
                     "home_climate_auxiliary_blocked": self.power_guard.blocked,
+                    "home_climate_auxiliary_soc_grace_active": grace,
                     "home_climate_auxiliary_fan_blocked": getattr(self.power_guard, "fan_blocked", self.power_guard.blocked),
                     "home_climate_auxiliary_reason": getattr(self.power_guard, "diagnostics", {}).get("reason")}}
-            if self.power_guard is not None and self.power_guard.blocked:
+            if self.power_guard is not None and self.power_guard.blocked and not grace:
                 key = self.controls.config.entity("auxiliary_probe_safe", "binary_sensor")
                 states[key] = {**states[key], "state": "off"}
             return [{"entity_id": entity, **state} for entity, state in states.items()]
@@ -896,6 +900,7 @@ class ControllerRuntime:
                 self.power_guard.alerts = self.notifications
                 if self.controls is not None:
                     self.controls.power_guard = self.power_guard
+                    self.power_guard.set_soc_grace_eligible(self._auxiliary_soc_grace_token)
                 await self.power_guard.async_load()
             self.hold_notifications.start()
         except BaseException:
@@ -991,6 +996,19 @@ class ControllerRuntime:
         devices = {self.config.heater_entity}
         return not (self.api.service_jobs(devices) or self.api.uncertain_service_jobs(devices)
                     or controls.stop_jobs(devices))
+
+    def _auxiliary_soc_grace_token(self):
+        """Native-loop proof, not a permission to dispatch or renew heat."""
+        controls = self.controls
+        if (self.stop_event.is_set() or self._configuration_reload_pending
+                or controls is None or self.api.heartbeat_issue):
+            return None
+        heater = self.config.heater_entity
+        repair = self.api.repair_gate.overlay(heater) or {}
+        if repair.get("held"):
+            return None
+        token = controls.auxiliary_soc_grace_token()
+        return None if token is None else (*token, repair.get("epoch", 0))
 
     def _update_power_guard_status(self):
         if self.power_guard is not None:

@@ -1,6 +1,7 @@
 """Synthetic native ownership, independently supervised leases, and handoff."""
 import asyncio
 from dataclasses import replace
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -9,7 +10,7 @@ from homeassistant.core import Context
 from homeassistant.helpers.storage import Store
 
 from custom_components.house_climate.controller.config import Config, FallbackPolicy
-from custom_components.house_climate.controller.ha import HAError
+from custom_components.house_climate.controller.ha import HAActivationDeferred, HAError
 from custom_components.house_climate.controls import NativeControls
 from custom_components.house_climate import handoff
 from tests_homeassistant import test_native as fixtures
@@ -152,6 +153,59 @@ class LifecyclePolicyTests(unittest.IsolatedAsyncioTestCase):
         context[0], context[2] = 69, 71
         with self.assertRaisesRegex(HAError, "context changed"):
             controls.check_activation(heater, {"hvac_mode": "heat"})
+
+    async def test_soc_grace_token_requires_owned_active_heat_and_live_unchanged_context(self):
+        runtime, _ = await self.runtime()
+        await self.claim(runtime)
+        controls = runtime.controls
+        heater = runtime.config.heater_entity
+        context = [65, 73, 70, False, False]
+        controls.auxiliary_context_provider = lambda: context
+        controls.confirm_auxiliary_authorization(stop_limit_f=71, context=context)
+        controls.auxiliary_activation_started({"hvac_mode": "heat"})
+        self.hass.states.async_set(heater, "heat", {"hvac_action": "heating"})
+        self.assertIsNone(controls.auxiliary_soc_grace_token())
+        controls.auxiliary_activation_finished()
+        token = controls.auxiliary_soc_grace_token()
+        self.assertIsNotNone(token)
+        self.assertEqual(token[0], min(
+            controls.heartbeat_monotonic + controls.config.heartbeat_timeout_seconds,
+            controls.auxiliary_authorized_at + controls.config.auxiliary_heartbeat_timeout_seconds))
+        context[-1] = True
+        self.assertIsNone(controls.auxiliary_soc_grace_token())
+        context[-1] = False
+        self.hass.states.async_set(heater, "heat", {"hvac_action": "idle"})
+        self.assertIsNone(controls.auxiliary_soc_grace_token())
+        self.hass.states.async_set(heater, "heat", {"hvac_action": "heating", "restored": True})
+        self.assertIsNone(controls.auxiliary_soc_grace_token())
+        self.hass.states.async_set(heater, "heat", {"hvac_action": "heating"})
+        controls.auxiliary_authorized_at = time.monotonic() - controls.config.auxiliary_heartbeat_timeout_seconds - 1
+        self.assertIsNone(controls.auxiliary_soc_grace_token())
+        self.hass.states.async_set(heater, "off", {"hvac_action": "off"})
+
+    async def test_soc_grace_refused_renewal_cannot_rewrite_limit_or_context(self):
+        runtime, _ = await self.runtime()
+        await self.claim(runtime)
+        controls = runtime.controls
+        context = [65, 73, 70, False, False]
+        controls.auxiliary_context_provider = lambda: context
+        controls.confirm_auxiliary_authorization(stop_limit_f=71, context=context)
+        authorized_at = controls.auxiliary_authorized_at
+        generation = controls.auxiliary_generation
+        blocked_guard = SimpleNamespace(check_activation=Mock(
+            side_effect=HAActivationDeferred("SOC grace blocks renewal")))
+        with patch.object(controls, "power_guard", blocked_guard):
+            context[-1] = True
+            with self.assertRaisesRegex(HAActivationDeferred, "context changed"):
+                controls.confirm_auxiliary_authorization(
+                    mode="fan_only", context=[65, 73, 70, False, False])
+            blocked_guard.check_activation.assert_not_called()
+            with self.assertRaisesRegex(HAActivationDeferred, "blocks renewal"):
+                controls.confirm_auxiliary_authorization(stop_limit_f=72, context=context)
+        self.assertEqual(controls.auxiliary_authorized_at, authorized_at)
+        self.assertEqual(controls._auxiliary_stop_limit_f, 71)
+        self.assertFalse(controls._auxiliary_context[-1])
+        self.assertEqual(controls.auxiliary_generation, generation)
 
     async def test_exit_applies_saved_dual_setpoints_and_fans_then_releases(self):
         runtime, _ = await self.fallback_runtime()

@@ -155,6 +155,190 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
                 "trip_wall": self.origin - 600,
                 "binding_identity": self.guard._binding_identity() if identity is None else identity}
 
+    async def start_soc_grace_fixture(self, *, reserve=90, listen=False):
+        self.soc_context = (200.0, "same controller context")
+        self.guard.set_soc_grace_eligible(lambda: self.soc_context)
+        self.put(self.b.heater, "heat", {"hvac_action": "heating"})
+        self.put(self.b.heater_power, 1500, {"unit_of_measurement": "W"})
+        self.put(self.b.output_power, 1800, {"unit_of_measurement": "W"})
+        self.put(self.b.battery, reserve, {"unit_of_measurement": "%"})
+        await self.start(listen=listen)
+        self.assertFalse(self.guard.blocked)
+
+    async def lose_soc(self, elapsed=1):
+        self.wall = self.origin + elapsed
+        self.put(self.b.battery, "unavailable", {"unit_of_measurement": "%"})
+        self.guard._observe()
+        await self.hass.async_block_till_done()
+
+    async def test_soc_grace_is_continuation_only_and_expires_at_75_seconds(self):
+        await self.start_soc_grace_fixture()
+        await self.lose_soc()
+        self.assertTrue(self.guard.soc_grace_active)
+        self.assertTrue(self.guard.blocked)
+        self.assertEqual(self.guard.soc_grace_until, 76)
+        self.assertFalse(self.guard.diagnostics["latched"])
+        for body in ({"hvac_mode": "heat"}, {"hvac_mode": "fan_only"}, {"temperature": 68}):
+            with self.assertRaises(HAActivationDeferred):
+                self.guard.check_activation(self.b.heater, body)
+        self.soc_context = (300.0, "same controller context")
+        self.wall = self.origin + 75.999
+        self.guard._observe()
+        self.assertTrue(self.guard.soc_grace_active)
+        self.assertEqual(self.guard.soc_grace_until, 76)
+        self.assertEqual(self.calls, [])
+        self.wall = self.origin + 76
+        # Invoke the deadline callback to prove shutdown without a state event.
+        self.guard._schedule_check()
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertFalse(self.guard.soc_grace_active)
+        self.assertTrue(any(domain == "climate" and body["hvac_mode"] == "off"
+                            for domain, _, body in self.calls))
+
+    async def test_soc_grace_quarantines_first_reconnect_zero_and_cached_high(self):
+        await self.start_soc_grace_fixture()
+        await self.lose_soc()
+        self.wall = self.origin + 20
+        self.put(self.b.battery, 0, {"unit_of_measurement": "%"})
+        self.guard._observe()
+        self.assertTrue(self.guard.soc_grace_active)
+        self.assertIsNotNone(self.guard._external_power().issue)
+        self.put(self.b.battery, 98, {"unit_of_measurement": "%"}, timestamp=self.origin)
+        self.guard._observe()
+        self.assertEqual(self.guard.soc_grace_until, 76)
+        self.assertTrue(self.guard.blocked)
+        self.assertIsNotNone(self.guard._external_power().issue)
+        self.put(self.b.battery, 99, {"unit_of_measurement": "%"})
+        self.guard._observe()
+        self.assertFalse(self.guard.soc_grace_active)
+        self.assertFalse(self.guard.blocked)
+        self.assertEqual(self.calls, [])
+
+    async def test_soc_grace_does_not_recover_from_future_dated_high(self):
+        await self.start_soc_grace_fixture()
+        await self.lose_soc()
+        self.wall = self.origin + 20
+        self.put(self.b.battery, 98, {"unit_of_measurement": "%"}, timestamp=self.wall + 3)
+        self.guard._observe()
+        self.assertTrue(self.guard.soc_grace_active)
+        self.assertTrue(self.guard.blocked)
+        # A cached future stamp must not become qualified just from waiting.
+        self.wall = self.origin + 24
+        self.guard._observe()
+        self.assertTrue(self.guard.soc_grace_active)
+        self.assertTrue(self.guard.blocked)
+        self.put(self.b.battery, 99, {"unit_of_measurement": "%"})
+        self.guard._observe()
+        self.assertFalse(self.guard.blocked)
+
+    async def test_soc_grace_second_distinct_zero_trips(self):
+        await self.start_soc_grace_fixture()
+        await self.lose_soc()
+        for elapsed in (20, 21):
+            self.wall = self.origin + elapsed
+            self.put(self.b.battery, 0, {"unit_of_measurement": "%"}, force=True)
+            self.guard._observe()
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+
+    async def test_soc_grace_coalesced_fault_aborts_even_if_latest_readings_healthy(self):
+        await self.start_soc_grace_fixture(listen=True)
+        await self.lose_soc()
+        self.wall = self.origin + 20
+        self.put(self.b.ac_output_switch, "off")
+        self.put(self.b.ac_output_switch, "on")
+        self.put(self.b.battery, 90, {"unit_of_measurement": "%"})
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertFalse(self.guard.soc_grace_active)
+
+    async def test_soc_grace_coalesced_credible_low_aborts(self):
+        await self.start_soc_grace_fixture(listen=True)
+        await self.lose_soc()
+        self.wall = self.origin + 20
+        self.put(self.b.battery, 37, {"unit_of_measurement": "%"})
+        self.put(self.b.battery, 90, {"unit_of_measurement": "%"})
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertFalse(self.guard.soc_grace_active)
+
+    async def test_soc_grace_respects_short_initial_lease_and_context(self):
+        await self.start_soc_grace_fixture()
+        self.soc_context = (25.0, "same controller context")
+        await self.lose_soc()
+        self.assertEqual(self.guard.soc_grace_until, 25)
+        self.soc_context = (90.0, "same controller context")
+        self.wall = self.origin + 10
+        self.guard._observe()
+        self.assertEqual(self.guard.soc_grace_until, 25)
+        self.soc_context = (90.0, "different controller context")
+        self.assertFalse(self.guard.soc_grace_active)
+        self.guard._observe()
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+
+    async def test_soc_grace_never_admits_margin_below_50_percent(self):
+        await self.start_soc_grace_fixture(reserve=49)
+        await self.lose_soc()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertFalse(self.guard.soc_grace_active)
+
+    async def test_soc_grace_never_admits_missing_ac_and_output(self):
+        await self.start_soc_grace_fixture(listen=True)
+        self.wall = self.origin + 1
+        self.put(self.b.ac_output_switch, "unavailable")
+        self.put(self.b.battery, "unavailable")
+        self.put(self.b.output_power, "unavailable")
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertFalse(self.guard.soc_grace_active)
+
+    async def test_soc_grace_never_admits_old_reserve(self):
+        await self.start_soc_grace_fixture()
+        self.write_snapshot(121, omit=(self.b.battery,))
+        await self.lose_soc(elapsed=121)
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertFalse(self.guard.soc_grace_active)
+
+    async def test_soc_grace_never_admits_new_ownership_after_loss(self):
+        await self.start_soc_grace_fixture()
+        self.soc_context = None
+        self.put(self.b.heater, "off", {"hvac_action": "off"})
+        await self.lose_soc()
+        self.assertFalse(self.guard.diagnostics["latched"])
+        self.soc_context = (200.0, "new owned run")
+        self.put(self.b.heater, "heat", {"hvac_action": "heating"})
+        self.guard._observe()
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertFalse(self.guard.soc_grace_active)
+
+    async def test_soc_grace_never_admits_short_coalesced_independent_loss(self):
+        await self.start_soc_grace_fixture(listen=True)
+        self.wall = self.origin + 1
+        self.put(self.b.ac_output_switch, "off")
+        self.put(self.b.ac_output_switch, "on")
+        self.put(self.b.battery, "unavailable")
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertFalse(self.guard.soc_grace_active)
+
+    async def test_soc_grace_armed_timer_expires_without_telemetry(self):
+        await self.start_soc_grace_fixture()
+        with patch.object(power, "SOC_GRACE_SECONDS", .05):
+            await self.lose_soc()
+            self.assertTrue(self.guard.soc_grace_active)
+            self.wall = self.origin + 2
+            # No HA state event or manual guard check: the armed loop timer
+            # must start native shutdown when it reaches the frozen deadline.
+            await asyncio.sleep(.08)
+            await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.diagnostics["latched"])
+        self.assertIsNone(self.guard.soc_grace_until)
+        self.assertTrue(any(domain == "climate" and body["hvac_mode"] == "off"
+                            for domain, _, body in self.calls))
+
     async def test_already_on_retained_claim_acknowledges_in_preview_and_reloads_without_ownership(self):
         from homeassistant.helpers.storage import Store
         from custom_components.house_climate.button import AcknowledgeHeaterRecovery
