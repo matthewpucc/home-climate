@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.27
+
+- Allow up to 75 seconds for already-running auxiliary heat to continue during an isolated Bluetti charge-reading loss, only while recent trusted reserve and independent power and heating checks remain healthy.
+- Grace cannot start or increase heat, switch modes, re-enable the relay, or renew authorization. Confirmed low reserve, unsafe power, faults and combined telemetry losses still stop heat; normal supply rearm is unchanged.
+
 ## 0.9.26
 
 - Make single-setpoint HomeKit room thermostat edits select durable Hold, retaining Protection Only and idempotent Auto behavior. Existing HA range and desired-number edits keep their prior semantics.

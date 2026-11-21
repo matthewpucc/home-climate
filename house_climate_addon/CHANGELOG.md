@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.27
+
+- Align the add-on and controller versions. The guarded grace for a lost Bluetti charge reading requires updating the native integration; updating the add-on alone does not install it.
+
 ## 0.9.10
 
 - Align distribution metadata and shared-controller support with the native room speed controls and validated H5100 packet freshness release.

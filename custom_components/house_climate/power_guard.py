@@ -29,6 +29,10 @@ HEATER_OFF_MAX_W = 100.0  # Non-heating evidence, not an amp or appliance-rating
 BATTERY_RESERVE_PERCENT = 40.0
 TELEMETRY_MAX_AGE_SECONDS = 180
 BATTERY_MAX_AGE_SECONDS = 900
+SOC_GRACE_SECONDS = 75.0
+SOC_GRACE_PRIOR_MAX_AGE_SECONDS = 120.0
+SOC_GRACE_PRIOR_MIN_PERCENT = 50.0
+SOC_GRACE_MIN_PHASE_V = 100.0
 OFF_ACK_SECONDS = 5.0
 RESTORE_ACK_SECONDS = 10.0
 SERVICE_TIMEOUT_SECONDS = 5.0
@@ -244,6 +248,18 @@ class HeaterPowerGuard:
         self.alerts = None
         self._low_battery_alert_active = False
         self._clock, self._wall_clock = clock, wall_clock
+        self._soc_grace_eligible = None
+        self._soc_grace_context = None
+        self._soc_last_good = None
+        self._soc_loss_started = None
+        self._soc_loss_context = None
+        self._soc_grace_deadline = None
+        self._soc_grace_snapshot_until = None
+        self._soc_grace_handle = None
+        self._soc_quarantined_zero = None
+        self._soc_future_high = None
+        self._soc_hard_edge = None
+        self._soc_independent_edge = False
         self._reading = PowerReading(issue="Waiting for power telemetry", telemetry_missing=True)
         self._blocked = True
         self._latched = False
@@ -420,7 +436,11 @@ class HeaterPowerGuard:
     def _external_power(self):
         """Read reserve/supply eligibility without inventing an absent heater value."""
         bindings = replace(self.bindings, heater_current=None, heater_power=None)
-        return evaluate_power(self._states(), bindings, self._wall_clock())
+        reading = evaluate_power(self._states(), bindings, self._wall_clock())
+        if self._soc_loss_started is not None and not reading.issue:
+            return replace(reading, issue="Battery percentage recovery not yet verified",
+                           battery_percent=None, telemetry_missing=True)
+        return reading
 
     def _isolated_recovery_reading(self):
         if (not self._heater_meter_configured or not self._observe_isolation(self._wall_clock())
@@ -445,11 +465,234 @@ class HeaterPowerGuard:
 
     @property
     def blocked(self):
-        return (self._blocked or self._closing or self._closed or bool(self._persistence_error)
+        return (self._blocked or self._soc_loss_started is not None
+                or self._closing or self._closed or bool(self._persistence_error)
                 or self._manual_recovery_required or self._emergency_ac_latched
                 or (self.bindings.heater_switch is not None and not self._switch_observed("on"))
                 or (self.bindings.heater_switch is None and not self._emergency_enabled)
                 or (self._emergency_enabled and not self._ac_observed("on")))
+
+    def set_soc_grace_eligible(self, callback):
+        """Install the runtime's synchronous proof of existing heat ownership."""
+        self._soc_grace_eligible = callback
+
+    def _soc_bound_value(self, state, now):
+        _, attrs, stamp = _state_parts(state)
+        if attrs.get("restored") or attrs.get("assumed_state"):
+            return None, None
+        try:
+            value = _measurement({self.bindings.battery: state}, self.bindings.battery,
+                                 {"%": 1}, now, maximum_age=BATTERY_MAX_AGE_SECONDS)
+            return (value, _timestamp(stamp)) if value <= 100 else (None, None)
+        except (ValueError, TypeError, OverflowError):
+            return None, None
+
+    def _soc_context(self):
+        try:
+            token = self._soc_grace_eligible() if self._soc_grace_eligible else None
+            if (isinstance(token, tuple) and len(token) >= 2
+                    and not isinstance(token[0], bool) and math.isfinite(token[0])
+                    and self._clock() < token[0]):
+                return token
+        except Exception:
+            pass
+        return None
+
+    def _soc_grace_proof(self, states, now):
+        """Continue only a running heater with all non-SOC safety proof intact."""
+        if (not self.live or self.manual_control or self._closed or self._closing
+                or self._latched or self._cut_owned or self._restoring or self._cutting
+                or self._manual_recovery_required or self._emergency_ac_latched
+                or self._persistence_error or self._shutdown_fault or self._shutdown_contradicted
+                or self._identity_mismatch or self.commissioning_busy or self._positive_tasks
+                or self._service_tasks or self._compensation_pending
+                or self._off_boundary() is not None or self.pending_external_jobs()
+                or (self._action_task is not None and not self._action_task.done())):
+            return False
+        try:
+            # Unlike the normal start path, the fresh positive output and
+            # dedicated heating-load measurements corroborate AC without SOC.
+            heater, heater_attrs, heater_stamp = _state_parts(states.get(self.bindings.heater))
+            if (heater != "heat" or heater_attrs.get("hvac_action") != "heating"
+                    or heater_attrs.get("restored") or heater_attrs.get("assumed_state")
+                    or not -5 <= now - _timestamp(heater_stamp) <= TELEMETRY_MAX_AGE_SECONDS):
+                return False
+            if self.bindings.heater_switch is not None:
+                relay = states.get(self.bindings.heater_switch)
+                relay_value, relay_attrs, relay_stamp = _state_parts(relay)
+                physical, _ = _device_feedback(relay, now)
+                if (relay_value != "on" or physical == "off" or not self._switch_observed("on")
+                        or relay_attrs.get("restored") or relay_attrs.get("assumed_state")
+                        or not -5 <= now - _timestamp(relay_stamp) <= TELEMETRY_MAX_AGE_SECONDS):
+                    return False
+            elif not self._emergency_enabled:
+                return False
+            if self._emergency_enabled and not self._ac_observed("on"):
+                return False
+
+            def measured(entity, units):
+                _, attrs, _ = _state_parts(states.get(entity))
+                if attrs.get("restored") or attrs.get("assumed_state"):
+                    raise ValueError("untrusted electrical reading")
+                return _measurement(states, entity, units, now)
+
+            output = measured(self.bindings.output_power, {"W": 1, "kW": 1000})
+            ac, _, _ = _corroborated_ac(states, self.bindings, now, output_valid=output > 0)
+            if ac != "on" or output <= 0:
+                return False
+            if self.bindings.heater_power:
+                loaded = measured(self.bindings.heater_power, {"W": 1, "kW": 1000}) >= HEATER_OFF_MAX_W
+            elif self.bindings.heater_current:
+                loaded = measured(self.bindings.heater_current, {"A": 1, "mA": .001}) >= 1
+            else:
+                return False
+            return loaded and all(
+                measured(entity, {"V": 1}) >= SOC_GRACE_MIN_PHASE_V
+                for entity in (self.bindings.wall_phase_a_voltage, self.bindings.wall_phase_b_voltage))
+        except Exception:
+            return False
+
+    @property
+    def soc_grace_until(self):
+        """Cached HA-loop deadline for a worker snapshot; it is never a lease."""
+        return self._soc_grace_snapshot_until
+
+    @property
+    def soc_grace_active(self):
+        """Read-only retention flag, not permission for a positive command."""
+        if (self._soc_grace_deadline is None or self._clock() >= self._soc_grace_deadline
+                or self._soc_hard_edge or self._soc_independent_edge):
+            return False
+        context = self._soc_context()
+        if context is None or context[1:] != self._soc_grace_context:
+            return False
+        now = self._wall_clock()
+        states = self._states()
+        value, stamp = self._soc_bound_value(states.get(self.bindings.battery), now)
+        return (not (value is not None and value <= BATTERY_RESERVE_PERCENT
+                     and not (value == 0 and self._soc_quarantined_zero == stamp))
+                and self._soc_grace_proof(states, now))
+
+    def _soc_clear_grace(self):
+        if self._soc_grace_handle is not None:
+            self._soc_grace_handle.cancel()
+            self._soc_grace_handle = None
+        self._soc_grace_deadline = None
+        self._soc_grace_snapshot_until = None
+        self._soc_grace_context = None
+
+    def _soc_schedule_deadline(self, deadline):
+        if self._soc_grace_handle is not None:
+            self._soc_grace_handle.cancel()
+        self._soc_grace_deadline = deadline
+        self._soc_grace_handle = self.hass.loop.call_later(
+            max(0, deadline - self._clock()), self._schedule_check)
+
+    def _soc_loss(self):
+        if self._soc_loss_started is None:
+            self._soc_loss_started = (self._clock(), self._wall_clock())
+            self._soc_loss_context = self._soc_context()
+
+    def _soc_changed(self, entity, state):
+        """Observe fault edges before the scheduled snapshot can coalesce them."""
+        if self._soc_grace_eligible is None:
+            return
+        now = self._wall_clock()
+        if entity == self.bindings.battery:
+            value, stamp = self._soc_bound_value(state, now)
+            if value is None:
+                self._soc_loss()
+            elif value > BATTERY_RESERVE_PERCENT and stamp > now and self._soc_loss_started is not None:
+                self._soc_future_high = max(stamp, self._soc_future_high or stamp)
+            elif value <= BATTERY_RESERVE_PERCENT:
+                if (value == 0 and self._soc_loss_started is not None
+                        and (self._soc_grace_deadline is not None
+                             or (self._soc_last_good is not None and self._soc_context() is not None))
+                        and self._soc_quarantined_zero in (None, stamp)):
+                    self._soc_quarantined_zero = stamp
+                else:
+                    self._soc_hard_edge = "Battery is at or below the 40% network reserve"
+                    self._soc_grace_snapshot_until = None
+        independent = (self.bindings.ac_output_switch, self.bindings.emergency_ac_switch,
+                       self.bindings.heater_switch, self.bindings.output_power,
+                       self.bindings.heater, self.bindings.heater_power, self.bindings.heater_current,
+                       self.bindings.wall_phase_a_voltage, self.bindings.wall_phase_b_voltage)
+        if (entity in independent and self._soc_last_good is not None
+                and (self._soc_grace_deadline is not None or self._soc_context() is not None)):
+            states = self._states()
+            states[entity] = state
+            if not self._soc_grace_proof(states, now):
+                self._soc_independent_edge = True
+                self._soc_grace_snapshot_until = None
+
+    def _soc_grace_reading(self, states, reading, now):
+        """Qualify an isolated dropout, or hand the fault to normal shutdown."""
+        if self._soc_grace_eligible is None:
+            return reading, False
+        value, stamp = self._soc_bound_value(states.get(self.bindings.battery), now)
+        hard_edge, self._soc_hard_edge = self._soc_hard_edge, None
+        independent_edge, self._soc_independent_edge = self._soc_independent_edge, False
+        if value is None:
+            self._soc_loss()
+        elif value == 0 and self._soc_grace_deadline is not None and (
+                self._soc_quarantined_zero in (None, stamp)):
+            self._soc_quarantined_zero = stamp
+        old = self._soc_last_good
+        loss = self._soc_loss_started
+        if value is not None and value > BATTERY_RESERVE_PERCENT and stamp > now and loss is not None:
+            self._soc_future_high = max(stamp, self._soc_future_high or stamp)
+        quarantined = value == 0 and self._soc_quarantined_zero == stamp
+        fresh_return = (value is not None and loss is not None and loss[1] < stamp <= now
+                        and (old is None or stamp > old[1])
+                        and (self._soc_future_high is None or stamp > self._soc_future_high))
+        context = self._soc_context() if loss is not None else None
+        if independent_edge and loss is not None and not hard_edge:
+            hard_edge = "Independent heater supply or control proof was interrupted"
+        if (self._soc_grace_deadline is not None and context is not None
+                and context[0] < self._soc_grace_deadline):
+            self._soc_schedule_deadline(context[0])
+        expired = (self._soc_grace_deadline is not None
+                   and self._clock() >= self._soc_grace_deadline)
+        forfeited = (self._soc_grace_deadline is not None
+                     and (context is None or context[1:] != self._soc_grace_context
+                          or not self._soc_grace_proof(states, now)))
+        if hard_edge or expired or forfeited:
+            self._soc_clear_grace()
+            if value is not None and not quarantined and (
+                    value <= BATTERY_RESERVE_PERCENT or fresh_return):
+                self._soc_loss_started = self._soc_loss_context = None
+                self._soc_future_high = None
+            return replace(reading, issue=hard_edge or (
+                "Battery telemetry grace expired" if expired else
+                "Independent heater supply or control proof was interrupted"),
+                telemetry_missing=False), False
+        if value is not None and not quarantined and (
+                loss is None or value <= BATTERY_RESERVE_PERCENT or fresh_return):
+            self._soc_clear_grace()
+            self._soc_loss_started = self._soc_loss_context = self._soc_quarantined_zero = None
+            self._soc_future_high = None
+            if value > BATTERY_RESERVE_PERCENT and stamp <= now and not reading.issue:
+                self._soc_last_good = value, stamp
+            else:
+                self._soc_last_good = None
+            return reading, False
+        if (self._soc_grace_deadline is None and loss is not None and old is not None
+                and context is not None and self._soc_loss_context is not None
+                and context[1:] == self._soc_loss_context[1:]
+                and old[0] >= SOC_GRACE_PRIOR_MIN_PERCENT
+                and 0 <= loss[1] - old[1] <= SOC_GRACE_PRIOR_MAX_AGE_SECONDS
+                and self._clock() < loss[0] + SOC_GRACE_SECONDS
+                and self._soc_grace_proof(states, now)):
+            self._soc_grace_context = context[1:]
+            self._soc_schedule_deadline(min(
+                loss[0] + SOC_GRACE_SECONDS, context[0], self._soc_loss_context[0]))
+        if self._soc_grace_deadline is not None:
+            return replace(reading, issue="Battery percentage unavailable; existing heat only",
+                           battery_percent=None, telemetry_missing=True), True
+        if not reading.issue or quarantined:
+            reading = replace(reading, issue="Battery percentage recovery not yet verified",
+                              battery_percent=None, telemetry_missing=True)
+        return reading, False
 
     def _fan_recovery_ready(self):
         """Only a proved ordinary stop can become fan-only during a heat hold."""
@@ -739,7 +982,11 @@ class HeaterPowerGuard:
             or self._off_boundary() is not None or self._wall_observed_off_wall is not None
             or self._service_tasks or self._positive_tasks or self._compensation_pending
             or (self._action_task is not None and not self._action_task.done()))
+        snapshot_until = self.soc_grace_until
+        remaining = max(0, snapshot_until - self._clock()) if snapshot_until is not None else None
         return {"blocked": blocked, "reason": self._reason,
+                "soc_grace_active": remaining is not None and remaining > 0,
+                "soc_grace_remaining_seconds": remaining,
                 "latched": self._latched, "switch_cut_owned": self._cut_owned,
                 "power_cut_confirmed": self.power_cut_confirmed,
                 "restoring": self._restoring, "restore_attempts": self._restore_attempts,
@@ -1000,6 +1247,7 @@ class HeaterPowerGuard:
         def changed(_event=None):
             if _event is not None:
                 self.shutdown_observations.ha_state(_event, self.bindings)
+                self._soc_changed(_event.data.get("entity_id"), _event.data.get("new_state"))
             if _event and self.supervised_recovery_active and self._supervised_restore is None:
                 self._supervised_preparation_check(
                     entity=_event.data.get("entity_id"), state=_event.data.get("new_state"))
@@ -1085,6 +1333,9 @@ class HeaterPowerGuard:
         if self.manual_control:
             from .controller.ha import HAActivationDeferred
             raise HAActivationDeferred("Dyson is under manual control; return ownership before automated activation")
+        if self._soc_grace_deadline is not None:
+            from .controller.ha import HAActivationDeferred
+            raise HAActivationDeferred("Battery telemetry grace is for existing heat only")
         if ((body or {}).get("hvac_mode") == "fan_only"
                 and not any(key in (body or {}) for key in ("temperature", "target_temp_low", "target_temp_high"))
                 and self._fan_recovery_ready()):
@@ -2094,6 +2345,8 @@ class HeaterPowerGuard:
         self._action_task = self.hass.async_create_task(coroutine, eager_start=False)
 
     def _trip(self, reason):
+        self._soc_clear_grace()
+        self._soc_last_good = None
         if not self._latched:
             self._latched = True
             self._tripped_at = self._clock()
@@ -2145,6 +2398,7 @@ class HeaterPowerGuard:
         self._observe_isolation(now)
         states = self._states()
         reading = evaluate_power(states, self.bindings, now)
+        reading, soc_retaining = self._soc_grace_reading(states, reading, now)
         if self.commissioning_active and (self._external_power().issue
                                          or not self._commissioning_external_trusted()):
             self._commissioning_failed("Authoritative electrical protection interrupted commissioning")
@@ -2228,6 +2482,13 @@ class HeaterPowerGuard:
             self._reason = "Dyson is under persistent manual control; automated reserve cutoff is suspended"
             self._safe_since = None
             self._restore_approved_until = None
+            self._publish()
+            return
+        if soc_retaining and self._soc_grace_deadline is not None:
+            self._soc_grace_snapshot_until = self._soc_grace_deadline
+            self._blocked = True
+            self._reason = reading.issue
+            self._safe_since = None
             self._publish()
             return
         if r.issue:
@@ -2862,6 +3123,7 @@ class HeaterPowerGuard:
         first = not self._closing
         self._closing = True
         self._blocked = True
+        self._soc_clear_grace()
         tasks = [t for t in (self._check_task, self._action_task, self._commissioning_task,
                              self._supervised_recovery_task) if t and not t.done()]
         if first:

@@ -10,6 +10,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 
+from .auxiliary_dispatch import soc_grace_continuation, soc_grace_observed
 from .cadence import DecisionCadence
 from .config import Config, Probe, Settings, Zone, helper
 from .executor import ControlFault, Executor
@@ -38,6 +39,24 @@ def preflight(config: Config, states: dict, executor: Executor):
             raise ControlFault("HA watchdog mapping differs from this config; regenerate and reload the HA package")
     if config.heater_entity and executor.ready(states.get(config.heater_entity, {})):
         executor.target(config.heater_entity, config.heater_high_setpoint_f, states, heater=True)
+
+
+def authorize_auxiliary_plan(ha, config, plan, states, now):
+    heater = states.get(config.heater_entity, {})
+    if soc_grace_observed(heater) or plan.auxiliary_policy.get("soc_grace_retaining") is True:
+        # Treat even stale/disagreeing inputs as reduction-only. The existing
+        # native lease can expire during this window, and may not be renewed.
+        plan.heater_on = soc_grace_continuation(ha, config, plan, states)
+        plan.auxiliary_fan_only = False
+        return
+    authorize = getattr(ha, "authorize_auxiliary", None)
+    if callable(authorize):
+        if not authorize(plan, states):
+            plan.heater_on = plan.auxiliary_fan_only = False
+    elif config.heater_entity and (plan.heater_on or plan.auxiliary_fan_only):
+        ha.service("input_datetime", "set_datetime",
+            entity_id=config.entity("auxiliary_authorization", "input_datetime"),
+            timestamp=now.timestamp())
 
 
 def stop_context(config, reason, cause, forced=False):
@@ -167,14 +186,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         if states[config.entity("heater_owned")]["state"] != "on":
                             raise ControlFault("Heater ownership was removed; refusing further activation")
                         ha.service("input_datetime", "set_datetime", entity_id=config.entity("heartbeat", "input_datetime"), timestamp=now.timestamp())
-                        authorize = getattr(ha, "authorize_auxiliary", None)
-                        if callable(authorize):
-                            if not authorize(plan, states):
-                                plan.heater_on = plan.auxiliary_fan_only = False
-                        elif config.heater_entity and (plan.heater_on or plan.auxiliary_fan_only):
-                            ha.service("input_datetime", "set_datetime",
-                                entity_id=config.entity("auxiliary_authorization", "input_datetime"),
-                                timestamp=now.timestamp())
+                        authorize_auxiliary_plan(ha, config, plan, states, now)
                         executor.step(plan, states, time.monotonic())
                         fan_trial_step = getattr(ha, "fan_trial_step", None)
                         if callable(fan_trial_step):

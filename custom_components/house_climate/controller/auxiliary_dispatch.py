@@ -19,6 +19,33 @@ def manual_auxiliary(config, states):
                 or states.get(config.entity("auxiliary_manual"), {}).get("state") == "on")
 
 
+def soc_grace_observed(state):
+    return state.get("attributes", {}).get("home_climate_auxiliary_soc_grace_active") is True
+
+
+def soc_grace_retains_heat(state):
+    """The native guard grants continuation, never a positive command."""
+    attrs = state.get("attributes", {})
+    return (soc_grace_observed(state)
+            and attrs.get("home_climate_auxiliary_blocked") is True
+            and state.get("state") == "heat" and attrs.get("hvac_action") == "heating"
+            and not attrs.get("restored") and not attrs.get("assumed_state"))
+
+
+def soc_grace_probe_safe(config, states):
+    return states.get(config.entity("auxiliary_probe_safe", "binary_sensor"), {}).get("state") == "on"
+
+
+def soc_grace_continuation(ha, config, plan, states):
+    """A stale or standalone snapshot is never sufficient to keep heating."""
+    return (getattr(ha, "controls", None) is not None
+            and not config.legacy
+            and plan.heater_on and not plan.auxiliary_fan_only
+            and plan.auxiliary_policy.get("soc_grace_retaining") is True
+            and soc_grace_retains_heat(states.get(config.heater_entity, {}))
+            and soc_grace_probe_safe(config, states))
+
+
 @dataclass(frozen=True)
 class AuxiliaryDecision:
     requested: bool
