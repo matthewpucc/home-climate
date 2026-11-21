@@ -20,6 +20,7 @@ from .controller.sensors import probe_value
 from .auxiliary_diagnostics import AuxiliaryDiagnostics
 
 _LOGGER = logging.getLogger(__name__)
+_CURRENT_AUXILIARY_LIMIT = object()
 
 
 
@@ -214,7 +215,7 @@ class NativeControls:
                 "home_climate_auxiliary_stop_revision": snapshot["auxiliary_stop_revision"]}}
         return result
 
-    def probes_safe(self, states, *, authorization=True):
+    def probes_safe(self, states, *, authorization=True, stop_limit_f=_CURRENT_AUXILIARY_LIMIT):
         if not self.config.heater_entity:
             return True
         values = []
@@ -231,8 +232,10 @@ class NativeControls:
                 limit = self.auxiliary_limit_provider()
             except (ValueError, TypeError, KeyError):
                 return False
-        if authorization and self._auxiliary_stop_limit_f is not None:
-            limit = min(limit, self._auxiliary_stop_limit_f)
+        if stop_limit_f is _CURRENT_AUXILIARY_LIMIT:
+            stop_limit_f = self._auxiliary_stop_limit_f
+        if authorization and stop_limit_f is not None:
+            limit = min(limit, stop_limit_f)
         return bool(values) and max(values) < limit
 
     def _probe_states(self):
@@ -527,17 +530,22 @@ class NativeControls:
             if (isinstance(stop_limit_f, bool) or not isinstance(stop_limit_f, (int, float))
                     or not math.isfinite(stop_limit_f) or not 40 <= stop_limit_f <= 100):
                 raise HAActivationDeferred("Auxiliary stopping bound is invalid")
+        current_context = None
         if self.auxiliary_context_provider is not None:
-            if context is None or list(context) != list(self.auxiliary_context_provider()):
+            current_context = None if context is None else list(context)
+            if current_context != list(self.auxiliary_context_provider()):
                 raise HAActivationDeferred("Auxiliary schedule or peak context changed; a current decision is required")
-            if self._auxiliary_context != list(context):
-                self.auxiliary_generation += 1
-            self._auxiliary_context = list(context)
-        self._auxiliary_stop_limit_f = stop_limit_f if mode == "heat" else None
-        if mode == "heat" and not self.probes_safe(self._probe_states()):
+        if mode == "heat" and not self.probes_safe(self._probe_states(), stop_limit_f=stop_limit_f):
             raise HAActivationDeferred("Current room evidence does not authorize auxiliary heat")
         if self.power_guard is not None:
+            # Validate before checking the guard, then only publish the new
+            # context and limit if the already-running grace allows renewal.
             self.power_guard.check_activation(heater, {"hvac_mode": mode})
+        if current_context is not None:
+            if self._auxiliary_context != current_context:
+                self.auxiliary_generation += 1
+            self._auxiliary_context = current_context
+        self._auxiliary_stop_limit_f = stop_limit_f if mode == "heat" else None
         if self.auxiliary_heartbeat_blocked:
             self._reset_auxiliary_heartbeat()
         self._auxiliary_probe_stop_pending = False
@@ -657,21 +665,9 @@ class NativeControls:
     def _guarded_recovery_watchdog(self, *, preparing_only=False):
         """Coordinate only routine owned watchdog work, never shutdown proof."""
         heater, guard = self.config.heater_entity, self.power_guard
-        # An ordinary ownership claim arms its eventual fallback immediately.
-        # That dormant plan is not an executing handoff. Retain the exclusion
-        # for every started/interrupted plan and any outstanding handoff work.
-        plan = self.handoff
-        handoff_pending = plan is not None and (
-            not isinstance(plan, dict) or plan.get("stage") != "armed"
-            or plan.get("authorized") is not True
-            or plan.get("requests") != {} or plan.get("completed") != []
-            or plan.get("problems") != {} or plan.get("interrupted")
-            or plan.get("resume_after") is not None or plan.get("blower_recovery")
-            or any(plan.get(key) is not None for key in
-                   ("stop_started", "settle_until", "applying_started")))
         if (guard is None or not self.active or not self.enabled or not self.live
                 or self.recovering or self._closing or self._claiming
-                or self.takeover_pending or handoff_pending or self._handoff_jobs
+                or self.takeover_pending or self._handoff_in_progress() or self._handoff_jobs
                 or self.auxiliary_manual or heater not in self.owned
                 or heater in self.pending_auxiliaries or self.auxiliary_inflight
                 or heater in self._uncertain_device_jobs
@@ -682,6 +678,50 @@ class NativeControls:
         return (getattr(guard, "recovery_isolation_confirmed", False) is True
                 or (not preparing_only
                     and getattr(guard, "recovery_native_off_managed", False) is True))
+
+    def _handoff_in_progress(self):
+        # An ordinary ownership claim arms its eventual fallback immediately.
+        # That dormant plan is not a started or interrupted handoff.
+        plan = self.handoff
+        return plan is not None and (
+            not isinstance(plan, dict) or plan.get("stage") != "armed"
+            or plan.get("authorized") is not True
+            or plan.get("requests") != {} or plan.get("completed") != []
+            or plan.get("problems") != {} or plan.get("interrupted")
+            or plan.get("resume_after") is not None or plan.get("blower_recovery")
+            or any(plan.get(key) is not None for key in
+                   ("stop_started", "settle_until", "applying_started")))
+
+    def auxiliary_soc_grace_token(self):
+        """Allow holding existing Heat only under the same unexpired leases."""
+        heater = self.config.heater_entity
+        now = time.monotonic()
+        main_deadline = self.heartbeat_monotonic + self.config.heartbeat_timeout_seconds
+        aux_deadline = self.auxiliary_authorized_at + self.config.auxiliary_heartbeat_timeout_seconds
+        if (not heater or not self.active or not self.enabled or not self.live
+                or self.recovering or self._closing or self._claiming
+                or self.takeover_pending or self._handoff_in_progress() or self._handoff_jobs
+                or self.auxiliary_manual or self._manual_transition or heater not in self.owned
+                or heater in self.pending_auxiliaries or self.auxiliary_inflight
+                or self.auxiliary_heartbeat_blocked or self._auxiliary_stop_pending
+                or self._auxiliary_probe_stop_pending or not self._auxiliary_heat_possible
+                or heater in self._uncertain_device_jobs
+                or self.pending_device_jobs({heater}) or self.stop_jobs({heater})
+                or not 0 < self.heartbeat_monotonic <= now < main_deadline
+                or not 0 < self.auxiliary_authorized_at <= now < aux_deadline
+                or self.auxiliary_context_provider is None or self._auxiliary_context is None
+                or self._auxiliary_stop_limit_f is None):
+            return None
+        state = self.hass.states.get(heater)
+        if (state is None or state.state != "heat" or state.attributes.get("hvac_action") != "heating"
+                or state.attributes.get("restored") or state.attributes.get("assumed_state")):
+            return None
+        if (self._auxiliary_context != list(self.auxiliary_context_provider())
+                or not self.probes_safe(self._probe_states())):
+            return None
+        return (min(main_deadline, aux_deadline), self.command_generation(heater),
+                self._auxiliary_stop_epoch, self.auxiliary_stop_revision, self.auxiliary_authorized_at,
+                self._auxiliary_stop_limit_f, tuple(self._auxiliary_context))
 
     def _auxiliary_could_heat(self):
         if (self.power_guard is not None

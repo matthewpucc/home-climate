@@ -11,7 +11,7 @@ from .temperature_guard import heating_cutoff_reached
 from .head_guard import HeadGuard, protection_requested
 from .airflow import TransferAirflow
 from .operating_state import OperatingState, WINDOW_COMFORT_FACTOR
-from .auxiliary_dispatch import AuxiliaryDispatch, manual_auxiliary
+from .auxiliary_dispatch import AuxiliaryDispatch, manual_auxiliary, soc_grace_observed, soc_grace_retains_heat
 from .protection_context import emergency, emergency_magnitudes, initial_context, limits, window_affected
 
 
@@ -166,8 +166,10 @@ class Policy:
         modes = attrs.get("hvac_modes") or ()
         present = native.get("state") not in (None, "unknown", "unavailable")
         manual = manual_auxiliary(self.config, states)
+        grace = soc_grace_observed(native)
         available = bool(present and (not modes or {"off", "heat"} <= set(modes))
-                         and not attrs.get("home_climate_auxiliary_blocked"))
+                         and (not self.config.legacy and soc_grace_retains_heat(native) if grace
+                              else not attrs.get("home_climate_auxiliary_blocked")))
         band = target["low_f"], target["high_f"], target["target_f"]
         low, high = limits(self.config, self.context)
         protective = bool(emergency(self.context, name, "heat").get("active")
@@ -181,7 +183,7 @@ class Policy:
             available=available, manual=manual,
             heat_pump_selected=plan.mode == "heat" and head in plan.head_targets_f,
             cooling_waiting=cooling_waiting, emergency=protective,
-            comfort_enabled=target["comfort_enabled"], allow_start=allow_start,
+            comfort_enabled=target["comfort_enabled"], allow_start=allow_start and not grace,
             protection_only=target.get("protection_only", False))
         plan.auxiliary_policy = decision.as_dict()
         plan.auxiliary_policy["context"] = [*band, not target["comfort_enabled"], decision.peak]
@@ -195,9 +197,13 @@ class Policy:
             requested = False
             self.auxiliary_dispatch.active = False
             plan.auxiliary_policy.update(requested=False, reason="Fresh room temperature/forecast reaches the auxiliary stop boundary")
+        if grace and requested:
+            plan.auxiliary_policy.update(
+                soc_grace_retaining=True,
+                reason="Retaining already-running auxiliary heat during the bounded battery-reading grace")
         plan.heater_on = self.heater_on = requested
         if (manual or not present or reading is None or reading.low <= low + .25
-                or attrs.get("home_climate_auxiliary_fan_blocked")):
+                or grace or attrs.get("home_climate_auxiliary_fan_blocked")):
             plan.auxiliary_fan_only = False
         elif plan.heater_on:
             plan.auxiliary_fan_only = False
