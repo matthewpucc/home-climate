@@ -131,6 +131,9 @@ are retained when upgrading.
 
 ### Room speed overrides
 
+For Apple Home, the optional [room fan controls](homekit-room-fans.md) use the
+same saved settings and support returning each control to Auto independently.
+
 For routine changes, open the **Home Climate device** in Devices & services
 (or add its entities to your dashboard). Each room with a configured purifier
 has **<Room> purifier speed override**, a 0–100% number, and **<Room> resume

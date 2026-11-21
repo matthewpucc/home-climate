@@ -201,3 +201,60 @@ class PurifierControlTests(unittest.IsolatedAsyncioTestCase):
                           if fan.room == "alpha" else fan for key, fan in self.cfg.fan_controls.items()})
         restored = await self.make_manager(changed)
         self.assertEqual(restored.minimum("alpha"), 25)
+
+    async def test_virtual_auto_and_off_are_independent_and_restore_prior_selection(self):
+        await self.manager.async_set_minimum("alpha", 40)
+        await self.manager.async_set("alpha", 70)
+        await self.manager.async_set_control("alpha", "minimum", 0)
+        await self.manager.async_set_control("alpha", "speed", None)
+        restored = await self.make_manager()
+        self.assertEqual(restored.manual_value("alpha", "minimum"), 0)
+        self.assertIsNone(restored.manual_value("alpha", "speed"))
+        self.assertEqual(restored.last_manual_value("alpha", "minimum"), 40)
+        self.assertEqual(restored.last_manual_value("alpha", "speed"), 70)
+        await restored.async_resume_control("alpha", "speed")
+        self.assertEqual(restored.effective("alpha"), 70)
+        self.assertEqual(restored.minimum("alpha"), 0)
+        await restored.async_set_control("alpha", "minimum", None)
+        self.assertEqual(restored.minimum("alpha"), 20)
+        self.assertEqual(restored.effective("alpha"), 70)
+        await restored.async_resume_control("alpha", "minimum")
+        self.assertEqual(restored.minimum("alpha"), 40)
+        self.assertEqual(restored.manual_value("beta", "speed"), 65)
+
+    async def test_auto_minimum_follows_current_schedule_and_does_not_clear_exact(self):
+        from tests.test_rooms import configuration
+        raw = configuration()
+        fan = raw["rooms"]["gamma"]["fans"][0]
+        fan["minimum_percentage"] = 20
+        cfg = Config.from_dict(raw)
+        manager = await self.make_manager(cfg)
+        cadence = DecisionCadence(cfg, clock=lambda: 0)
+
+        def planned(at, tick):
+            data = states(cfg, now=at)
+            settings = manager.settings(Settings.read(data, cfg))
+            return cadence.decide(data, at, settings, monotonic_now=tick).fans[fan["entity_id"]]
+
+        await manager.async_set_control("gamma", "minimum", 75)
+        self.assertEqual(planned(NOW, 0), 75)
+        await manager.async_set_control("gamma", "minimum", None)
+        self.assertEqual(planned(NOW, 1), 60)
+        self.assertEqual(planned(NOW + timedelta(hours=8), 2), 20)
+        await manager.async_set_control("gamma", "minimum", 0)
+        self.assertEqual(planned(NOW, 3), 60)
+        self.assertEqual(planned(NOW + timedelta(hours=8), 4), 0)
+        await manager.async_set_control("gamma", "speed", 0)
+        self.assertEqual(planned(NOW, 5), 0)
+        await manager.async_set_control("gamma", "minimum", None)
+        self.assertEqual(planned(NOW, 6), 0)
+        await manager.async_set_control("gamma", "speed", None)
+        self.assertEqual(planned(NOW, 7), 60)
+
+    async def test_first_off_remembers_the_configured_exact_value_without_changing_floor(self):
+        await self.manager.async_set_control("beta", "speed", 0)
+        restored = await self.make_manager()
+        self.assertEqual(restored.last_manual_value("beta", "speed"), 65)
+        await restored.async_resume_control("beta", "speed")
+        self.assertEqual(restored.effective("beta"), 65)
+        self.assertEqual(restored.minimum("beta"), 20)

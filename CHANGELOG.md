@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.28
+
+- Add opt-in [Apple Home room fan controls](docs/homekit-room-fans.md) for purifier minimum and exact speed. Setting a percentage applies a manual request; Auto restores the existing policy for that setting, and Off explicitly requests zero.
+- Preserve the existing Home Assistant controls and equipment protections. The new fan entities are disabled by default; start with one room when testing the Apple Home bridge.
+
 ## 0.9.27
 
 - Allow up to 75 seconds for already-running auxiliary heat to continue during an isolated Bluetti charge-reading loss, only while recent trusted reserve and independent power and heating checks remain healthy.

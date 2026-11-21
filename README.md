@@ -73,6 +73,8 @@ The canonical pure controller is in [`custom_components/house_climate/controller
 
 An optional [Apple Home room thermostat](docs/homekit-room-thermostats.md) exposes one comfort setpoint. Its Off mode pauses one room's comfort calls while keeping temperature protection active; it does not turn shared equipment off.
 
+Optional [Apple Home room fan controls](docs/homekit-room-fans.md) expose separate purifier minimum and exact-speed settings with a percentage slider and Auto. They edit the existing Home Climate policy rather than driving the physical fan directly.
+
 Run core tests with `python -m unittest discover -s tests -v`. Native tests use Python 3.14 and Home Assistant 2026.10.4: `python -m unittest discover -s tests_homeassistant -v`. Follow [CONTRIBUTING](CONTRIBUTING.md) for the complete release and packaged-source checks. Synthetic tests establish software behavior, not field capacity, sensor representativeness, network reliability or physical compressor operation. This documentation does not assert that live acceptance has passed.
 
 The standalone CLI and container retain their file-configuration compatibility; they do not install the native house-specific electrical guard. Regenerate installed HA packages for this version: the generated watchdog now uses a separate auxiliary-authorization helper. Do not pair a new worker with an old generated watchdog. The configuration guide explains the house/generic dynamic-stop distinction.

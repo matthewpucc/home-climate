@@ -15,7 +15,7 @@ from .configuration import generate_configuration, entry_configuration, validate
 from .const import CONF_LIVE, DOMAIN, NAME
 from .runtime import ControllerRuntime
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.CLIMATE, Platform.NUMBER]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.CLIMATE, Platform.NUMBER, Platform.FAN]
 
 
 async def async_setup_entry(hass, entry):
