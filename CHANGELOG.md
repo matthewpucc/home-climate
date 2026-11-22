@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Give routine auxiliary-heater Off requests up to 15 seconds to enter Home Assistant's service, without extending the response wait, accepting a late dispatch as Off proof, or changing emergency cutoff timing.
+
 ## 0.9.30
 
 - Let stronger eligible cooling compete with a preventive heating reserve through a guarded Dyson trial. Keep heating until auxiliary heat is verified, then require fresh room readings after shared Off. Recheck throughout cooling and return to normal protective arbitration if the proof is lost; heating limits and equipment interlocks are unchanged.
