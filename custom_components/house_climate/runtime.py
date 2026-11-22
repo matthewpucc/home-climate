@@ -169,7 +169,7 @@ class NativeAPI:
 
     def request(self, path, body=None, *, window_authorization=None,
                 activation_deadline=None, auxiliary_target=None, airflow_authorization=None, fan_trial_token=None,
-                reserve_split=None):
+                reserve_split=None, mode_recovery_reason=None):
         if body is not None and not self.live:
             raise HAError("Shadow mode forbids all service calls")
         if threading.get_ident() == self.hass.loop_thread_id:
@@ -223,7 +223,8 @@ class NativeAPI:
                                        or airflow_authorization is not None or cooling) else None)
         future = asyncio.run_coroutine_threadsafe(
             self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
-                                repair_epoch=repair_epoch, off_queue_deadline=off_queue_deadline), self.hass.loop
+                                repair_epoch=repair_epoch, off_queue_deadline=off_queue_deadline,
+                                mode_recovery_reason=mode_recovery_reason), self.hass.loop
         )
         try:
             wait = (max(0, deadline - time.monotonic()) if bounded_activation or proof_read else
@@ -487,7 +488,7 @@ class NativeAPI:
         return result
 
     async def _async_request(self, path, body, deadline, *, generation=None, dispatch=None,
-                             repair_epoch=None, off_queue_deadline=None):
+                             repair_epoch=None, off_queue_deadline=None, mode_recovery_reason=None):
         # Cancelling the worker's future is not enough: a queued coroutine can
         # start before its cancellation callback when the loop resumes.
         dispatch_deadline = (off_queue_deadline if off_queue_deadline is not None and not self.stop_event.is_set()
@@ -557,7 +558,7 @@ class NativeAPI:
         task = self.hass.async_create_background_task(
             self._async_service_job(path, domain, service, body, deadline, activation,
                                     generation, dispatch, repair_epoch, operation,
-                                    off_queue_deadline=off_queue_deadline),
+                                    off_queue_deadline=off_queue_deadline, mode_recovery_reason=mode_recovery_reason),
             "Home Climate device service", eager_start=False)
         self._service_jobs[task] = operation
         if controls is not None:
@@ -637,7 +638,8 @@ class NativeAPI:
         return sorted(uncertain)
 
     async def _async_service_job(self, path, domain, service, body, deadline, activation,
-                                  generation, dispatch, repair_epoch, operation, *, off_queue_deadline=None):
+                                  generation, dispatch, repair_epoch, operation, *, off_queue_deadline=None,
+                                  mode_recovery_reason=None):
         if activation and self.stop_event.is_set():
             raise HAStopping("Controller is stopping; activation was not dispatched")
         dispatch_deadline = (off_queue_deadline if off_queue_deadline is not None and not self.stop_event.is_set()
@@ -757,8 +759,14 @@ class NativeAPI:
                 if auxiliary_off:
                     operation.observation = controls.observations.record(
                         controls, "off_dispatched", command=operation.observation)
-                await self.hass.services.async_call(actual_domain, actual_service, actual_body, blocking=True,
-                    context=Context(id=dispatch.fan_trial_token) if dispatch and dispatch.fan_trial_token else None)
+                context = Context(id=dispatch.fan_trial_token) if dispatch and dispatch.fan_trial_token else None
+                if controls is not None and getattr(controls, "mode_diagnostics", None) is not None:
+                    await controls.mode_diagnostics.call(actual_domain, actual_service, actual_body,
+                        path="recovery" if mode_recovery_reason else "normal",
+                        reason=mode_recovery_reason or "worker_command", context=context)
+                else:
+                    await self.hass.services.async_call(actual_domain, actual_service, actual_body,
+                                                        blocking=True, context=context)
                 if auxiliary_off:
                     controls.observations.record(controls, "off_completed",
                                                  command=operation.observation, receipt=off_receipt)
@@ -791,6 +799,10 @@ class NativeAPI:
 
     def service(self, domain, service, *, auxiliary_target=None, **data):
         return self.request(f"services/{domain}/{service}", data, auxiliary_target=auxiliary_target)
+
+    def service_mode_recovery(self, entity):
+        return self.request("services/climate/set_hvac_mode", {"entity_id": entity, "hvac_mode": "off"},
+                            mode_recovery_reason="worker_reconciliation")
 
     def reset_airflow_authorizations(self):
         self._airflow_authorizations = {}

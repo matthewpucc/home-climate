@@ -15,6 +15,7 @@ from .controller.sensors import from_f, to_f
 from .auxiliary_diagnostics import EVENTS
 from .controller.shutdown_diagnostics import METRICS as SHUTDOWN_METRICS
 from .controller import numeric_diagnostics
+from .mode_diagnostics import FIELDS as MODE_DIAGNOSTIC_FIELDS
 from .controller.diagnostics import head_transition_summary
 
 
@@ -432,7 +433,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
     definitions = numeric_diagnostics.metrics(
         entry.runtime_data.config,
         controls=getattr(entry.runtime_data, "controls", None) is not None,
-        guard=hasattr(getattr(entry.runtime_data, "power_guard", None), "shutdown_observations"))
+        guard=hasattr(getattr(entry.runtime_data, "power_guard", None), "shutdown_observations"),
+        mode_fields=(MODE_DIAGNOSTIC_FIELDS if getattr(
+            getattr(entry.runtime_data, "controls", None), "mode_diagnostics", None) is not None else ()))
     if definitions:
         diagnostic_group = diagnostic_group or AuxiliaryDiagnosticGroup(None)
         diagnostic_group.runtime = entry.runtime_data

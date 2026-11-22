@@ -94,7 +94,7 @@ def fan_reports(config, states):
     return result
 
 
-def metrics(config, *, controls=False, guard=False):
+def metrics(config, *, controls=False, guard=False, mode_fields=()):
     result = []
 
     def add(scope, identity, label, fields):
@@ -108,6 +108,8 @@ def metrics(config, *, controls=False, guard=False):
         add("guard", "", "Guard", GUARD_FIELDS)
     if controls and config.heater_entity:
         add("auxiliary", "", "Auxiliary", ("manual_owned",))
+    for entity in config.heads.values():
+        add("head_mode", entity, "Head " + entity.split(".", 1)[-1].replace("_", " "), mode_fields)
     for fan in config.fan_controls.values():
         add("fan", fan.entity_id, fan.entity_id.split(".", 1)[-1].replace("_", " "), FAN_FIELDS)
     for identity, (room, source) in sources(config).items():
@@ -232,6 +234,9 @@ def values(runtime, definitions, now):
                 groups[key] = {"manual_owned": flag(runtime.controls.auxiliary_manual)}
             elif metric.scope == "fan":
                 groups[key] = fan_values(status, metric.identity, now, age)
+            elif metric.scope == "head_mode":
+                observed = getattr(getattr(runtime, "controls", None), "mode_diagnostics", None)
+                groups[key] = observed.values(metric.identity) if observed is not None else {}
             else:
                 identity = source_map.get(metric.identity)
                 groups[key] = (source_values(status, *identity, config, now, age)

@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.9.32
 
 - Give routine auxiliary-heater Off requests up to 15 seconds to enter Home Assistant's service, without extending the response wait, accepting a late dispatch as Off proof, or changing emergency cutoff timing.
+
+## 0.9.31
+
+- Expose [native heat-pump mode command attribution](docs/mode-command-diagnostics.md) through Home Assistant numeric diagnostics, with distinct reported feedback and shutdown-preset evidence retained across normal restarts.
 
 ## 0.9.30
 

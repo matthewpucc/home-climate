@@ -9,7 +9,10 @@ from datetime import timedelta
 import unittest
 from unittest.mock import patch
 
+from homeassistant.core import Context
+from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE
 from homeassistant.helpers.entity_platform import EntityPlatform
+from custom_components.house_climate.mode_diagnostics import ModeDiagnostics, MODE, PATH, OUTCOME, FEEDBACK
 
 from custom_components.house_climate.controls import NativeControls
 from custom_components.house_climate.controller.config import Config
@@ -104,8 +107,8 @@ class NumericPrometheusTests(unittest.IsolatedAsyncioTestCase):
         for metric in self.definitions:
             with self.subTest(metric=metric.key):
                 series = self.sample(samples, metric.key, self.family(metric))
-                if metric.field == "packet_received_at":
-                    self.assertEqual(series, [], "No packet receipt is fabricated for ordinary source fixtures")
+                if metric.field == "packet_received_at" or metric.scope == "head_mode":
+                    self.assertEqual(series, [], "No command or packet receipt is fabricated for empty fixture evidence")
                     continue
                 self.assertEqual(len(series), 1)
                 self.assertAlmostEqual(series[0].value, self.group.values[metric.key], delta=1e-5)
@@ -114,6 +117,65 @@ class NumericPrometheusTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reason=", text)
         self.assertNotIn("profile=", text)
         self.assertEqual(len(self.group.unsubscribers), 2)
+
+    async def test_shutdown_mode_attribution_in_actual_scrape_after_final_write_and_reload(self):
+        entity = next(iter(self.view.config.heads.values()))
+        shelf = ModeDiagnostics(self.hass, "mode-test", self.view.config.heads.values())
+        original = self.view.controls.mode_diagnostics
+        self.view.controls.mode_diagnostics = shelf
+        self.addCleanup(setattr, self.view.controls, "mode_diagnostics", original)
+        shelf.start()
+        self.addCleanup(shelf.close)
+
+        async def handle(call):
+            self.hass.states.async_set(entity, call.data["hvac_mode"], context=call.context)
+
+        self.hass.services.async_register("climate", "set_hvac_mode", handle)
+        await shelf.call("climate", "set_hvac_mode", {"entity_id": entity, "hvac_mode": "auto"},
+                         path="shutdown_handoff", reason="terminal_preset")
+        await self.hass.async_block_till_done()
+        await shelf.call("climate", "set_hvac_mode", {"entity_id": entity, "hvac_mode": "off"},
+                         path="normal", reason="worker_command")
+        await self.hass.async_block_till_done()
+        self.hass.states.async_set(entity, "heat", context=Context(user_id="external-fixture"))
+        await self.hass.async_block_till_done()
+        self.hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+        await self.hass.async_block_till_done()
+
+        restored = ModeDiagnostics(self.hass, "mode-test", self.view.config.heads.values())
+        await restored.async_load()
+        self.view.controls.mode_diagnostics = restored
+        samples, text = await self.scrape()
+        expected = {"handoff_mode_code": MODE["auto"], "handoff_outcome_code": OUTCOME["returned"],
+                    "handoff_feedback_attribution_code": FEEDBACK["matching_service_context"],
+                    "command_path_code": PATH["normal"], "command_mode_code": MODE["off"],
+                    "feedback_mode_code": MODE["heat"], "feedback_attribution_code": FEEDBACK["unattributed"]}
+        for field, value in expected.items():
+            series = self.sample(samples, f"head_mode_{entity}_{field}")
+            self.assertEqual([sample.value for sample in series], [value], field)
+        self.assertTrue(self.sample(samples, f"head_mode_{entity}_handoff_dispatched_at",
+                                    "homeassistant_sensor_unit_s"))
+        self.assertNotIn("external-fixture", text)
+        self.assertNotIn("reason=", text)
+
+    async def test_same_mode_external_report_is_not_a_handoff_confirmation(self):
+        entity = next(iter(self.view.config.heads.values()))
+        shelf = ModeDiagnostics(self.hass, "mode-external-test", self.view.config.heads.values())
+        shelf.start()
+        self.addCleanup(shelf.close)
+
+        async def no_report(_call):
+            pass
+
+        self.hass.services.async_register("climate", "set_hvac_mode", no_report)
+        await shelf.call("climate", "set_hvac_mode", {"entity_id": entity, "hvac_mode": "auto"},
+                         path="shutdown_handoff", reason="terminal_preset")
+        self.hass.states.async_set(entity, "auto", context=Context(user_id="external"))
+        await self.hass.async_block_till_done()
+        values = shelf.values(entity)
+        self.assertEqual(values["handoff_mode_code"], MODE["auto"])
+        self.assertEqual(values["feedback_attribution_code"], FEEDBACK["unattributed"])
+        self.assertNotIn("handoff_feedback_attribution_code", values)
 
     async def test_stale_snapshots_withdraw_flags_and_measurements_but_keep_historical_times(self):
         await self.scrape()

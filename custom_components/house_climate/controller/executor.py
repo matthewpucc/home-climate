@@ -157,7 +157,7 @@ class Executor:
         return sorted(self.device_issues)
 
     def ensure(self, entity, service, data, matches, states, now, *, force=False, fresh=False,
-               deadline=None, auxiliary_target=None):
+               deadline=None, auxiliary_target=None, mode_recovery=False):
         command = (service, tuple(sorted(data.items())))
         pending = self.pending.get(entity)
         observed = states.get(entity, {})
@@ -243,6 +243,8 @@ class Executor:
                         raise HAActivationDeferred("Auxiliary startup requires bounded adapter dispatch")
                     bounded(entity.split(".")[0], service, deadline=deadline,
                             entity_id=entity, **data, **({"auxiliary_target": auxiliary_target} if auxiliary_target else {}))
+                elif mode_recovery and callable(getattr(self.ha, "service_mode_recovery", None)):
+                    self.ha.service_mode_recovery(entity)
                 else:
                     self.ha.service(entity.split(".")[0], service, entity_id=entity, **data,
                                     **({"auxiliary_target": auxiliary_target} if auxiliary_target else {}))
@@ -383,7 +385,7 @@ class Executor:
         recovery.last_attempt = now
         try:
             self.ensure(entity, "set_hvac_mode", {"hvac_mode": "off"}, self.reports_off,
-                        states, now, force=True, fresh=True)
+                        states, now, force=True, fresh=True, mode_recovery=True)
             # Retries renew only the retry clock. Keep the first uncertain
             # report as evidence, including when an already-off call is a no-op.
             self.pending[entity].baseline = recovery.baseline

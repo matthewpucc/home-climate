@@ -99,6 +99,19 @@ class NativeReserveSplitTests(unittest.IsolatedAsyncioTestCase):
             ticket=ticket, window_ticket=window_ticket, entity_id=entity or self.head,
             hvac_mode="cool", temperature=69)
 
+    async def test_native_api_records_normal_dispatch_not_deferred_requests(self):
+        from custom_components.house_climate.mode_diagnostics import MODE, PATH, OUTCOME
+
+        ticket = await self.new_ticket()
+        with self.assertRaises(HAActivationDeferred):
+            await self.send(ticket, entity=self.other)
+        self.assertFalse(self.controls.mode_diagnostics.values(self.other))
+        await self.send(ticket)
+        values = self.controls.mode_diagnostics.values(self.head)
+        self.assertEqual(values["command_path_code"], PATH["normal"])
+        self.assertEqual(values["command_mode_code"], MODE["cool"])
+        self.assertEqual(values["command_outcome_code"], OUTCOME["returned"])
+
     async def test_qualified_send_is_only_for_exact_bound_cooling_heads(self):
         ticket = await self.new_ticket()
         # Rebinding the Living head as a cooling victim invalidates and revokes.

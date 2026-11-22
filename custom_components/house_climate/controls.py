@@ -21,6 +21,7 @@ from .controller.ha import HAActivationDeferred, HAError
 from .controller.ha_package import watchdog_signature
 from .controller.sensors import probe_value
 from .auxiliary_diagnostics import AuxiliaryDiagnostics
+from .mode_diagnostics import ModeDiagnostics
 
 _LOGGER = logging.getLogger(__name__)
 _CURRENT_AUXILIARY_LIMIT = object()
@@ -96,9 +97,11 @@ class NativeControls:
         self._snapshot = {}
         self.power_guard = None
         self.observations = AuxiliaryDiagnostics()
+        self.mode_diagnostics = ModeDiagnostics(hass, entry_id, config.heads.values())
         self._publish()
 
     async def async_load(self):
+        await self.mode_diagnostics.async_load()
         data = await self.store.async_load()
         if data:
             # Legacy storage never implied permission to resume control.
@@ -184,6 +187,7 @@ class NativeControls:
         if self.active or self._closing:
             return
         self.active = True
+        self.mode_diagnostics.start()
         entities = {*self.config.climate_entities, *self.config.fans.values(), *self.owned, *self.pending_fans, *self.pending_auxiliaries,
                     *(entity for room in self.config.zones.values() for probe in room.probes
                       for entity in (probe.entity_id, getattr(probe, "observation_time_entity", None),
@@ -1359,11 +1363,11 @@ class NativeControls:
             else:
                 if observation is not None:
                     observation = self.observations.record(self, "off_dispatched", command=observation)
-                await self.hass.services.async_call(
+                await self.mode_diagnostics.call(
                     entity.split(".", 1)[0],
                     "set_hvac_mode" if entity.startswith("climate.") else "turn_off",
                     {"entity_id": entity, **({"hvac_mode": "off"} if entity.startswith("climate.") else {})},
-                    blocking=True,
+                    path="recovery", reason="ownership_cleanup",
                 )
                 if observation is not None:
                     self.observations.record(self, "off_completed", command=observation, receipt=receipt)
@@ -1626,6 +1630,7 @@ class NativeControls:
             for unsubscribe in self._unsubscribers:
                 unsubscribe()
             self._unsubscribers.clear()
+            self.mode_diagnostics.close()
             self._publish()
             closed = True
             return True

@@ -123,3 +123,18 @@ class AuxiliaryOffQueueTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await job
+
+    async def test_auxiliary_off_does_not_enter_head_mode_attribution(self):
+        runtime = await self.controlled()
+        heater = runtime.config.heater_entity
+        head = next(iter(runtime.config.heads.values()))
+        await asyncio.to_thread(runtime.api.service_mode_recovery, head)
+        diagnostics = runtime.controls.mode_diagnostics
+        recorded = diagnostics.rows[head].copy()
+        self.assertEqual((recorded["command_path_code"], recorded["command_reason_code"]), (3, 5))
+        with patch.object(native, "time", self.queue_clock(12)):
+            with self.assertRaisesRegex(HAError, "Off dispatched after response deadline"):
+                await self.send(runtime, heater)
+        await self.hass.async_block_till_done()
+        self.assertNotIn(heater, diagnostics.rows)
+        self.assertEqual(diagnostics.rows[head], recorded)
