@@ -159,6 +159,13 @@ class RetiredAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(heater, [call.args[0] for call in self.controls._off.await_args_list])
         self.assertTrue(self.controls._retirement_review_required)
 
+    async def test_silently_unsaved_store_write_keeps_original_claim(self):
+        self.controls.store.async_save = AsyncMock(return_value=None)
+        with self.assertRaisesRegex(HAError, "did not save"):
+            await self.retire()
+        self.assertIn(self.retired, self.controls.owned)
+        self.assertFalse(self.controls._retirement_review_required)
+
     async def test_rejects_pending_work_blower_and_keeps_old_records_on_save_failure(self):
         self.controls.pending_device_jobs = lambda entities: (object(),)
         with self.assertRaisesRegex(HAError, "finish"):

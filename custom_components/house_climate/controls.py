@@ -368,8 +368,13 @@ class NativeControls:
             self.enabled_intent = enabled
         try:
             if enabled and self._retirement_review_required:
-                await self._save(self.owned, self.pending_fans, retirement_review_required=False)
-                self._retirement_review_required = False
+                await self._save(self.owned, self.pending_fans, retirement_review_required=False,
+                                 verify_write=True)
+                if self.enabled_intent and generation == self.ownership_generation:
+                    self._retirement_review_required = False
+                else:
+                    # A same-loop pause during the write still owns the fence.
+                    await self._save(self.owned, self.pending_fans, verify_write=True)
             else:
                 await self._save(self.owned, self.pending_fans)
         except Exception:
@@ -413,12 +418,20 @@ class NativeControls:
 
     async def async_retire_recovery_adapter(self, retired, replacement, *, confirm_disconnected_same_head):
         """Forget one disconnected adapter, never dispatch an equipment command."""
+        # A disconnected UI must not cancel between the store write and native
+        # publication. This task, rather than the caller, owns both locks.
+        task = self.hass.async_create_task(self._async_retire_recovery_adapter(
+            retired, replacement, confirm_disconnected_same_head))
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        await asyncio.shield(task)
+
+    async def _async_retire_recovery_adapter(self, retired, replacement, confirm_disconnected_same_head):
         if confirm_disconnected_same_head is not True or retired == replacement:
             raise HAError("Explicitly confirm the old adapter is disconnected and both entities serve the same head")
         async with self._check_lock:
             async with self._lock:
                 if (self.enabled or self.enabled_intent or self._resume_requested or self._closing
-                        or self._claiming or self._intent_dirty):
+                        or self._claiming or self._intent_dirty or self.hass.is_stopping):
                     raise HAError("Switch Controller Off and wait for the stopped intent to be saved")
                 heads = tuple(self.config.heads.values())
                 if (not isinstance(retired, str) or not retired.startswith("climate.")
@@ -480,7 +493,7 @@ class NativeControls:
                 # generation back. The old claim stays visible if saving fails.
                 self.ownership_generation += 1
                 await self._save(owned, self.pending_fans, handoff=updated, uncertain=uncertain,
-                                 retirement_review_required=True)
+                                 retirement_review_required=True, verify_write=True)
                 self._retirement_review_required = True
                 self.owned, self.handoff, self._uncertain_device_jobs = owned, updated, uncertain
                 self._head_possible.discard(retired)
@@ -653,7 +666,7 @@ class NativeControls:
 
     async def _save(self, devices, pending, *, auxiliary=None,
                     handoff=_CURRENT_PERSISTED, uncertain=_CURRENT_PERSISTED,
-                    retirement_review_required=_CURRENT_PERSISTED):
+                    retirement_review_required=_CURRENT_PERSISTED, verify_write=False):
         intent = self.enabled_intent
         data = {"devices": list(devices), "enabled_intent": intent}
         if self.takeover_pending:
@@ -674,7 +687,13 @@ class NativeControls:
         auxiliary = self.pending_auxiliaries if auxiliary is None else auxiliary
         if auxiliary:
             data["pending_auxiliaries"] = list(auxiliary)
+        if verify_write and self.hass.is_stopping:
+            raise HAError("Home Assistant is stopping; adapter retirement is not being saved")
         await self.store.async_save(data)
+        # HA Store may log rather than propagate a disk WriteError. Verify the
+        # retirement transaction was persisted before claiming it succeeded.
+        if verify_write and await self.store.async_load() != data:
+            raise HAError("Home Assistant did not save the adapter retirement transaction")
         if self.enabled_intent == intent:
             self._intent_dirty = False
 
