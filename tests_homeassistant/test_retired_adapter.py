@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from homeassistant.core import Context, HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_component import DATA_INSTANCES
 
 from custom_components.house_climate.controller.config import Config
@@ -93,6 +94,57 @@ class RetiredAdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(recreated.takeover_pending)
         self.assertEqual(recreated.owned, (self.other, self.fan))
         self.assertIn(self.other, recreated._uncertain_device_jobs)
+
+    async def claim_replacement(self, controls):
+        # Represent the independent successful cleanup of the other old claims.
+        controls.owned = ()
+        controls.recovering = controls.takeover_pending = False
+        controls.handoff = None
+        controls._retirement_review_required = False
+        controls._uncertain_device_jobs.clear()
+        controls.active = controls.enabled = controls.enabled_intent = True
+        controls._schedule_check = lambda *_: None
+        await controls.async_service("input_boolean", "turn_on", {})
+
+    async def test_only_live_identity_and_new_ownership_receive_startup_exemption(self):
+        await self.retire()
+        self.assertFalse(self.controls.replacement_startup_off(self.replacement))
+        await self.claim_replacement(self.controls)
+        self.assertTrue(self.controls.replacement_startup_off(self.replacement))
+        self.assertFalse(self.controls.replacement_startup_off(self.other))
+        self.assertFalse(self.controls.replacement_startup_off(self.retired))
+        self.controls.head_activation_started(self.replacement)
+        self.controls.head_activation_finished(self.replacement)
+        self.assertFalse(self.controls.replacement_startup_off(self.replacement))
+
+    async def test_restart_keeps_identity_but_never_old_off_proof(self):
+        registered = SimpleNamespace(id="test-stable-replacement-id")
+        self.hass.data[er.DATA_REGISTRY] = SimpleNamespace(
+            async_get={self.replacement: registered}.get)
+        await self.retire()
+        saved = await self.controls.store.async_load()
+        self.assertEqual(saved["replacement_startup_bindings"], {
+            self.replacement: {"identity": registered.id, "not_before": self.wall - 22}})
+
+        recreated = self.make_controls()
+        await recreated.async_load()
+        await self.claim_replacement(recreated)
+        self.assertIn(self.replacement, recreated._snapshot["replacement_startup_candidates"])
+        self.assertFalse(recreated.replacement_startup_off(self.replacement))
+        self.assertNotIn("replacement_startup_bindings", await recreated.store.async_load())
+
+    async def test_restart_accepts_only_fresh_native_report_for_same_registry_binding(self):
+        registered = SimpleNamespace(id="test-stable-replacement-id")
+        self.hass.data[er.DATA_REGISTRY] = SimpleNamespace(
+            async_get={self.replacement: registered}.get)
+        await self.retire()
+        recreated = self.make_controls()
+        await recreated.async_load()
+        self.report(at=datetime.now(timezone.utc).timestamp())
+        await self.claim_replacement(recreated)
+        self.assertTrue(recreated.replacement_startup_off(self.replacement))
+        self.report(attrs={"restored": True}, at=datetime.now(timezone.utc).timestamp())
+        self.assertFalse(recreated.replacement_startup_off(self.replacement))
 
     async def test_rejects_unattested_live_old_or_stale_or_fabricated_new_feedback(self):
         with self.assertRaises(HAError):

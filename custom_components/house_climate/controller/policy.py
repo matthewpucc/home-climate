@@ -12,6 +12,7 @@ from .head_guard import HeadGuard, protection_requested
 from .airflow import TransferAirflow
 from .operating_state import OperatingState, WINDOW_COMFORT_FACTOR
 from .auxiliary_dispatch import AuxiliaryDispatch, manual_auxiliary, soc_grace_observed, soc_grace_retains_heat
+from .reserve_split import RollingAttempt, observe as observe_reserve_split
 from .protection_context import emergency, emergency_magnitudes, initial_context, limits, window_affected
 
 
@@ -86,10 +87,15 @@ class Plan:
     head_protections: dict = field(default_factory=dict)
     unavailable_mode_requests: dict = field(default_factory=dict)
     mode_scores: dict = field(default_factory=dict)
+    mode_hold_remaining_seconds: float | None = None
     recovery_inputs: str | None = None
     heater_on: bool = False
     auxiliary_fan_only: bool = False
     auxiliary_policy: dict = field(default_factory=dict)
+    reserve_split: dict = field(default_factory=dict)
+    reserve_split_ticket: dict | None = None
+    reserve_split_stop_cooling: bool = False
+    reserve_split_stop_shared: bool = False
     seasonal: dict = field(default_factory=dict)
     fans: dict[str, int] = field(default_factory=dict)
     fan_head_assists: dict[str, str] = field(default_factory=dict)
@@ -109,7 +115,10 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        public = asdict(self)
+        for key in ("reserve_split_ticket", "reserve_split_stop_cooling", "reserve_split_stop_shared"):
+            public.pop(key)
+        return public
 
 
 class Policy:
@@ -140,6 +149,16 @@ class Policy:
         self.context = initial_context(config)
         self._protection_only = frozenset()
         self._profiles = {name: zone.profile for name, zone in config.zones.items()}
+        self.reserve_attempt = RollingAttempt(
+            confirmation=config.switch_confirmation_seconds,
+            acknowledgement_timeout=config.command_timeout_seconds + 2 * config.poll_seconds,
+            evidence_maximum_age=min(config.sensor_stale_seconds, config.forecast_minutes * 60 or config.sensor_stale_seconds),
+            isolation_timeout=(config.command_timeout_seconds + config.off_settle_seconds
+                               + 3 * config.poll_seconds + config.sensor_stale_seconds))
+        self._reserve_clock_offset = None
+        self._reserve_native_identity = None
+        self._reserve_probe_sources = None
+        self._reserve_cooling_heads = ()
 
     def seasonal_settings(self, states, now, settings):
         policy = getattr(self.config, "seasonal_policy", None)
@@ -210,6 +229,114 @@ class Policy:
         elif allow_start:
             plan.auxiliary_fan_only = bool(
                 self._auxiliary_fan_enabled and target.get("cool_requested") and "fan_only" in modes)
+
+    def _apply_reserve_split(self, plan, states, rooms, now, tick, eligible, proof, isolated_at, climate_unit):
+        """Apply a supervised internal plan only with the native proof contract."""
+        report = plan.reserve_split
+        attempt = self.reserve_attempt
+        room = self.config.auxiliary_room
+        reading = rooms.get(room)
+        head = self.config.zones[room].head if room else None
+        reserve = (self.head_guard.protection(head, "heat", rooms, plan.room_targets)
+                   if head and reading is not None else None)
+        # An emergency, missing evidence, or temporarily ineligible head is
+        # not affirmative proof that the underlying conflict has cleared.
+        contested = bool(report and report["stronger_cooling_by_measured_deficit"])
+        old_cooling_rooms = [key for key, zone in self.config.zones.items()
+                             if zone.head in self._reserve_cooling_heads]
+        def cooling_cleared(key):
+            current = rooms.get(key)
+            return (current is not None and current.observed_at is not None
+                    and 0 <= now.timestamp() - current.observed_at <= self.config.sensor_stale_seconds
+                    and not self.actual_demand(current, tuple(plan.room_targets[key][field]
+                                               for field in ("low_f", "high_f", "target_f")), "cool"))
+
+        old_cooling_clear = bool(old_cooling_rooms) and all(map(cooling_cleared, old_cooling_rooms))
+        emergencies = emergency_magnitudes(self.context)
+        continuing_uncertain = attempt.stage != "idle" and not report and (
+            reading is None or (not old_cooling_clear and (reserve is not None or bool(emergencies))))
+        competing = contested or continuing_uncertain
+        clock_offset = now.timestamp() - tick
+        sources = tuple(item[0] for item in reading.observation_id) if reading is not None else ()
+        if attempt.stage == "idle":
+            self._reserve_clock_offset = clock_offset
+            self._reserve_native_identity = None
+            self._reserve_probe_sources = sources
+            self._reserve_cooling_heads = tuple(report.get("cooling_heads", ()))
+        identity_keys = ("generation", "auxiliary_generation", "stop_revision", "stop_epoch")
+        repair_epochs = proof.get("repair_epochs") if proof else None
+        identity = (tuple(proof[key] for key in identity_keys) + (repair_epochs,)
+                    if proof and proof.get("ready") is True and isinstance(repair_epochs, tuple)
+                    and all(type(proof.get(key)) is int for key in identity_keys) else None)
+        offset = self._reserve_clock_offset
+        source = (reading.observed_at - offset, reading.low) if (
+            reading is not None and reading.observed_at is not None and offset is not None) else None
+        reported = proof.get("heat_reported_at") if proof else None
+        ack = (reported - offset if identity is not None and offset is not None
+               and type(reported) in (int, float) else None)
+        ready = bool(contested and report.get("preconditions_ready")
+                     and sources and sources == self._reserve_probe_sources
+                     and plan.heater_on and not self.context.confirmed_open_rooms
+                     and offset is not None and abs(clock_offset - offset) <= self.config.poll_seconds
+                     and (attempt.stage in ("idle", "offered")
+                          or (identity is not None and identity == self._reserve_native_identity)))
+        stage = attempt.advance(now=tick, competing=competing, ready=ready,
+                                heat_ack_at=ack, reading=source, isolated_at=isolated_at)
+        if stage != "idle":
+            report["mode"] = stage
+        if stage == "fallback":
+            plan.reserve_split_stop_cooling = True
+            if plan.mode == "cool" and (reading is None or reserve is not None) and "cool" not in emergencies:
+                # Losing the protected room's readings cannot let the same
+                # ordinary Cool escape via a baseline without that room.
+                plan.mode, plan.head_targets_f, plan.head_call_targets_f, plan.head_protections = "off", {}, {}, {}
+            plan.reasons.append("Auxiliary split proof failed; restoring ordinary protective arbitration")
+            return
+        if stage not in ("isolating", "active"):
+            return
+        if stage == "isolating" and self._reserve_native_identity is None:
+            self._reserve_native_identity = identity
+        if identity is None or identity != self._reserve_native_identity:
+            attempt.stage = "fallback"
+            plan.reserve_split_stop_cooling = True
+            report["mode"] = "fallback"
+            return
+        heads = {head: eligible["cool"][head] for head in report["cooling_heads"]} if stage == "active" else {}
+        expiry = tick + self.config.poll_seconds
+        proof_expiry = proof.get("expires_at_monotonic")
+        if type(proof_expiry) in (int, float) and math.isfinite(proof_expiry):
+            expiry = min(expiry, proof_expiry)
+        if self.context.valid_until_monotonic is not None:
+            expiry = min(expiry, self.context.valid_until_monotonic)
+        plan.reserve_split_ticket = {
+            "heads": tuple(self.config.heads[head] for head in heads),
+            "expires_at_monotonic": expiry,
+            **{key: proof[key] for key in identity_keys},
+            "repair_epochs": repair_epochs,
+            "attempt_id": attempt.offered_at,
+            # Refuse newly colder raw feedback between the worker decision and
+            # actual HA dispatch, even if it has not crossed the house limit.
+            "floor_f": max(report["guarded_heat_floor_f"], reading.low - 1e-6),
+            "reserve_room": room,
+            "probe_sources": sources,
+            "changeover_seconds": report["minimum_return_to_heat_budget_seconds"],
+        }
+        if stage == "isolating":
+            report["blocking_reason"] = "awaiting_two_distinct_post_isolation_samples"
+            # Explicitly suppress minimum-run prolongation while proving the
+            # auxiliary can maintain temperature with the shared unit Off.
+            plan.reserve_split_stop_shared = True
+            plan.mode, plan.head_targets_f, plan.head_call_targets_f, plan.head_protections = "off", {}, {}, {}
+            plan.reasons.append("Auxiliary heat acknowledged; waiting for independent room feedback with shared heads Off")
+            return
+        plan.mode, plan.head_targets_f, plan.head_protections = "cool", heads, {}
+        plan.head_call_targets_f = {
+            head: call_target_f(self.config, self.config.heads[head], "cool", target, states, climate_unit)
+            for head, target in heads.items()}
+        report["shared_priority"] = "guarded_cooling"
+        report["independent_capacity"] = "observed_for_current_attempt_only"
+        report.pop("blocking_reason", None)
+        plan.reasons.append("Auxiliary supports reserve from rolling post-isolation evidence")
 
     def trim_transfer_fans(self, plan, states, rooms, now):
         """An ambient gradient cannot override possible conditioned discharge."""
@@ -376,7 +503,8 @@ class Policy:
                 "emergency": chosen.get("emergency", False), "violation_f": chosen.get("violation_f", 0)}
 
     def decide(self, states: dict, now: datetime, settings: Settings, climate_unit: str = "°F", *, context=None,
-               monotonic_now=None) -> Plan:
+               monotonic_now=None, reserve_proof_supported=False, reserve_proof=None,
+               reserve_isolated_at=None) -> Plan:
         settings = self.seasonal_settings(states, now, settings)
         self.fan_controls = {
             key: replace(fan,
@@ -589,7 +717,8 @@ class Policy:
             if not self.candidate or self.candidate[0] != winner:
                 self.candidate = (winner, now)
             held = (now - self.mode_since).total_seconds() if self.mode_since else float("inf")
-            confirmed = (now - self.candidate[1]).total_seconds() >= self.config.switch_confirmation_seconds
+            candidate_age = (now - self.candidate[1]).total_seconds()
+            confirmed = candidate_age >= self.config.switch_confirmation_seconds
             # House protection may bypass comfort dwell, but never hardware off-time.
             emergency = scores[winner][0] > scores[self.last_direction][0] or (
                 scores[winner][1] > scores[self.last_direction][1]
@@ -609,6 +738,13 @@ class Policy:
             elif not emergency and (held < settings["mode_hold_minutes"] * 60 or not confirmed or not advantage):
                 winner = self.last_direction if eligible[self.last_direction] else "off"
                 plan.reasons.append("Holding shared direction to avoid frequent mode changes")
+                if winner == "off" and advantage:
+                    # Both timers run in parallel. This is only the earliest
+                    # policy eligibility, not a prediction of equipment startup.
+                    plan.mode_hold_remaining_seconds = max(
+                        settings["mode_hold_minutes"] * 60 - held,
+                        self.config.switch_confirmation_seconds - candidate_age,
+                    )
         else:
             self.candidate = None
         if winner != "off" and winner != self.last_direction:
@@ -628,6 +764,16 @@ class Policy:
             for key, target in plan.head_targets_f.items()
         }
         self.update_auxiliary(plan, states, rooms, now)
+        plan.reserve_split = observe_reserve_split(self, plan, states, rooms, now, eligible["cool"])
+        if reserve_proof_supported or self.reserve_attempt.stage != "idle":
+            tick = self.operating.clock() if monotonic_now is None else monotonic_now
+            self._apply_reserve_split(plan, states, rooms, now, tick, eligible, reserve_proof,
+                                      reserve_isolated_at, climate_unit)
+            winner = plan.mode
+            self.head_requests = {head: winner for head in plan.head_targets_f}
+        if (plan.mode != "off" or plan.reserve_split_stop_shared or plan.reserve_split_stop_cooling
+                or plan.reserve_split_ticket):
+            plan.mode_hold_remaining_seconds = None
         # A transfer fan can distribute conditioned air before the source
         # area's ambient probe reflects the head's output. Only assist a head
         # that survived the complete shared-mode arbitration and safety checks.

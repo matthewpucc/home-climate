@@ -29,6 +29,8 @@ from .controller.auxiliary_target import AuxiliaryTarget, trusted_auxiliary_stat
 from .controller.window_authorization import WindowAuthorization, check_window_authorization
 from .recovery import RecoveryManager
 from .repair_gate import RepairGate
+from .reserve_split_native import ReserveSplitAuthorization, floor_valid as reserve_split_floor_valid
+from .reserve_split_native import proof as read_reserve_split_proof
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,7 +96,10 @@ def controller_entity_ids(config):
 class NativeActivationDispatch:
     """Serialize worker abandonment with HA-loop dispatch for one positive call."""
 
-    def __init__(self, deadline, window_authorization=None, auxiliary_target=None, airflow_authorization=None, fan_trial_token=None):
+    def __init__(self, deadline, window_authorization=None, auxiliary_target=None,
+                 airflow_authorization=None, fan_trial_token=None, reserve_split=None, reserve_epoch=None):
+        self.reserve_split = reserve_split
+        self.reserve_epoch = reserve_epoch
         self.fan_trial_token = fan_trial_token
         self.deadline = deadline
         self.window_authorization = window_authorization
@@ -140,6 +145,9 @@ class NativeAPI:
         self._heartbeat_lock = threading.Lock()
         self._heartbeat = HeartbeatState()
         self._heartbeat_token = 0
+        self._reserve_split_lock = threading.Lock()
+        self._reserve_split_authorization = None
+        self._reserve_split_epoch = 0
         self.repair_gate = RepairGate([*config.heads.values(), *config.fans.values()])
         self._airflow_authorizations = {}
         self._fixed_airflow_bindings = {}
@@ -157,7 +165,8 @@ class NativeAPI:
         self._fan_trial_future = None
 
     def request(self, path, body=None, *, window_authorization=None,
-                activation_deadline=None, auxiliary_target=None, airflow_authorization=None, fan_trial_token=None):
+                activation_deadline=None, auxiliary_target=None, airflow_authorization=None, fan_trial_token=None,
+                reserve_split=None):
         if body is not None and not self.live:
             raise HAError("Shadow mode forbids all service calls")
         if threading.get_ident() == self.hass.loop_thread_id:
@@ -177,6 +186,9 @@ class NativeAPI:
                 return []
         activation = self._is_activation(path, body)
         actuator = bool(body is not None and path.startswith(("services/climate/", "services/fan/")))
+        cooling = self._shared_cooling_request(path, body)
+        with self._reserve_split_lock:
+            reserve_epoch = self._reserve_split_epoch if cooling else None
         repair_epoch = (self.repair_gate.capture(body.get("entity_id"), activation=activation)
                         if actuator else None)
         generation = self.controls.command_generation(body.get("entity_id")) if self.controls is not None and actuator else None
@@ -185,23 +197,26 @@ class NativeAPI:
             if issue:
                 raise HAActivationDeferred(issue)
             generation = self.controls.command_generation(body.get("entity_id"))
-        timeout = 2 if self.stop_event.is_set() else 10
+        proof_read = body is None and (path == "reserve_split_proof"
+                                     or path.startswith("replacement_startup_off/"))
+        timeout = .5 if proof_read else 2 if self.stop_event.is_set() else 10
         deadline = time.monotonic() + timeout
         bounded_activation = activation and activation_deadline is not None
         if bounded_activation:
             deadline = min(deadline, self._activation_deadline(activation_deadline))
             if deadline <= time.monotonic():
                 raise HAActivationDeferred("Activation deadline expired before dispatch")
-        dispatch = (NativeActivationDispatch(deadline, window_authorization, auxiliary_target, airflow_authorization, fan_trial_token)
+        dispatch = (NativeActivationDispatch(deadline, window_authorization, auxiliary_target,
+                                             airflow_authorization, fan_trial_token, reserve_split, reserve_epoch)
                     if activation and (self.controls is not None or window_authorization is not None
                                        or bounded_activation or auxiliary_target is not None
-                                       or airflow_authorization is not None) else None)
+                                       or airflow_authorization is not None or cooling) else None)
         future = asyncio.run_coroutine_threadsafe(
             self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
                                 repair_epoch=repair_epoch), self.hass.loop
         )
         try:
-            wait = max(0, deadline - time.monotonic()) if bounded_activation else timeout + 1
+            wait = max(0, deadline - time.monotonic()) if bounded_activation or proof_read else timeout + 1
             return future.result(timeout=wait)
         except FutureTimeout:
             # Cancellation alone cannot prevent a queued coroutine from starting
@@ -223,6 +238,65 @@ class NativeAPI:
                 and not (pieces[2] == "turn_off"
                          or (pieces[2] == "set_hvac_mode" and body.get("hvac_mode") == "off")
                          or (pieces[2] == "set_percentage" and body.get("percentage") == 0)))
+
+    def _shared_cooling_request(self, path, body):
+        return bool(body and path.startswith("services/climate/")
+                    and body.get("entity_id") in self.config.heads.values()
+                    and body.get("hvac_mode") == "cool")
+
+    def replacement_startup_off(self, entity):
+        if (self.controls is None or not self.live or self.stop_event.is_set()
+                or entity not in self.controls._snapshot["replacement_startup_candidates"]):
+            return None
+        try:
+            return self.request(f"replacement_startup_off/{entity}") is True
+        except (HAError, RuntimeError, ValueError):
+            return False
+
+    def reserve_split_proof(self):
+        """Worker-side proof query; lack of native evidence disables the split."""
+        if self.controls is None or self.power_guard is None or not self.live or self.config.legacy:
+            return None
+        try:
+            return self.request("reserve_split_proof")
+        except (HAError, RuntimeError, ValueError):
+            return None
+
+    def set_reserve_split_authorization(self, ticket_or_none):
+        """Register an exact immutable reservation, or revoke any queued call."""
+        try:
+            ticket = (ReserveSplitAuthorization.parse(ticket_or_none, self.config)
+                      if ticket_or_none is not None else None)
+        except ValueError:
+            ticket = None
+        with self._reserve_split_lock:
+            if ticket != self._reserve_split_authorization:
+                self._reserve_split_epoch += 1
+                self._reserve_split_authorization = ticket
+        return ticket_or_none is None or ticket is not None
+
+    def _begin_reserve_split_dispatch(self, dispatch, path, body):
+        ticket = dispatch.reserve_split
+        if ticket is not None:
+            if (path != "services/climate/set_temperature" or body["entity_id"] not in ticket.heads
+                    or dispatch.window_authorization is not None
+                    or not 0 < ticket.expires_at_monotonic - time.monotonic() <= self.config.poll_seconds):
+                raise HAActivationDeferred("Reserve split authorization does not cover this cooling call")
+            proof = read_reserve_split_proof(self)
+            if (not proof or ticket.expires_at_monotonic > proof["expires_at_monotonic"]
+                    or any(proof[key] != getattr(ticket, key) for key in
+                        ("generation", "auxiliary_generation", "stop_revision", "stop_epoch", "repair_epochs"))
+                    or not reserve_split_floor_valid(self, ticket)):
+                raise HAActivationDeferred("Independent reserve heat is no longer verified")
+        with self._reserve_split_lock:
+            epoch = dispatch.reserve_epoch
+            if (epoch is None and ticket is None and self._reserve_split_epoch == 0):
+                epoch = 0  # Legacy internal calls created before this fence.
+            if (epoch != self._reserve_split_epoch
+                    or self._reserve_split_authorization != ticket
+                    or (ticket is not None and time.monotonic() >= ticket.expires_at_monotonic)):
+                raise HAActivationDeferred("Reserve split authorization was replaced, revoked or expired")
+            dispatch.begin()
 
     def _expire_heartbeat_locked(self, now):
         state = self._heartbeat
@@ -412,6 +486,12 @@ class NativeAPI:
                     "Home Assistant has not dispatched this command; retrying after responsiveness returns")
             raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
 
+        if path == "reserve_split_proof" and body is None:
+            return read_reserve_split_proof(self)
+        if path.startswith("replacement_startup_off/") and body is None:
+            if self.controls is not None and self.live and not self.stop_event.is_set():
+                return self.controls.replacement_startup_off(path.split("/", 1)[1])
+            return False
         if path.startswith("auxiliary_target/") and body is None:
             return self._auxiliary_target(float(path.split("/", 1)[1]))
         if path == "config" and body is None:
@@ -586,8 +666,15 @@ class NativeAPI:
                 raise HAActivationDeferred("Fan dispatch requires a current trial reservation")
             self.head_fan_trials.validate_dispatch(dispatch.fan_trial_token,
                                                    body.get("entity_id"), body.get("fan_mode"))
+        if dispatch is None and self._shared_cooling_request(path, body):
+            with self._reserve_split_lock:
+                if self._reserve_split_epoch:
+                    raise HAActivationDeferred("Reserve split cooling requires tracked dispatch")
         if dispatch is not None:
-            dispatch.begin()
+            if self._shared_cooling_request(path, body):
+                self._begin_reserve_split_dispatch(dispatch, path, body)
+            else:
+                dispatch.begin()
         if controls and activation:
             controls.inflight += 1
             controls.head_activation_started(body.get("entity_id"))
@@ -773,6 +860,19 @@ class NativeAPI:
             deadline = self._activation_deadline(deadline)
         return self.request(path, data,
                             activation_deadline=deadline, auxiliary_target=auxiliary_target)
+
+    def service_reserve_guarded(self, domain, service, *, ticket, window_ticket=None, **data):
+        """Carry a reserve split's scoped proof; never fall back to unguarded Cool."""
+        path = f"services/{domain}/{service}"
+        try:
+            selected = ReserveSplitAuthorization.parse(ticket, self.config)
+        except ValueError as exc:
+            raise HAActivationDeferred(str(exc)) from None
+        if (path != "services/climate/set_temperature" or not self._shared_cooling_request(path, data)
+                or data.get("entity_id") not in selected.heads or window_ticket is not None):
+            raise HAActivationDeferred("Reserve split authorization does not cover this cooling call")
+        return self.request(path, data, reserve_split=selected,
+                            activation_deadline=selected.expires_at_monotonic)
 
     def service_guarded(self, domain, service, *, ticket, **data):
         """Carry a prior plan's proof; never mint permission from current inputs."""

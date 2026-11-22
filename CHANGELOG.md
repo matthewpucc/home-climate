@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.30
+
+- Let stronger eligible cooling compete with a preventive heating reserve through a guarded Dyson trial. Keep heating until auxiliary heat is verified, then require fresh room readings after shared Off. Recheck throughout cooling and return to normal protective arbitration if the proof is lost; heating limits and equipment interlocks are unchanged.
+- Show the shared-direction hold countdown separately from hardware settling and idle, while keeping active head constraints visible.
+- Avoid a redundant startup Off command for the exact replacement adapter after [retirement recovery](docs/retired-adapter-recovery.md) when it freshly confirms native Off. Cached or ambiguous feedback still requires an Off command and fresh acknowledgment, and shared settling is unchanged.
+
 ## 0.9.29
 
 - Prefer a verified native single-setpoint Auto at the midpoint of the saved handoff band, with dual-setpoint Auto as a capability-gated fallback. Uncertain or interrupted commands do not authorize a mode switch.
