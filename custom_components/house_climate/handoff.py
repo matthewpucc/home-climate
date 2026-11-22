@@ -13,11 +13,12 @@ import math
 
 from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers.temperature import display_temp
 
 from .controller.policy import native_target
-from .controller.sensors import to_f
+from .controller.sensors import from_f, to_f
 
-from .recovery_capability import mode_issue, provider_platform
+from .recovery_capability import climate_entity, mode_issue, provider_platform
 
 HANDOFF_MAX_ATTEMPTS = 3
 HANDOFF_RETRY_SECONDS = 15
@@ -27,6 +28,10 @@ def _valid_retry_record(request):
     """Old records remain readable; malformed retry bookkeeping never grants a write."""
     if not isinstance(request, dict) or not isinstance(request.get("data"), dict):
         return False
+    for key in ("expected_auto", "expected_auto_fahrenheit_alias"):
+        if key in request and (request["data"].get("hvac_mode") != "auto"
+                or type(request[key]) not in (float, int) or not math.isfinite(request[key])):
+            return False
     attempts = request.get("attempts", 1)
     if type(attempts) is not int or not 1 <= attempts <= HANDOFF_MAX_ATTEMPTS:
         return False
@@ -138,7 +143,7 @@ def _retry_evidence(controls, plan, entity, request, state, *, current=None, fal
     if (not _valid_retry_record(request) or plan.get("interrupted")
             or not request.get("dispatched") or request.get("finished_at") is None
             or request.get("uncertain") or request.get("cancelled_before_dispatch")
-            or (request.get("rejected") and not fallback)
+            or request.get("rejected")
             or entity in controls._uncertain_device_jobs
             or request.get("attempts", 1) >= HANDOFF_MAX_ATTEMPTS
             or _operator_changed(state, request)
@@ -155,7 +160,7 @@ def _retry_evidence(controls, plan, entity, request, state, *, current=None, fal
         return False
     if entity in plan["heads"]:
         if state.state == "off":
-            return _mode_retry_evidence(controls, plan, request, state, current, fallback=fallback)
+            return _mode_retry_evidence(controls, plan, request, state, current)
         if state.state != mode or mode == "auto":
             # A native Auto target mismatch is not permission to assert a new
             # target or to change mode while the head is active.
@@ -163,14 +168,16 @@ def _retry_evidence(controls, plan, entity, request, state, *, current=None, fal
     return _reported_target_valid(state, fan=entity in plan["fans"], mode=mode)
 
 
-def _mode_retry_evidence(controls, plan, request, state, current, *, fallback=False):
+def _mode_retry_evidence(controls, plan, request, state, current):
     """Only reassert Auto on a head which stayed Off in a compatible group.
 
     Off commonly has no range fields. Unlike range retries, require feedback
     after the completed handler and refuse a return to Off after activation.
     The original stop barrier and first-attempt deadline still apply.
     """
-    if ((request.get("service_failed") and not (fallback and request.get("rejected")))
+    if (request.get("service_failed")
+            or (request["data"].get("hvac_mode") == "auto"
+                and state.attributes.get("hvac_action") in ("heating", "cooling"))
             or state.last_reported.timestamp() <= request["finished_at"]
             or state.last_changed.timestamp() > request.get("first_at", request["at"])):
         return False
@@ -276,17 +283,32 @@ def _head_target(controls, plan, entity, mode, *, explicit_range=False):
     if mode == "auto":
         if not features_valid or not features & ClimateEntityFeature.TARGET_TEMPERATURE:
             raise ValueError("Native Auto has no confirmed single temperature target")
-        if (features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
-                and provider_platform(controls.hass, entity) == "esphome"):
+        platform = provider_platform(controls.hass, entity)
+        if features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE and platform == "esphome":
             # ESPHome's HA climate adapter exposes no single target when its
             # two-point trait is active, even when both modes are listed.
             raise ValueError("ESPHome dual-target climate does not expose native Auto's single target")
         mid = (plan["heat_low_f"] + plan["cool_high_f"]) / 2
         try:
-            temperature = native_target(mid, attrs, unit)
-            if not plan["heat_low_f"] - 1e-6 <= to_f(temperature, unit) <= plan["cool_high_f"] + 1e-6:
+            device = climate_entity(controls.hass, entity)
+            if device is None:
+                if platform == "esphome":
+                    raise ValueError
+                native_unit, native_attrs = unit, attrs
+            else:
+                # HA converts min/max into the configured display unit, but
+                # leaves target_temp_step in the device's native unit.
+                native_unit = device.native_temperature_unit
+                native_attrs = {"min_temp": device.min_temp, "max_temp": device.max_temp}
+                if (step := device.target_temperature_step) is not None:
+                    native_attrs["target_temp_step"] = step
+            if native_unit not in ("C", "°C", "F", "°F"):
                 raise ValueError
-        except (KeyError, TypeError, ValueError, OverflowError):
+            temperature_f = to_f(native_target(mid, native_attrs, native_unit), native_unit)
+            if not plan["heat_low_f"] - 1e-6 <= temperature_f <= plan["cool_high_f"] + 1e-6:
+                raise ValueError
+            temperature = round(from_f(temperature_f, unit), 6)
+        except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
             raise ValueError("Native Auto has no supported target inside the saved temperature band") from None
         return {"hvac_mode": "auto", "temperature": temperature}
     if mode != "heat_cool":
@@ -354,7 +376,7 @@ def _meets_saved_minimum(plan, entity, state):
             and math.isfinite(percentage) and percentage >= minimum)
 
 
-def _matches(state, data, *, fan=False):
+def _matches(state, data, *, fan=False, expected_auto=None, expected_auto_fahrenheit_alias=None):
     if (state is None or state.state in ("unknown", "unavailable")
             or state.attributes.get("restored") or state.attributes.get("assumed_state")):
         return False
@@ -363,12 +385,20 @@ def _matches(state, data, *, fan=False):
             percentage = data.get("percentage", 0)
             return (state.state == ("on" if percentage else "off")
                     and (not percentage or abs(float(state.attributes.get("percentage")) - percentage) <= 1))
-        mode = data["hvac_mode"]
-        keys = ("temperature",) if mode == "auto" else ("target_temp_low", "target_temp_high")
-        return (state.state == mode
-                and all(type(state.attributes.get(key)) in (float, int)
-                        and abs(state.attributes[key] - data[key]) <= .1 for key in keys))
-    except (TypeError, ValueError):
+        mode = data.get("hvac_mode")
+        if mode not in ("auto", "heat_cool") or state.state != mode:
+            return False
+        if mode == "auto":
+            reported = state.attributes.get("temperature")
+            expected = data["temperature"] if expected_auto is None else expected_auto
+            return (type(reported) in (float, int)
+                    and (abs(reported - expected) <= .1
+                         or (expected_auto_fahrenheit_alias is not None
+                             and abs(reported - expected_auto_fahrenheit_alias) <= 1e-6)))
+        return all(type(state.attributes.get(key)) in (float, int)
+                   and abs(state.attributes[key] - data[key]) <= .1
+                   for key in ("target_temp_low", "target_temp_high"))
+    except (KeyError, TypeError, ValueError):
         return False
 
 
@@ -376,15 +406,39 @@ def _acknowledged(plan, entity, request, state):
     if state is None:
         return False
     boundary = _report_boundary(request)
+    reported = state.last_reported.timestamp()
     if request["data"].get("hvac_mode") == "auto":
         # Wait for a provider report after the service handler returned; its
         # in-handler state write is not native Auto confirmation.
-        if request.get("finished_at") is None or _operator_changed(state, request):
+        if request.get("finished_at") is None or reported > now() or _operator_changed(state, request):
             return False
         boundary = max(boundary, request["finished_at"])
-    return (max(boundary, plan.get("resume_after", 0)) < state.last_reported.timestamp() <= now()
+    return (max(boundary, plan.get("resume_after", 0)) < reported
             and _meets_saved_minimum(plan, entity, state)
-            and _matches(state, request["data"], fan=entity in plan["fans"]))
+            and _matches(state, request["data"], fan=entity in plan["fans"],
+                         expected_auto=request.get("expected_auto"),
+                         expected_auto_fahrenheit_alias=request.get("expected_auto_fahrenheit_alias")))
+
+
+def _add_auto_readback(controls, plan, entity, request):
+    device = climate_entity(controls.hass, entity)
+    if device is None:
+        return
+    unit = controls.hass.config.units.temperature_unit
+    target = request["data"]["temperature"]
+    request["expected_auto"] = display_temp(controls.hass, target, unit, device.precision)
+    if (provider_platform(controls.hass, entity) == "esphome"
+            and device.native_temperature_unit in ("C", "°C") and device.target_temperature_step == .5):
+        # Some ESPHome climate firmware returns the nearest whole Fahrenheit
+        # equivalent of its half-Celsius UI target. Accept only that exact alias,
+        # not a general wider tolerance or any setpoint outside the saved band.
+        fahrenheit = to_f(target, unit)
+        whole_f = round(fahrenheit)
+        if (abs(fahrenheit - whole_f) < .5 - 1e-6
+                and plan["heat_low_f"] <= whole_f <= plan["cool_high_f"]):
+            alias = display_temp(controls.hass, whole_f, "°F", device.precision)
+            if alias != request["expected_auto"]:
+                request["expected_auto_fahrenheit_alias"] = alias
 
 
 async def _save(controls):
@@ -550,6 +604,8 @@ async def step(controls):
                    "first_at": retry.get("first_at", retry["at"]) if retry else reserved_at,
                    "attempts": retry.get("attempts", 1) + 1 if retry else 1,
                    "automatic_retry_pending": retry is not None}
+        if data.get("hvac_mode") == "auto":
+            _add_auto_readback(controls, plan, entity, request)
         plan["requests"][entity] = request
         generation = controls.ownership_generation
         await _save(controls)
@@ -595,6 +651,10 @@ async def step(controls):
                         controls.repair_gate.check(head, head_epoch, activation=True)
                 if controls.pending_device_jobs({entity}) or controls.stop_jobs({entity}):
                     plan["problems"][entity] = "Previous device command remains unresolved; recovery activation blocked"
+                    return
+                if (domain == "climate" and data["hvac_mode"] == "auto"
+                        and retry is None and not controls._is_off(entity)):
+                    plan["problems"][entity] = "Head is no longer confirmed Off; native Auto was not sent"
                     return
                 if domain == "fan":
                     from .configuration import purifier_identity_issue

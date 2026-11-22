@@ -6,8 +6,10 @@ The worker sees an internal adapter snapshot; no fake HA helper entities are mad
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import logging
+import math
 import time
 
 from homeassistant.core import callback
@@ -21,6 +23,7 @@ from .auxiliary_diagnostics import AuxiliaryDiagnostics
 
 _LOGGER = logging.getLogger(__name__)
 _CURRENT_AUXILIARY_LIMIT = object()
+_CURRENT_PERSISTED = object()
 
 
 
@@ -33,6 +36,7 @@ class NativeControls:
         self._intent_dirty = False
         self._resume_requested = False
         self.takeover_pending = False
+        self._retirement_review_required = False
         self.active = False
         self.owned = ()
         self.pending_fans = ()
@@ -99,6 +103,9 @@ class NativeControls:
             self.enabled_intent = data.get("enabled_intent") is True
             self._resume_requested = self.enabled_intent and self.live
             self.takeover_pending = data.get("takeover_pending") is True
+            self._retirement_review_required = data.get("retirement_review_required") is True
+            if self._retirement_review_required:
+                self.enabled_intent = self._resume_requested = False
             manual = data.get("manual_auxiliary")
             if manual is not None and (not isinstance(manual, str) or not manual.startswith("climate.")):
                 raise HAError("Invalid saved auxiliary manual ownership")
@@ -258,6 +265,8 @@ class NativeControls:
     def hint(self):
         if self.problem:
             return self.problem
+        if self._retirement_review_required:
+            return "Adapter retirement saved; turn Controller enabled On to resume"
         if self.takeover_pending:
             return "Taking control: waiting for prior commands and fresh shared-head Off"
         if self.recovering:
@@ -358,7 +367,11 @@ class NativeControls:
         if not preserve_intent:
             self.enabled_intent = enabled
         try:
-            await self._save(self.owned, self.pending_fans)
+            if enabled and self._retirement_review_required:
+                await self._save(self.owned, self.pending_fans, retirement_review_required=False)
+                self._retirement_review_required = False
+            else:
+                await self._save(self.owned, self.pending_fans)
         except Exception:
             self.enabled_intent = False
             self._intent_dirty = True
@@ -398,12 +411,96 @@ class NativeControls:
         return ((self.ownership_generation, self.auxiliary_generation)
                 if entity == self.config.heater_entity else self.ownership_generation)
 
+    async def async_retire_recovery_adapter(self, retired, replacement, *, confirm_disconnected_same_head):
+        """Forget one disconnected adapter, never dispatch an equipment command."""
+        if confirm_disconnected_same_head is not True or retired == replacement:
+            raise HAError("Explicitly confirm the old adapter is disconnected and both entities serve the same head")
+        async with self._check_lock:
+            async with self._lock:
+                if (self.enabled or self.enabled_intent or self._resume_requested or self._closing
+                        or self._claiming or self._intent_dirty):
+                    raise HAError("Switch Controller Off and wait for the stopped intent to be saved")
+                heads = tuple(self.config.heads.values())
+                if (not isinstance(retired, str) or not retired.startswith("climate.")
+                        or retired in self.config.climate_entities or retired in heads
+                        or retired == self.auxiliary_manual_entity or retired in self.pending_auxiliaries
+                        or replacement == self.config.heater_entity or heads.count(replacement) != 1):
+                    raise HAError("Select an old unbound climate adapter and a uniquely bound replacement head")
+                plan = self.handoff
+                if (not self.recovering or retired not in self.owned or plan is None
+                        or retired not in plan["heads"]):
+                    raise HAError("The retired adapter must still be owned in the saved head recovery plan")
+                if (retired in plan.get("blower_recovery", {})
+                        or replacement in plan.get("blower_recovery", {})):
+                    raise HAError("Fan trial recovery must be reviewed separately")
+                entities = {retired, replacement}
+                if (self.inflight > self.auxiliary_inflight or self.stop_jobs(entities)
+                        or self.pending_device_jobs(entities)
+                        or any(self._head_inflight.get(entity, 0) for entity in entities)
+                        or any(not task.done() for task in self._handoff_jobs.values())
+                        or replacement in self._uncertain_device_jobs
+                        or (self.repair_gate and any(self.repair_gate.held(entity) for entity in entities))):
+                    raise HAError("Wait for relevant device service, repair, and Off jobs to finish")
+                old_state = self.hass.states.get(retired)
+                if old_state is not None and old_state.state not in ("unknown", "unavailable"):
+                    raise HAError("The old adapter still reports available; do not retire it")
+                if old_state is not None and old_state.attributes.get("hvac_action") in ("heating", "cooling"):
+                    raise HAError("The old adapter still reports active conditioning")
+                boundaries = [plan.get(key) for key in ("resume_after", "stop_started", "applying_started")]
+                for entity in entities:
+                    request = plan["requests"].get(entity, {})
+                    boundaries.extend(request.get(key) for key in
+                                      ("first_at", "at", "dispatched_at", "finished_at"))
+                boundaries = [value for value in boundaries if value is not None]
+                if not boundaries or any(type(value) not in (int, float)
+                                         or not math.isfinite(value) or value <= 0 for value in boundaries):
+                    raise HAError("A valid saved recovery interruption or dispatch time is required")
+                from homeassistant.helpers.entity_component import DATA_INSTANCES
+                component = self.hass.data.get(DATA_INSTANCES, {}).get("climate")
+                native = component.get_entity(replacement) if component is not None else None
+                state = self.hass.states.get(replacement)
+                now = datetime.now(timezone.utc).timestamp()
+                if (native is None or not native.available or native.hvac_mode != "off"
+                        or state is None or state.state != "off"
+                        or state.context.user_id is not None
+                        or state.attributes.get("hvac_action") in ("heating", "cooling")
+                        or state.attributes.get("restored") or state.attributes.get("assumed_state")
+                        or not 0 <= now - state.last_reported.timestamp() <= 180
+                        or state.last_reported.timestamp() <= max(boundaries)):
+                    raise HAError("Replacement must report fresh native Off after the saved recovery boundary")
+
+                updated = deepcopy(plan)
+                updated["heads"] = [entity for entity in updated["heads"] if entity != retired]
+                updated["completed"] = [entity for entity in updated["completed"] if entity != retired]
+                updated["requests"].pop(retired, None)
+                updated["problems"].pop(retired, None)
+                owned = tuple(entity for entity in self.owned if entity != retired)
+                uncertain = self._uncertain_device_jobs - {retired}
+                # Fence stale queued work before persistence; never roll the
+                # generation back. The old claim stays visible if saving fails.
+                self.ownership_generation += 1
+                await self._save(owned, self.pending_fans, handoff=updated, uncertain=uncertain,
+                                 retirement_review_required=True)
+                self._retirement_review_required = True
+                self.owned, self.handoff, self._uncertain_device_jobs = owned, updated, uncertain
+                self._head_possible.discard(retired)
+                self._head_stop_pending.discard(retired)
+                for records in (self._head_inflight, self._head_off_baselines, self._head_off_receipts,
+                                self._head_stop_epochs, self._handoff_jobs):
+                    records.pop(retired, None)
+                self.recovering = bool(owned)
+                if self.problem and self.problem.startswith(f"Could not stop {retired}:"):
+                    self.problem = None
+                self._publish()
+
     async def async_retry_handoff(self):
         """Explicitly review a failed preset; never clear auxiliary obligations."""
         from copy import deepcopy
         async with self._check_lock:
             async with self._lock:
                 plan = self.handoff
+                if self._retirement_review_required:
+                    raise HAError("Use explicit Controller On to review and resume after adapter retirement")
                 if plan is None or self.enabled or not plan.get("authorized"):
                     raise HAError("A stopped controller with saved recovery authority is required")
                 entities = set(plan["heads"]) | set(plan["fans"])
@@ -554,18 +651,24 @@ class NativeControls:
         self.observations.record(self, "authorization_renewed", at=self.auxiliary_authorized_wall)
         self._publish()
 
-    async def _save(self, devices, pending, *, auxiliary=None):
+    async def _save(self, devices, pending, *, auxiliary=None,
+                    handoff=_CURRENT_PERSISTED, uncertain=_CURRENT_PERSISTED,
+                    retirement_review_required=_CURRENT_PERSISTED):
         intent = self.enabled_intent
         data = {"devices": list(devices), "enabled_intent": intent}
         if self.takeover_pending:
             data["takeover_pending"] = True
-        if self._uncertain_device_jobs:
-            data["uncertain_devices"] = sorted(self._uncertain_device_jobs)
+        if (self._retirement_review_required if retirement_review_required is _CURRENT_PERSISTED
+                else retirement_review_required):
+            data["retirement_review_required"] = True
+        uncertain = self._uncertain_device_jobs if uncertain is _CURRENT_PERSISTED else uncertain
+        if uncertain:
+            data["uncertain_devices"] = sorted(uncertain)
         if self.auxiliary_manual:
             data["manual_auxiliary"] = self.auxiliary_manual_entity
-        if self.handoff is not None:
-            from copy import deepcopy
-            data["handoff"] = deepcopy(self.handoff)
+        handoff = self.handoff if handoff is _CURRENT_PERSISTED else handoff
+        if handoff is not None:
+            data["handoff"] = deepcopy(handoff)
         if pending:
             data["pending_fans"] = list(pending)
         auxiliary = self.pending_auxiliaries if auxiliary is None else auxiliary
@@ -1206,7 +1309,25 @@ class NativeControls:
                     self._publish()
                 self._auxiliary_off_error = None
             attempted = set()
-            if self.takeover_pending:
+            if self._retirement_review_required:
+                # Retirement only removes an obsolete binding. Do not let the
+                # surviving saved plan become new positive authority on this
+                # timer or after restart; preserve real negative cleanup.
+                manual_heads = {entity for entity, record in
+                    (self.handoff or {}).get("blower_recovery", {}).items() if record.get("manual_hvac")}
+                for entity in self.owned:
+                    job = self._handoff_jobs.get(entity)
+                    auxiliary = entity == self.config.heater_entity
+                    if (entity.startswith("climate.") and entity not in manual_heads
+                            and not (auxiliary and self.auxiliary_manual)
+                            and (not self._is_off(entity) or (auxiliary
+                                and (self._auxiliary_heat_possible or self.auxiliary_heartbeat_blocked)
+                                and not self._ack_auxiliary_heartbeat_off()))
+                            and not self.stop_jobs({entity}) and not self.pending_device_jobs({entity})
+                            and (job is None or job.done())):
+                        await self._off(entity)
+                        attempted.add(entity)
+            elif self.takeover_pending:
                 try:
                     await self._takeover_cleanup()
                 except Exception as exc:

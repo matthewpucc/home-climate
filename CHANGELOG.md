@@ -3,6 +3,7 @@
 ## 0.9.29
 
 - Prefer a verified native single-setpoint Auto at the midpoint of the saved handoff band, with dual-setpoint Auto as a capability-gated fallback. Uncertain or interrupted commands do not authorize a mode switch.
+- Add an explicit [retired-adapter recovery action](docs/retired-adapter-recovery.md) for a physically disconnected adapter whose saved recovery record still blocks takeover. The action verifies replacement Off and does not reapply recovery settings.
 
 ## 0.9.28
 
