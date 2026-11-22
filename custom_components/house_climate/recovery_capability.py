@@ -3,6 +3,13 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_component import DATA_INSTANCES
 
 
+def provider_platform(hass, entity_id):
+    """Read the climate registry without starting or refreshing any provider."""
+    registry = hass.data.get(er.DATA_REGISTRY)
+    entry = registry.async_get(entity_id) if registry is not None else None
+    return entry.platform if entry is not None else None
+
+
 def mode_issue(hass, entity_id):
     """Supplement advertised HA modes when a provider has a separate mode gate.
 

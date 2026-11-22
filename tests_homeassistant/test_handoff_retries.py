@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -134,6 +135,139 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(request["dispatched"])
         self.assertEqual(self.controls.service_inflight, 0)
         return request
+
+    def native_attrs(self, *, dual=False, target=None):
+        return {
+            "hvac_modes": ["off", "heat", "cool", "auto"] + (["heat_cool"] if dual else []),
+            "supported_features": (ClimateEntityFeature.TARGET_TEMPERATURE |
+                                   (ClimateEntityFeature.TARGET_TEMPERATURE_RANGE if dual else 0)),
+            "min_temp": 55, "max_temp": 90, "target_temp_step": 1, "temperature": target,
+        }
+
+    def report_native(self, mode="off", *, dual=False, target=None, at=None, context=None):
+        self.report(self.head, mode, attrs=self.native_attrs(dual=dual, target=target),
+                    at=at, context=context, force_update=False)
+
+    async def test_native_auto_rounded_midpoint_requires_fresh_mode_and_single_target(self):
+        self.report_native(at=self.wall - 1)
+        self.default_response = "no_report"
+        first = await self.first()
+        self.assertEqual(first["data"], {"hvac_mode": "auto", "temperature": 71})
+        self.report_native("auto", target=71, at=first["finished_at"])
+        await self.step()
+        self.assertIsNotNone(self.controls.handoff)  # Service-time echo is not confirmation.
+        for target in (None, True, math.inf, 70):
+            self.wall += 1
+            self.report_native("auto", target=target)
+            await self.step()
+            self.assertIsNotNone(self.controls.handoff)
+        self.wall += 1
+        self.report_native("auto", target=71)
+        await self.step()
+        self.assertIsNone(self.controls.handoff)
+        self.assertFalse(self.controls.owned)
+        self.assertEqual(self.count(), 1)
+
+    async def test_native_auto_falls_back_after_fresh_unchanged_off(self):
+        self.report_native(dual=True, at=self.wall - 1)
+        self.responses[self.head] = ["no_report", "correct"]
+        first = await self.first()
+        self.assertEqual(first["data"]["hvac_mode"], "auto")
+        await self.step(first["finished_at"] + 15)
+        self.assertEqual(self.count(), 1)  # Stale Off is not evidence of failure.
+        self.report_native(dual=True)
+        await self.step()
+        self.assertEqual(self.request()["attempts"], 2)
+        self.assertEqual(self.request()["first_at"], first["first_at"])
+        self.assertEqual(self.request()["data"], {"hvac_mode": "heat_cool",
+                                                 "target_temp_low": 68, "target_temp_high": 73})
+        await self.step()
+        self.assertIsNone(self.controls.handoff)
+        self.assertEqual(self.count(), 2)
+
+    async def test_explicit_rejection_still_needs_fresh_off_before_alternative(self):
+        self.report_native(dual=True, at=self.wall - 1)
+        self.responses[self.head] = ["rejected", "correct"]
+        first = await self.first()
+        self.assertTrue(first["rejected"])
+        await self.step(first["finished_at"] + 15)
+        self.assertEqual(self.count(), 1)
+        self.report_native(dual=True)
+        await self.step()
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(self.request()["data"]["hvac_mode"], "heat_cool")
+
+    async def test_ambiguous_native_results_never_dispatch_fallback(self):
+        for case in ("exception", "native_active", "reappeared", "operator", "interrupted", "uncertain"):
+            with self.subTest(case=case):
+                self.wall += 200
+                self.reset()
+                self.report_native(dual=True, at=self.wall - 1)
+                self.responses[self.head] = ["error" if case == "exception" else "no_report"]
+                request = await self.first()
+                self.wall = request["finished_at"] + 15
+                if case == "native_active":
+                    self.report_native("auto", dual=True, target=69)
+                else:
+                    if case == "reappeared":
+                        self.report_native("unavailable", dual=True)
+                        self.wall += 1
+                    self.report_native(dual=True, context=Context(user_id="operator") if case == "operator" else None)
+                if case == "interrupted":
+                    self.controls.handoff = self.plan = handoff.restored(self.plan)
+                if case == "uncertain":
+                    request["uncertain"] = True
+                await self.step()
+                self.assertEqual(self.count(), 1)
+                self.assertEqual(self.request()["data"]["hvac_mode"], "auto")
+
+    async def test_native_only_head_retries_same_mode_after_fresh_off(self):
+        self.report_native(at=self.wall - 1)
+        self.default_response = "no_report"
+        first = await self.first()
+        self.wall = first["finished_at"] + 15
+        self.report_native()
+        await self.step()
+        self.assertEqual(self.count(), 2)
+        self.assertEqual(self.request()["data"]["hvac_mode"], "auto")
+
+    async def test_late_native_ack_suppresses_reserved_alternative(self):
+        self.report_native(dual=True, at=self.wall - 1)
+        self.default_response = "no_report"
+        first = await self.first()
+        self.wall = first["finished_at"] + 15
+        self.report_native(dual=True)
+        original = handoff._save
+        async def capture(controls):
+            pending = controls.handoff["requests"].get(self.head, {})
+            if pending.get("automatic_retry_pending"):
+                self.wall += 1
+                self.report_native("auto", dual=True, target=71)
+            await original(controls)
+        with patch.object(handoff, "_save", side_effect=capture):
+            await self.step()
+        self.assertEqual(self.count(), 1)
+        await self.step()
+        self.assertIsNone(self.controls.handoff)
+
+    async def test_existing_saved_range_stays_range_even_with_native_capability(self):
+        del self.plan["single_auto_first"]
+        self.plan = self.controls.handoff = handoff.validate(self.plan)
+        self.report_native(dual=True, at=self.wall - 1)
+        self.default_response = "no_report"
+        first = await self.first()
+        self.assertEqual(first["data"]["hvac_mode"], "heat_cool")
+        self.wall = first["finished_at"] + 15
+        self.report_native(dual=True)
+        await self.step()
+        self.assertEqual(self.request()["data"]["hvac_mode"], "heat_cool")
+
+    async def test_esphome_dual_trait_selects_range_not_unconfirmable_auto(self):
+        self.report_native(dual=True, at=self.wall - 1)
+        self.default_response = "no_report"
+        with patch.object(handoff, "provider_platform", return_value="esphome"):
+            first = await self.first()
+        self.assertEqual(first["data"]["hvac_mode"], "heat_cool")
 
     async def test_fresh_mismatch_is_corrected_by_second_attempt_and_completion_releases_ownership(self):
         self.responses[self.head] = ["mismatch", "correct"]

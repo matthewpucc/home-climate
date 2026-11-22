@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.29
+
+- Prefer a verified native single-setpoint Auto at the midpoint of the saved handoff band, with dual-setpoint Auto as a capability-gated fallback. Uncertain or interrupted commands do not authorize a mode switch.
+
 ## 0.9.28
 
 - Add opt-in [Apple Home room fan controls](docs/homekit-room-fans.md) for purifier minimum and exact speed. Setting a percentage applies a manual request; Auto restores the existing policy for that setting, and Off explicitly requests zero.

@@ -11,9 +11,13 @@ from copy import deepcopy
 from datetime import datetime, timezone
 import math
 
+from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.exceptions import ServiceValidationError
 
-from .recovery_capability import mode_issue
+from .controller.policy import native_target
+from .controller.sensors import to_f
+
+from .recovery_capability import mode_issue, provider_platform
 
 HANDOFF_MAX_ATTEMPTS = 3
 HANDOFF_RETRY_SECONDS = 15
@@ -63,7 +67,7 @@ def notification_disposition(controls):
             check_at = max(current, finished + HANDOFF_RETRY_SECONDS) if finished is not None else current
             state = controls.hass.states.get(entity)
             try:
-                _, _, desired = _desired(controls, plan, entity)
+                _, _, desired = _desired(controls, plan, entity, mode=request["data"].get("hvac_mode"))
                 job = controls._handoff_jobs.get(entity)
                 running = (finished is None and (request.get("automatic_retry_pending")
                     or (job is not None and not job.done() and request.get("dispatched")))
@@ -112,28 +116,29 @@ def observe_operator_change(controls, event):
         request["operator_changed"] = True
 
 
-def _reported_target_valid(state, *, fan):
+def _reported_target_valid(state, *, fan, mode):
     if fan and state.state not in ("on", "off"):
         return False
     if fan and state.state == "off":
         return True
-    keys = ("percentage",) if fan else ("target_temp_low", "target_temp_high")
+    keys = (("percentage",) if fan else ("temperature",) if mode == "auto"
+            else ("target_temp_low", "target_temp_high"))
     values = []
     for key in keys:
         value = state.attributes.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             return False
         values.append(value)
-    return 0 <= values[0] <= 100 if fan else values[0] <= values[1]
+    return 0 <= values[0] <= 100 if fan else len(values) == 1 or values[0] <= values[1]
 
 
-def _retry_evidence(controls, plan, entity, request, state, *, current=None):
+def _retry_evidence(controls, plan, entity, request, state, *, current=None, fallback=False):
     """A reported mismatch permits bounded reassertion, not a claim of physical failure."""
     current = now() if current is None else current
     if (not _valid_retry_record(request) or plan.get("interrupted")
             or not request.get("dispatched") or request.get("finished_at") is None
             or request.get("uncertain") or request.get("cancelled_before_dispatch")
-            or request.get("rejected")
+            or (request.get("rejected") and not fallback)
             or entity in controls._uncertain_device_jobs
             or request.get("attempts", 1) >= HANDOFF_MAX_ATTEMPTS
             or _operator_changed(state, request)
@@ -145,22 +150,27 @@ def _retry_evidence(controls, plan, entity, request, state, *, current=None):
             or state.last_reported.timestamp() > current
             or controls.stop_jobs({entity}) or controls.pending_device_jobs({entity})):
         return False
+    mode = request["data"].get("hvac_mode")
+    if fallback and (entity not in plan["heads"] or mode != "auto" or state.state != "off"):
+        return False
     if entity in plan["heads"]:
         if state.state == "off":
-            return _mode_retry_evidence(controls, request, state, current)
-        if state.state != "heat_cool":
+            return _mode_retry_evidence(controls, plan, request, state, current, fallback=fallback)
+        if state.state != mode or mode == "auto":
+            # A native Auto target mismatch is not permission to assert a new
+            # target or to change mode while the head is active.
             return False
-    return _reported_target_valid(state, fan=entity in plan["fans"])
+    return _reported_target_valid(state, fan=entity in plan["fans"], mode=mode)
 
 
-def _mode_retry_evidence(controls, request, state, current):
+def _mode_retry_evidence(controls, plan, request, state, current, *, fallback=False):
     """Only reassert Auto on a head which stayed Off in a compatible group.
 
     Off commonly has no range fields. Unlike range retries, require feedback
     after the completed handler and refuse a return to Off after activation.
     The original stop barrier and first-attempt deadline still apply.
     """
-    if (request.get("service_failed")
+    if ((request.get("service_failed") and not (fallback and request.get("rejected")))
             or state.last_reported.timestamp() <= request["finished_at"]
             or state.last_changed.timestamp() > request.get("first_at", request["at"])):
         return False
@@ -173,7 +183,9 @@ def _mode_retry_evidence(controls, request, state, current):
         job = controls._handoff_jobs.get(head)
         if ((head != state.entity_id and job is not None and not job.done())
                 or (controls.repair_gate and controls.repair_gate.held(head))
-                or other is None or other.state not in ("off", "heat_cool")
+                or other is None or not (other.state in ("off", "heat_cool")
+                    or (other.state == "auto" and head in plan["completed"]
+                        and plan["requests"].get(head, {}).get("data", {}).get("hvac_mode") == "auto"))
                 or other.attributes.get("restored") or other.attributes.get("assumed_state")
                 or not 0 <= current - other.last_reported.timestamp() <= 180):
             return False
@@ -190,6 +202,7 @@ def arm(controls, devices):
         return None
     plan = {
         "version": 1, "stage": "armed", "authorized": bool(controls.live),
+        "single_auto_first": True,
         "heads": [entity for entity in controls.config.heads.values() if entity in devices],
         "fans": [entity for entity in dict.fromkeys(controls.config.fans.values()) if entity in devices],
         "heat_low_f": fallback.heat_low_f, "cool_high_f": fallback.cool_high_f,
@@ -209,6 +222,7 @@ def arm(controls, devices):
 def validate(plan):
     if (not isinstance(plan, dict) or plan.get("version") != 1
             or type(plan.get("authorized")) is not bool
+            or type(plan.get("single_auto_first", False)) is not bool
             or plan.get("stage") not in ("armed", "stopping", "settling", "applying", "blocked", "superseded")
             or not isinstance(plan.get("heads"), list) or not isinstance(plan.get("fans"), list)
             or any(not isinstance(e, str) or not e.startswith("climate.") for e in plan["heads"])
@@ -244,20 +258,65 @@ def restored(plan):
     return plan
 
 
-def _desired(controls, plan, entity):
-    if entity in plan["heads"]:
-        state = controls.hass.states.get(entity)
-        if (state is None or state.state in ("unknown", "unavailable")
-                or state.attributes.get("restored") or state.attributes.get("assumed_state")
-                or "heat_cool" not in state.attributes.get("hvac_modes", ())):
-            raise ValueError("Available dual-setpoint Auto capability is required")
-        if issue := mode_issue(controls.hass, entity):
-            raise ValueError(issue)
-        celsius = controls.hass.config.units.temperature_unit in ("°C", "C")
-        convert = (lambda f: (f - 32) * 5 / 9) if celsius else float
-        return "climate", "set_temperature", {
-            "hvac_mode": "heat_cool", "target_temp_low": convert(plan["heat_low_f"]),
+def _head_target(controls, plan, entity, mode, *, explicit_range=False):
+    state = controls.hass.states.get(entity)
+    if (state is None or state.state in ("unknown", "unavailable")
+            or state.attributes.get("restored") or state.attributes.get("assumed_state")):
+        raise ValueError("Available recovery Auto capability is required")
+    if issue := mode_issue(controls.hass, entity):
+        raise ValueError(issue)
+    attrs = state.attributes
+    modes = attrs.get("hvac_modes", ())
+    features = attrs.get("supported_features")
+    features_valid = isinstance(features, int) and not isinstance(features, bool)
+    if mode not in modes:
+        raise ValueError("Available dual-setpoint Auto capability is required" if mode == "heat_cool"
+                         else "Native single-setpoint Auto is not advertised")
+    unit = controls.hass.config.units.temperature_unit
+    if mode == "auto":
+        if not features_valid or not features & ClimateEntityFeature.TARGET_TEMPERATURE:
+            raise ValueError("Native Auto has no confirmed single temperature target")
+        if (features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                and provider_platform(controls.hass, entity) == "esphome"):
+            # ESPHome's HA climate adapter exposes no single target when its
+            # two-point trait is active, even when both modes are listed.
+            raise ValueError("ESPHome dual-target climate does not expose native Auto's single target")
+        mid = (plan["heat_low_f"] + plan["cool_high_f"]) / 2
+        try:
+            temperature = native_target(mid, attrs, unit)
+            if not plan["heat_low_f"] - 1e-6 <= to_f(temperature, unit) <= plan["cool_high_f"] + 1e-6:
+                raise ValueError
+        except (KeyError, TypeError, ValueError, OverflowError):
+            raise ValueError("Native Auto has no supported target inside the saved temperature band") from None
+        return {"hvac_mode": "auto", "temperature": temperature}
+    if mode != "heat_cool":
+        raise ValueError("Invalid saved recovery HVAC mode")
+    # A switch after a completed native attempt needs an explicit range feature.
+    # Missing feature metadata is tolerated only on the established range path.
+    if ((explicit_range or features is not None)
+            and (not features_valid or not features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE)):
+        raise ValueError("Available dual-setpoint Auto capability is required")
+    celsius = unit in ("°C", "C")
+    convert = (lambda f: (f - 32) * 5 / 9) if celsius else float
+    return {"hvac_mode": "heat_cool", "target_temp_low": convert(plan["heat_low_f"]),
             "target_temp_high": convert(plan["cool_high_f"])}
+
+
+def _desired(controls, plan, entity, *, mode=None, explicit_range=False):
+    if entity in plan["heads"]:
+        if mode is None and plan.get("single_auto_first"):
+            try:
+                data = _head_target(controls, plan, entity, "auto")
+            except ValueError as primary:
+                try:
+                    data = _head_target(controls, plan, entity, "heat_cool")
+                except ValueError as secondary:
+                    if str(primary) == str(secondary):
+                        raise
+                    raise ValueError(f"{primary}; {secondary}") from None
+        else:
+            data = _head_target(controls, plan, entity, mode or "heat_cool", explicit_range=explicit_range)
+        return "climate", "set_temperature", data
     if entity in plan["fans"]:
         minimum = plan.get("fan_minimum_percentages", {}).get(entity, 0)
         percentage = max(plan["fan_percentage"], minimum)
@@ -304,11 +363,28 @@ def _matches(state, data, *, fan=False):
             percentage = data.get("percentage", 0)
             return (state.state == ("on" if percentage else "off")
                     and (not percentage or abs(float(state.attributes.get("percentage")) - percentage) <= 1))
-        return (state.state == "heat_cool"
-                and all(abs(float(state.attributes.get(key)) - data[key]) <= .1
-                        for key in ("target_temp_low", "target_temp_high")))
+        mode = data["hvac_mode"]
+        keys = ("temperature",) if mode == "auto" else ("target_temp_low", "target_temp_high")
+        return (state.state == mode
+                and all(type(state.attributes.get(key)) in (float, int)
+                        and abs(state.attributes[key] - data[key]) <= .1 for key in keys))
     except (TypeError, ValueError):
         return False
+
+
+def _acknowledged(plan, entity, request, state):
+    if state is None:
+        return False
+    boundary = _report_boundary(request)
+    if request["data"].get("hvac_mode") == "auto":
+        # Wait for a provider report after the service handler returned; its
+        # in-handler state write is not native Auto confirmation.
+        if request.get("finished_at") is None or _operator_changed(state, request):
+            return False
+        boundary = max(boundary, request["finished_at"])
+    return (max(boundary, plan.get("resume_after", 0)) < state.last_reported.timestamp() <= now()
+            and _meets_saved_minimum(plan, entity, state)
+            and _matches(state, request["data"], fan=entity in plan["fans"]))
 
 
 async def _save(controls):
@@ -410,6 +486,7 @@ async def step(controls):
         request = plan["requests"].get(entity)
         state = controls.hass.states.get(entity)
         retry = None
+        fallback = False
         if request:
             if not _valid_retry_record(request):
                 plan["problems"][entity] = "Recovery retry bookkeeping is invalid; inspect this device before retrying"
@@ -422,9 +499,7 @@ async def step(controls):
             if request.get("uncertain") or request.get("cancelled_before_dispatch") or entity in controls._uncertain_device_jobs:
                 plan["problems"][entity] = "Recovery command completion is uncertain; ownership is retained"
                 continue
-            if (state is not None and state.last_reported.timestamp() > max(_report_boundary(request), plan.get("resume_after", 0))
-                    and _meets_saved_minimum(plan, entity, state)
-                    and _matches(state, request["data"], fan=entity in plan["fans"])):
+            if _acknowledged(plan, entity, request, state):
                 plan["completed"].append(entity)
                 plan["problems"].pop(entity, None)
                 await _save(controls)
@@ -433,7 +508,13 @@ async def step(controls):
                 request["operator_changed"] = True
                 plan["problems"][entity] = "Operator changed this device during recovery; no preset will be replayed"
                 continue
-            if request.get("rejected"):
+            if _retry_evidence(controls, plan, entity, request, state, fallback=True):
+                try:
+                    _desired(controls, plan, entity, mode="heat_cool", explicit_range=True)
+                    fallback = True
+                except ValueError:
+                    pass
+            if request.get("rejected") and not fallback:
                 plan["problems"][entity] = "Recovery command was rejected; inspect this device before retrying"
                 continue
             if entity in plan["heads"] and (issue := mode_issue(controls.hass, entity)):
@@ -443,16 +524,17 @@ async def step(controls):
                 exhausted = "; automatic retries exhausted" if request.get("attempts", 1) >= HANDOFF_MAX_ATTEMPTS else ""
                 plan["problems"][entity] = f"Recovery outcome is unconfirmed{exhausted}; inspect this device before retrying"
                 continue
-            if not _retry_evidence(controls, plan, entity, request, state):
+            if not fallback and not _retry_evidence(controls, plan, entity, request, state):
                 continue
             retry = request
         if plan.get("interrupted"):
             plan["problems"][entity] = "Interrupted recovery needs review before another positive command"
             continue
         try:
-            domain, service, data = _desired(controls, plan, entity)
+            mode = "heat_cool" if fallback else retry["data"].get("hvac_mode") if retry else None
+            domain, service, data = _desired(controls, plan, entity, mode=mode, explicit_range=fallback)
             mode_epochs = {}
-            if retry is not None and data != retry["data"]:
+            if retry is not None and not fallback and data != retry["data"]:
                 raise ValueError("Recovery targets changed; automatic retry is inhibited")
             if controls.repair_gate:
                 epoch = controls.repair_gate.capture(entity, activation=True)
@@ -474,7 +556,8 @@ async def step(controls):
         controls.service_inflight += 1
         async def dispatch(entity=entity, domain=domain, service=service, data=data,
                            epoch=epoch if controls.repair_gate else None,
-                           generation=generation, request=request, retry=retry, mode_epochs=mode_epochs):
+                           generation=generation, request=request, retry=retry, mode_epochs=mode_epochs,
+                           fallback=fallback):
             started = False
             try:
                 if (controls.handoff is not plan or controls.takeover_pending
@@ -493,18 +576,18 @@ async def step(controls):
                 if retry is not None:
                     # A late successful report can arrive while retry intent is
                     # saved. Consume the reservation, but do not reapply it.
-                    if (current_state is not None
-                            and current_state.last_reported.timestamp() > _report_boundary(retry)
-                            and _meets_saved_minimum(plan, entity, current_state)
-                            and _matches(current_state, data, fan=entity in plan["fans"])):
+                    if _acknowledged(plan, entity, retry, current_state):
+                        plan["requests"][entity] = retry
                         return
-                    if (not _retry_evidence(controls, plan, entity, retry, current_state)
-                            or _desired(controls, plan, entity) != (domain, service, data)):
+                    if (not _retry_evidence(controls, plan, entity, retry, current_state, fallback=fallback)
+                            or _desired(controls, plan, entity, mode=data.get("hvac_mode"),
+                                        explicit_range=fallback) != (domain, service, data)):
                         plan["problems"][entity] = "Recovery retry no longer has valid reported-state evidence; inspect this device"
                         return
                 # Initial writes also recheck effective provider capability after
                 # persistence, before any service (including range writes).
-                if domain == "climate" and _desired(controls, plan, entity) != (domain, service, data):
+                if domain == "climate" and _desired(controls, plan, entity, mode=data["hvac_mode"],
+                                                   explicit_range=fallback) != (domain, service, data):
                     raise ValueError("Recovery targets changed before dispatch")
                 if controls.repair_gate:
                     controls.repair_gate.check(entity, epoch, activation=True)
