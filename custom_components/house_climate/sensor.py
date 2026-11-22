@@ -121,6 +121,22 @@ def plan_prefix(status):
     return "Would " if status.get("event") == "shadow" else "Plan: "
 
 
+def direction_hold_message(status):
+    """Distinguish policy dwell from hardware settling and idle."""
+    if "Holding shared direction to avoid frequent mode changes" not in status.get("reasons", ()):
+        return None
+    targets = status.get("room_targets", {}).values()
+    requested = {mode for target in targets for mode in ("heat", "cool")
+                 if target.get(f"{mode}_requested") is True}
+    if requested == {"cool"}:
+        return "Cooling requested; waiting to switch from heat"
+    if requested == {"heat"}:
+        return "Heating requested; waiting to switch from cooling"
+    if requested:
+        return "Heat-pump demand pending; waiting to change shared direction"
+    return None
+
+
 def phase_message(status):
     """Describe the actual shared-head wait without guessing a timer."""
     phase = status.get("phase")
@@ -134,7 +150,7 @@ def phase_message(status):
             return "Settling before heat-pump activation"
         seconds = max(0, ceil(remaining))
         if seconds == 0 and status.get("mode") == "off":
-            return "Ready; no heat-pump demand"
+            return direction_hold_message(status) or "Ready; no heat-pump demand"
         return f"Settling: {seconds}s remaining"
     return None
 
@@ -575,7 +591,7 @@ class NumericDiagnostic(ControllerEntity):
 
 class ControllerStatus(ControllerEntity):
     """Keep the existing status entity compatible with automations."""
-    _unrecorded_attributes = frozenset({"head_transition_history"})
+    _unrecorded_attributes = frozenset({"head_transition_history", "reserve_split"})
     _attr_name = "Controller status"
     _attr_icon = "mdi:home-thermometer"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -604,7 +620,7 @@ class ControllerStatus(ControllerEntity):
                  "head_protections", "unavailable_mode_requests", "mode_scores", "protection_context",
                  "auxiliary_manual", "auxiliary_manual_entity", "handoff", "notifications",
                  "enabled_intent", "takeover_pending",
-                 "auxiliary_decision", "auxiliary_policy", "shared_stop", "seasonal",
+                 "auxiliary_decision", "auxiliary_policy", "reserve_split", "shared_stop", "seasonal",
                  "seasonal_policy", "shutdown_evidence") if key in status} | heartbeat_attributes(status) | {
                     "head_transition_summary": head_transition_summary(
                         status, getattr(getattr(self.runtime, "config", None), "heads", {}).values())}
@@ -692,8 +708,9 @@ class Overview(ControllerEntity):
         guards = head_guard_messages(self.runtime.config, status, guard_display_unit(self))
         if preview and status.get("control_block_reason"):
             prefix += status["control_block_reason"] + " · "
-        if (not preview and (wait := phase_message(status))
-                and (wait != "Ready; no heat-pump demand" or not guards)):
+        wait = phase_message(status) if not preview else None
+        held_direction = wait and wait == direction_hold_message(status)
+        if wait and not held_direction and (wait != "Ready; no heat-pump demand" or not guards):
             prefix += wait + " · "
         if not preview and (hold := cycle_hold_summary(status)):
             prefix += hold + " · "
@@ -701,6 +718,8 @@ class Overview(ControllerEntity):
             prefix += "Waiting for head confirmation · "
         if guards:
             prefix += guards[0] + " · "
+        if held_direction:
+            prefix += wait + " · "
         warnings = plan_warnings(status)
         if warnings:
             prefix += f'{len(warnings)} warning(s) · '
@@ -732,10 +751,31 @@ class RecoveryStatus(ControllerEntity):
     _attr_name = "Recovery status"
     _attr_icon = "mdi:progress-clock"
 
-    _unrecorded_attributes = frozenset({"head_transition_history"})
+    _unrecorded_attributes = frozenset({"head_transition_history", "mode_hold_remaining_seconds"})
 
     def __init__(self, entry):
         super().__init__(entry, "recovery")
+
+    def mode_hold_time(self, status):
+        """Only expose a time gate when no stronger shared-head blocker is visible."""
+        remaining = status.get("mode_hold_remaining_seconds")
+        if (not isinstance(remaining, (float, int)) or isinstance(remaining, bool)
+                or not isfinite(remaining) or remaining <= 0
+                or status.get("event") != "live" or not has_plan(status)
+                or status.get("configuration_reload_pending") or handoff_message(status)
+                or heartbeat_issue(status) or any(
+                    item.get("failed") and not item.get("confirmed")
+                    for item in (status.get("shared_stop") or {}).values())
+                or status.get("integration_recovery", {}).get("reload_status") not in (
+                    None, "", "Idle", "Disabled", "Shadow mode", "Stopped")
+                or any(status.get(key) for key in ("waiting_devices", "recovery_details", "device_issues",
+                                                   "cycle_holds", "unavailable_mode_requests"))
+                or current_head_constraints(status, config=self.runtime.config)):
+            return None
+        hold = direction_hold_message(status)
+        if hold and phase_message(status) == hold:
+            return remaining
+        return None
 
     @property
     def native_value(self):
@@ -784,9 +824,15 @@ class RecoveryStatus(ControllerEntity):
             message = pending_head_message(detail, self.hass.config.units.temperature_unit)
             messages.append(f"{climate_label(self.runtime.config, entity_id)}: {message}")
         guards = head_guard_messages(self.runtime.config, status, guard_display_unit(self))
-        if (wait := phase_message(status)) and (wait != "Ready; no heat-pump demand" or not guards):
+        wait = phase_message(status)
+        held_direction = wait and wait == direction_hold_message(status)
+        if wait and not held_direction and (wait != "Ready; no heat-pump demand" or not guards):
             messages.append(wait)
         messages.extend(guards)
+        if held_direction:
+            if (remaining := self.mode_hold_time(status)) is not None:
+                wait += f" (mode hold: about {ceil(remaining)}s remaining)"
+            messages.append(wait)
         return short("; ".join(messages) or "Ready")
 
     @property
@@ -797,6 +843,7 @@ class RecoveryStatus(ControllerEntity):
                  "integration_recovery", "cycle_holds", "head_stop_reasons", "head_transition_history", "pending_head_commands", "head_fan_trial",
                  "head_constraints", "head_protections", "unavailable_mode_requests", "mode_scores",
                  "shared_stop", "handoff", "unload", "auxiliary_manual", "notifications") if key in status} | heartbeat_attributes(status) | {
+                    "mode_hold_remaining_seconds": self.mode_hold_time(status),
                     "head_transition_summary": head_transition_summary(
                         status, getattr(getattr(self.runtime, "config", None), "heads", {}).values())}
 

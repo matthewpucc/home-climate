@@ -180,6 +180,11 @@ class DecisionCadence:
             if was_fan and not plan.auxiliary_fan_only:
                 self._warning("Auxiliary circulation stopped by fresh room temperature/probe check; waiting for next comfort decision")
 
+        if plan.reserve_split and self.policy.reserve_attempt.stage == "idle":
+            from .reserve_split import observe as observe_reserve_split
+            plan.reserve_split = observe_reserve_split(
+                self.policy, plan, states, rooms, now, plan.reserve_split["cooling_heads"])
+
         for key, fan in self.policy.fan_controls.items():
             room = rooms.get(fan.room)
             unsafe = not room or (fan.strategy != "directed"
@@ -224,7 +229,8 @@ class DecisionCadence:
             if warning not in prior_warnings:
                 self._warning(warning)
 
-    def decide(self, states: dict, now: datetime, settings: Settings, climate_unit="°F", *, monotonic_now=None):
+    def decide(self, states: dict, now: datetime, settings: Settings, climate_unit="°F", *, monotonic_now=None,
+               reserve_proof_supported=False, reserve_proof=None, reserve_isolated_at=None):
         settings = self.policy.seasonal_settings(states, now, settings)
         stamp = self.clock() if monotonic_now is None else monotonic_now
         environment = self.policy.operating.environment(states, now, monotonic_now=stamp)
@@ -264,13 +270,17 @@ class DecisionCadence:
         emergencies.update(condition for condition in self._emergencies
                            if condition[0] not in rooms)
         if (self.cached_plan is None or stamp >= self.next_decision or signature != self._signature
+                or self.policy.reserve_attempt.stage != "idle"
                 or emergencies - self._emergencies):
             # Carry maintenance evidence into the policy's separate sensor reader.
             # In particular, persistent-outlier confirmation must not restart at
             # every slow decision or wait another interval after a safety breach.
             self.policy.sensors = deepcopy(self.sensors)
             self.cached_plan = self.policy.decide(states, now, settings, climate_unit,
-                                                  context=context, monotonic_now=stamp)
+                                                  context=context, monotonic_now=stamp,
+                                                  reserve_proof_supported=reserve_proof_supported,
+                                                  reserve_proof=reserve_proof,
+                                                  reserve_isolated_at=reserve_isolated_at)
             self.next_decision = stamp + self.interval
             self._signature = signature
             self._decision_warnings = [warning for warning in self.cached_plan.warnings if warning not in sensor_warnings]
@@ -279,6 +289,12 @@ class DecisionCadence:
         self._trim(states, rooms, now, climate_unit)
         self.policy.head_requests = {head: self.cached_plan.mode for head in self.cached_plan.head_targets_f}
         plan = deepcopy(self.cached_plan)
+        if plan.mode_hold_remaining_seconds is not None:
+            elapsed = max(0.0, stamp - (self.next_decision - self.interval))
+            remaining = plan.mode_hold_remaining_seconds - elapsed
+            # A maintenance tick cannot decide that an expired candidate is
+            # eligible. Only a fresh policy decision may revalidate the score.
+            plan.mode_hold_remaining_seconds = remaining if remaining > 0 else None
         if self.policy.seasonal_status is not None:
             plan.seasonal = self.policy.seasonal_status.as_dict()
         plan.rooms = {name: asdict(room) for name, room in rooms.items()}

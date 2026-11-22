@@ -316,6 +316,46 @@ class ExecutorTests(unittest.TestCase):
         self.assertEqual(len(self.activations()), 1)
         self.assertEqual(self.activations()[0][2]["hvac_mode"], "cool")
 
+    def test_startup_skips_only_verified_replacement_then_keeps_shared_settle(self):
+        replacement = self.cfg.heads["guest"]
+        self.ha.replacement_startup_off = lambda entity: True if entity == replacement else None
+        self.executor.shutdown(self.ha.states(), startup_recovery=True)
+        stopped = [data["entity_id"] for _, service, data in self.ha.calls if service == "set_hvac_mode"]
+        self.assertNotIn(replacement, stopped)
+        self.assertIn(self.cfg.heads["bonus"], stopped)
+        plan = Plan(mode="cool", head_targets_f={"bonus": 72})
+        self.step(plan, 0)
+        self.step(plan, 15)
+        self.assertEqual(self.executor.phase, "settling")
+        self.assertFalse(self.activations())
+
+    def test_replacement_without_initial_proof_accepts_new_off_without_duplicate_command(self):
+        replacement = self.cfg.heads["guest"]
+        self.ha.replacement_startup_off = lambda entity: False if entity == replacement else None
+        self.executor.shutdown(self.ha.states(), startup_recovery=True)
+        plan = Plan(mode="cool", head_targets_f={"bonus": 72})
+        self.step(plan, 0)
+        self.step(plan, 15)
+        calls = [data for _, service, data in self.ha.calls
+                 if service == "set_hvac_mode" and data["entity_id"] == replacement]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.executor.phase, "settling")
+        self.assertFalse(self.activations())
+
+    def test_invalidated_replacement_requires_a_command_and_ack_not_cached_off(self):
+        replacement = self.cfg.heads["guest"]
+        self.ha.replacement_startup_off = lambda entity: True if entity == replacement else None
+        self.executor.shutdown(self.ha.states(), startup_recovery=True)
+        self.ha.replacement_startup_off = lambda entity: False if entity == replacement else None
+        self.ha.ignore.add(replacement)
+        plan = Plan(mode="cool", head_targets_f={"bonus": 72})
+        self.step(plan, 0)
+        self.step(plan, 15)
+        self.assertTrue(any(service == "set_hvac_mode" and data.get("entity_id") == replacement
+                            for _, service, data in self.ha.calls))
+        self.assertEqual(self.executor.phase, "stopping")
+        self.assertFalse(self.activations())
+
     def test_failed_off_ack_never_activates_any_head(self):
         entity = self.cfg.heads["guest"]
         self.ha.data[entity]["state"] = "heat"

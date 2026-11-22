@@ -149,7 +149,21 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                     previous_enabled = enabled
                 settings = (settings_provider(states, config, now, strict=args.live and enabled)
                             if settings_provider else Settings.read(states, config, strict=args.live and enabled))
-                plan = cadence.decide(states, now, settings, unit)
+                if (executor.reserve_revoked_attempt is not None
+                        and executor.reserve_revoked_attempt == cadence.policy.reserve_attempt.offered_at):
+                    cadence.policy.reserve_attempt.stage = "fallback"
+                proof_reader = getattr(ha, "reserve_split_proof", None)
+                reserve_supported = bool(args.live and enabled and active
+                    and callable(proof_reader)
+                    and callable(getattr(ha, "service_reserve_guarded", None))
+                    and callable(getattr(ha, "set_reserve_split_authorization", None)))
+                plan = cadence.decide(states, now, settings, unit,
+                    monotonic_now=started,
+                    reserve_proof_supported=reserve_supported,
+                    reserve_proof=proof_reader() if reserve_supported
+                        and cadence.policy.reserve_attempt.stage != "idle" else None,
+                    reserve_isolated_at=executor.reserve_split_isolated_at(states, started)
+                        if reserve_supported else None)
                 if args.live and enabled:
                     preflight(config, states, executor)
                     if getattr(config, "auxiliary_dynamic_stop", False) and config.heater_entity and getattr(ha, "controls", None) is None:
@@ -174,7 +188,7 @@ def run_loop(args, config: Config, *, ha_client=None, stop_event=None, wake_even
                         # Reconcile startup/reenable through a full off barrier, including heater.
                         context = stop_context(config, "Startup all-off reconciliation", "startup")
                         announce_stop(report, context)
-                        failures = executor.shutdown(states, reason=context["reason"])
+                        failures = executor.shutdown(states, reason=context["reason"], startup_recovery=True)
                         for entity in failures:
                             kind = "Circulation fan" if entity in config.fans.values() else "Climate device"
                             plan.warnings.append(f"{kind} {entity}: startup off command failed; retrying independently")

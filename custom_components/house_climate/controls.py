@@ -13,6 +13,7 @@ import math
 import time
 
 from homeassistant.core import callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 from homeassistant.helpers.storage import Store
 
@@ -79,6 +80,7 @@ class NativeControls:
         self._head_stop_pending = set()
         self._head_off_baselines = {}
         self._head_off_receipts = {}
+        self._replacement_startup_off = {}
         self._uncertain_device_jobs = set()
         self.problem = None
         self._auxiliary_off_error = None
@@ -153,6 +155,23 @@ class NativeControls:
             if not isinstance(uncertain, list) or any(e not in (*devices, *pending, *auxiliary) for e in uncertain):
                 raise HAError("Invalid saved uncertain device commands")
             self._uncertain_device_jobs.update(uncertain)
+            # This journal remembers identity only, never earlier Off or a
+            # prior controller's right to skip. Require a new native report
+            # after this runtime's load and exact registry identity.
+            identities = data.get("replacement_startup_bindings")
+            loaded_at = datetime.now(timezone.utc).timestamp()
+            for entity, binding in identities.items() if isinstance(identities, dict) else ():
+                if not isinstance(binding, dict):
+                    continue
+                identity, boundary = binding.get("identity"), binding.get("not_before")
+                if (entity in self.config.heads.values() and entity not in self.owned
+                        and isinstance(identity, str) and identity
+                        and type(boundary) in (float, int) and math.isfinite(boundary) and boundary > 0):
+                    self._replacement_startup_off[entity] = {
+                        "identity": identity, "native": None, "boundary": max(loaded_at, boundary),
+                        "stop_epoch": self._head_stop_epochs.get(entity), "repair_epoch": 0,
+                        "generation": None,
+                    }
             # A prior process may have dispatched heat while HA still cached Off.
             # Restored auxiliary ownership needs a fresh superseding stop.
             self._auxiliary_heat_possible = bool(self.config.heater_entity in (*self.owned, *self.pending_auxiliaries))
@@ -191,6 +210,9 @@ class NativeControls:
             "auxiliary_stop_revision": self.auxiliary_stop_revision,
             "handoff": self.handoff,
             "generation": self.ownership_generation,
+            "replacement_startup_candidates": tuple(
+                entity for entity, proof in self._replacement_startup_off.items()
+                if proof["generation"] == self.ownership_generation),
             "auxiliary_heartbeat_blocked": self.auxiliary_heartbeat_blocked,
             "auxiliary_heartbeat_reason": self.auxiliary_heartbeat_reason,
             "auxiliary_cleanup_pending": list(self.pending_auxiliaries),
@@ -492,9 +514,21 @@ class NativeControls:
                 # Fence stale queued work before persistence; never roll the
                 # generation back. The old claim stays visible if saving fails.
                 self.ownership_generation += 1
+                replacements = dict(self._replacement_startup_off)
+                if replacement not in owned:
+                    replacements[replacement] = {
+                        "identity": self._replacement_registry_identity(replacement),
+                        "native": native, "boundary": max(boundaries),
+                        "stop_epoch": self._head_stop_epochs.get(replacement),
+                        "repair_epoch": (self.repair_gate.capture(replacement, activation=False)
+                                         if self.repair_gate is not None else None),
+                        "generation": None,
+                    }
                 await self._save(owned, self.pending_fans, handoff=updated, uncertain=uncertain,
-                                 retirement_review_required=True, verify_write=True)
+                                 retirement_review_required=True, replacement_startup_bindings=replacements,
+                                 verify_write=True)
                 self._retirement_review_required = True
+                self._replacement_startup_off = replacements
                 self.owned, self.handoff, self._uncertain_device_jobs = owned, updated, uncertain
                 self._head_possible.discard(retired)
                 self._head_stop_pending.discard(retired)
@@ -505,6 +539,50 @@ class NativeControls:
                 if self.problem and self.problem.startswith(f"Could not stop {retired}:"):
                     self.problem = None
                 self._publish()
+
+    def _replacement_registry_identity(self, entity):
+        registry = self.hass.data.get(er.DATA_REGISTRY)
+        entry = registry.async_get(entity) if registry is not None else None
+        return entry.id if entry is not None else None
+
+    def replacement_startup_off(self, entity, *, claim=False):
+        """Verify the exact retired adapter's replacement, not generic Off."""
+        proof = self._replacement_startup_off.get(entity)
+        if proof is None:
+            return False
+        if (not self.active or not self.enabled or not self.live or self._closing
+                or self._retirement_review_required or self.recovering or self.takeover_pending
+                or entity not in self.owned or tuple(self.config.heads.values()).count(entity) != 1
+                or (not claim and (self._claiming or proof["generation"] != self.ownership_generation))
+                or (claim and proof["generation"] is not None)
+                or entity in self._head_possible or entity in self._head_stop_pending
+                or entity in self._uncertain_device_jobs or self._head_inflight.get(entity, 0)
+                or self._head_stop_epochs.get(entity) != proof["stop_epoch"]
+                or self.stop_jobs({entity}) or self.pending_device_jobs({entity})
+                or any(not task.done() for task in self._handoff_jobs.values())
+                or (self.repair_gate is not None and (self.repair_gate.held(entity)
+                    or self.repair_gate.capture(entity, activation=False) != proof["repair_epoch"]))):
+            return False
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+        component = self.hass.data.get(DATA_INSTANCES, {}).get("climate")
+        native = component.get_entity(entity) if component is not None else None
+        state = self.hass.states.get(entity)
+        now = datetime.now(timezone.utc).timestamp()
+        identity = proof["identity"]
+        same_registry = identity is None or self._replacement_registry_identity(entity) == identity
+        same_native = ((claim and proof["native"] is None and identity is not None)
+                       or native is proof["native"])
+        verified = bool(native is not None and same_native and same_registry
+                    and native.available and native.hvac_mode == "off"
+                    and getattr(native, "hvac_action", None) not in ("heating", "cooling")
+                    and state is not None and state.state == "off" and state.context.user_id is None
+                    and state.attributes.get("hvac_action") not in ("heating", "cooling")
+                    and not state.attributes.get("restored") and not state.attributes.get("assumed_state")
+                    and proof["boundary"] < state.last_reported.timestamp()
+                    and 0 <= now - state.last_reported.timestamp() <= 180)
+        if claim and verified:
+            proof["native"] = native
+        return verified
 
     async def async_retry_handoff(self):
         """Explicitly review a failed preset; never clear auxiliary obligations."""
@@ -666,7 +744,8 @@ class NativeControls:
 
     async def _save(self, devices, pending, *, auxiliary=None,
                     handoff=_CURRENT_PERSISTED, uncertain=_CURRENT_PERSISTED,
-                    retirement_review_required=_CURRENT_PERSISTED, verify_write=False):
+                    retirement_review_required=_CURRENT_PERSISTED,
+                    replacement_startup_bindings=_CURRENT_PERSISTED, verify_write=False):
         intent = self.enabled_intent
         data = {"devices": list(devices), "enabled_intent": intent}
         if self.takeover_pending:
@@ -682,6 +761,13 @@ class NativeControls:
         handoff = self.handoff if handoff is _CURRENT_PERSISTED else handoff
         if handoff is not None:
             data["handoff"] = deepcopy(handoff)
+        bindings = (self._replacement_startup_off if replacement_startup_bindings is _CURRENT_PERSISTED
+                    else replacement_startup_bindings)
+        identities = {entity: {"identity": proof["identity"], "not_before": proof["boundary"]}
+                      for entity, proof in bindings.items() if proof["generation"] is None
+                      and proof["identity"] is not None and entity not in devices}
+        if identities:
+            data["replacement_startup_bindings"] = identities
         if pending:
             data["pending_fans"] = list(pending)
         auxiliary = self.pending_auxiliaries if auxiliary is None else auxiliary
@@ -737,6 +823,10 @@ class NativeControls:
                                 self.ownership_generation += 1
                                 self.pending_fans = pending
                                 self.recovering = not self.enabled
+                                for candidate, proof in self._replacement_startup_off.items():
+                                    if not self.replacement_startup_off(candidate, claim=True):
+                                        proof["native"] = None  # scope survives, skip authority does not
+                                    proof["generation"] = self.ownership_generation
                             self.heartbeat = datetime.now(timezone.utc).timestamp()
                             self.heartbeat_monotonic = time.monotonic()
                 finally:

@@ -90,3 +90,29 @@ cutoffs, and ownership/manual-control safeguards remain in force.
 Automated policy and Home Assistant registry tests cover these rules; physical
 room response and equipment behavior still require installation validation.
 No auxiliary-heater mode fix is included in 0.8.0.
+
+### Guarded auxiliary reserve split (local candidate)
+
+The controller can report a candidate when a preventive heating reserve in the
+auxiliary room competes with actual eligible comfort cooling on an independent
+head. The `reserve_split` diagnostic distinguishes the guarded heating floor
+from the scheduled/selected shared heat stop, and compares ordinary measured
+comfort deficits without displacing the reserve's priority. It projects the raw
+coldest observed probe and worsening trend over the budget for returning to
+heat (confirmation, Off acknowledgement, settling/minimum-Off, Heat
+acknowledgement, and polling). This budget is not a guarantee if equipment
+fails to report. The diagnostic is not stored in Recorder.
+
+Where native guarded dispatch is available, the candidate keeps shared heat
+while the normal auxiliary heat request is being acknowledged. It asks for
+shared Off only while verified auxiliary heat and reserve margin remain
+current, then waits for two distinct qualified non-declining room observations
+after the shared system's confirmed Off settle time. No earlier experiments
+or improvement while the shared heat pump is running are accepted as
+independent capacity. Pending and active attempts recheck every worker poll;
+native cooling writes are additionally fenced on the HA loop. Stale or
+declining evidence, an interlock change, or a failed acknowledgement returns
+to ordinary heat arbitration without retaining split cooling on a minimum-run
+hold. The actual compressor Off and restart guards still apply. Two distinct
+observations qualify the current attempt only and do not guarantee future
+performance. No settings or temperature targets change.

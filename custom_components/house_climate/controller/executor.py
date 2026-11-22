@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
@@ -119,6 +120,9 @@ class Executor:
         self._acknowledged_head_modes: dict[str, str] = {}
         self._off_requested_since_activation: set[str] = set()
         self._diagnostic_plan: Plan | None = None
+        self.reserve_revoked_attempt = None
+        self._replacement_startup_checks = set()
+        self._replacement_startup_off_requests = {}
         self._shared_stop_context: tuple[str, str] | None = None
         self.shared_stops: dict[str, SharedStop] = {}
         self.head_transitions = HeadTransitions(config.heads.values())
@@ -216,7 +220,14 @@ class Executor:
             guarded = (head_activation and data.get("hvac_mode") in ("heat", "cool") and plan is not None
                        and (head in plan.window_authorization_heads
                             or window_relief_required(self.config, head, plan, states)))
-            if guarded:
+            reserve_ticket = (getattr(plan, "reserve_split_ticket", None)
+                              if head_activation and data.get("hvac_mode") == "cool" else None)
+            if reserve_ticket is not None:
+                guarded_service = getattr(self.ha, "service_reserve_guarded", None)
+                if (guarded or not callable(guarded_service) or entity not in reserve_ticket["heads"]):
+                    raise HAActivationDeferred("Reserve cooling requires current native proof without a window exception")
+                guarded_service(entity.split(".")[0], service, ticket=reserve_ticket, entity_id=entity, **data)
+            elif guarded:
                 ticket = plan.window_authorizations.get(head)
                 guarded_service = getattr(self.ha, "service_guarded", None)
                 if ticket is None or guarded_service is None:
@@ -404,6 +415,9 @@ class Executor:
                 self._refresh_needed = True
             return acknowledged
         except HAActivationDeferred:
+            plan = self._diagnostic_plan
+            if data.get("hvac_mode") == "cool" and getattr(plan, "reserve_split_ticket", None):
+                self._revoke_reserve_cooling(plan)
             # Temporary native heartbeat uncertainty is not a device failure.
             return False
         except (CommandTimeout, HAError) as exc:
@@ -706,7 +720,9 @@ class Executor:
 
     def _retain_minimum_runs(self, plan, states, now):
         minimum = self.config.head_minimum_run_seconds
-        if (minimum <= 0 or self.phase != "running" or self.direction not in ("heat", "cool")
+        if (getattr(plan, "reserve_split_stop_shared", False)
+                or (getattr(plan, "reserve_split_stop_cooling", False) and self.direction == "cool")
+                or minimum <= 0 or self.phase != "running" or self.direction not in ("heat", "cool")
                 or plan.mode not in ("off", self.direction)):
             return
         incompatible = any(self.available(states.get(entity, {}))
@@ -876,6 +892,21 @@ class Executor:
                        "Off confirmed" if stop.confirmed else "Waiting for shared-head Off confirmation"),
         } for entity, stop in self.shared_stops.items()}
 
+    def _replacement_off_report_fresh(self, entity, observed):
+        request = self._replacement_startup_off_requests.get(entity)
+        if request is None:
+            return True
+        attrs = observed.get("attributes", {})
+        if attrs.get("assumed_state") or attrs.get("restored"):
+            return False
+        try:
+            report = datetime.fromisoformat(observed["last_reported"])
+            instant = datetime.now(timezone.utc).timestamp()
+            return (report.tzinfo is not None and 0 <= instant - report.timestamp() <= 180
+                    and report.timestamp() > request[2])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+
     def _shared_off(self, entity, states, now):
         """Three initial Off attempts at 0/15/30, failure at 45 seconds.
 
@@ -884,8 +915,20 @@ class Executor:
         """
         observed = states.get(entity, {})
         stop = self.shared_stops.get(entity)
+        if entity in self._replacement_startup_checks:
+            if (self.ready(observed) and self.reports_off(observed)
+                    and entity not in self.pending and entity not in self.recoveries
+                    and self.ha.replacement_startup_off(entity)):
+                return True
+            self._replacement_startup_checks.discard(entity)
+            self._replacement_startup_off_requests[entity] = (
+                self.marker(observed), False, datetime.now(timezone.utc).timestamp())
+        if stop is None and entity in self._replacement_startup_off_requests:
+            baseline, receipt, _ = self._replacement_startup_off_requests[entity]
+            stop = self.shared_stops[entity] = SharedStop(now, baseline, receipt=receipt)
         if stop is not None and stop.confirmed:
             if (self.ready(observed) and self.reports_off(observed)
+                    and self._replacement_off_report_fresh(entity, observed)
                     and entity not in self.pending and entity not in self.recoveries):
                 return True
             stop = self.shared_stops[entity] = SharedStop(now, self.marker(observed))
@@ -898,6 +941,7 @@ class Executor:
             baseline = recovery.baseline if recovery else pending.baseline if pending else self.marker(observed)
             stop = self.shared_stops[entity] = SharedStop(now, baseline)
         if (stop.receipt and self.ready(observed) and self.reports_off(observed)
+                and self._replacement_off_report_fresh(entity, observed)
                 and self.marker(observed) != stop.baseline):
             stop.confirmed = True
             self._clear_recovery(entity)
@@ -917,7 +961,11 @@ class Executor:
                     reason=f"Off was not confirmed within 45 seconds ({stop.attempts} attempts)")
             else:
                 recovered = self._recovery_off(entity, states, now)
-                stop.confirmed = recovered
+                stop.confirmed = recovered and self._replacement_off_report_fresh(entity, observed)
+                if recovered and not stop.confirmed:
+                    self._issue(entity, "Replacement head Off feedback is not fresh native evidence", states)
+                    self.recoveries[entity].last_attempt = now
+                    return False
                 return recovered
             return False
         if (stop.attempts >= 3 or now < stop.since
@@ -1277,8 +1325,63 @@ class Executor:
         if failure:
             plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
 
+    def reserve_split_isolated_at(self, states, now):
+        if (self.phase != "settling" or self.all_off_since is None
+                or now < (settled_at := self.all_off_since + self.config.off_settle_seconds)):
+            return None
+        for entity in self.config.heads.values():
+            state = states.get(entity, {})
+            attrs = state.get("attributes", {})
+            if (not self.ready(state) or not self.reports_off(state)
+                    or attrs.get("restored") or attrs.get("assumed_state")
+                    or entity in self.pending or entity in self.recoveries
+                    or (state.get("integration_repair") or {}).get("held")):
+                return None
+        return settled_at
+
+    def _reserve_cooling_ready(self, plan):
+        ticket = getattr(plan, "reserve_split_ticket", None)
+        if ticket is None:
+            return True
+        proof_reader = getattr(self.ha, "reserve_split_proof", None)
+        proof = proof_reader() if callable(proof_reader) and plan.heater_on else None
+        return bool(proof and proof.get("ready") is True
+            and self.reserve_revoked_attempt != ticket["attempt_id"]
+            and time.monotonic() < ticket["expires_at_monotonic"]
+            and all(proof.get(key) == ticket[key]
+                    for key in ("generation", "auxiliary_generation", "stop_revision", "stop_epoch", "repair_epochs")))
+
+    def _revoke_reserve_cooling(self, plan):
+        self.reserve_revoked_attempt = plan.reserve_split_ticket["attempt_id"]
+        setter = getattr(self.ha, "set_reserve_split_authorization", None)
+        if callable(setter):
+            setter(None)
+
+    def _inhibit_revoked_reserve_cooling(self, plan, states):
+        self._revoke_reserve_cooling(plan)
+        for entity, minimum in plan.fan_minimum_percentages.items():
+            if entity in plan.fans:
+                plan.fans[entity] = min(plan.fans[entity], math.ceil(minimum))
+        plan.fan_head_assists.clear()
+        plan.fan_airflow.clear()
+        if self.phase == "running" and self.direction == "cool":
+            return True
+        return any(states.get(entity, {}).get("state") == "cool"
+                   or ((pending := self.pending.get(entity)) is not None
+                       and dict(pending.command[1]).get("hvac_mode") == "cool")
+                   for entity in self.config.heads.values())
+
     def step(self, plan: Plan, states: dict, now: float):
         self._diagnostic_plan = plan
+        reserve_setter = getattr(self.ha, "set_reserve_split_authorization", None)
+        reserve_ticket = getattr(plan, "reserve_split_ticket", None)
+        if callable(reserve_setter):
+            accepted = reserve_setter(reserve_ticket if reserve_ticket
+                                      and self._reserve_cooling_ready(plan) else None)
+            if reserve_ticket is not None and accepted is False:
+                self._revoke_reserve_cooling(plan)
+        elif reserve_ticket is not None:
+            self._revoke_reserve_cooling(plan)
         reset_airflow = getattr(self.ha, "reset_airflow_authorizations", None)
         if callable(reset_airflow):
             reset_airflow()
@@ -1368,6 +1471,10 @@ class Executor:
                 self.head_cycles[entity] = HeadCycle()
 
     def shared(self, plan: Plan, states: dict, now: float):
+        if not self._reserve_cooling_ready(plan):
+            if self._inhibit_revoked_reserve_cooling(plan, states):
+                self.begin_stop(states, now, reason="Auxiliary reserve proof revoked", kind="changeover")
+            return
         if self.phase == "new":
             self.begin_stop(states, now, reason="Startup all-off reconciliation", kind="startup")
             return
@@ -1389,12 +1496,16 @@ class Executor:
                 self._shared_off(entity, states, now)
             all_off = all(self.ready(states.get(entity, {})) and self.reports_off(states.get(entity, {}))
                           and entity not in self.pending and entity not in self.recoveries
+                          and (entity not in self._replacement_startup_off_requests
+                               or self.shared_stops[entity].confirmed)
                           for entity in self.config.heads.values())
             if not all_off:
                 if any(stop.failed for stop in self.shared_stops.values()):
                     plan.warnings.append("Shared-head Off unconfirmed after 45 seconds; activation blocked; safety cleanup continues")
                 return
             self.phase, self.all_off_since = "settling", now
+            self._replacement_startup_checks.clear()
+            self._replacement_startup_off_requests.clear()
         if self.phase == "settling":
             if any(not self.ready(states.get(entity, {})) or not self.reports_off(states.get(entity, {}))
                    for entity in self.config.heads.values()):
@@ -1410,6 +1521,10 @@ class Executor:
                 if key not in plan.head_targets_f:
                     self.off(entity, states, now)
             for key, target in plan.head_targets_f.items():
+                if not self._reserve_cooling_ready(plan):
+                    if self._inhibit_revoked_reserve_cooling(plan, states):
+                        self.begin_stop(states, now, reason="Auxiliary reserve proof revoked", kind="changeover")
+                    return
                 entity = self.config.heads[key]
                 call = plan.head_call_targets_f.get(key)
                 if call is None:
@@ -1424,15 +1539,25 @@ class Executor:
                     pass
                 plan.head_call_targets_f[key] = call
                 self.climate(entity, plan.mode, call, states, now, comfort_target_f=target)
+                if (getattr(plan, "reserve_split_ticket", None) is not None
+                        and self.reserve_revoked_attempt == plan.reserve_split_ticket["attempt_id"]):
+                    if self._inhibit_revoked_reserve_cooling(plan, states):
+                        self.begin_stop(states, now, reason="Auxiliary reserve proof revoked", kind="changeover")
+                    return
 
-    def shutdown(self, states=None, *, reason="Controller shutdown") -> list[str]:
+    def shutdown(self, states=None, *, reason="Controller shutdown", startup_recovery=False) -> list[str]:
         """Best effort across every device even when one service call fails."""
+        reserve_setter = getattr(self.ha, "set_reserve_split_authorization", None)
+        if callable(reserve_setter):
+            reserve_setter(None)
         reset_airflow = getattr(self.ha, "reset_airflow_authorizations", None)
         if callable(reset_airflow):
             reset_airflow()
         failures = []
         snapshot = self._states if states is None else states
         old_pending = dict(self.pending)
+        self._replacement_startup_checks.clear()
+        self._replacement_startup_off_requests.clear()
         if self._auxiliary_startup is not None:
             entity = self.config.heater_entity
             pending = self.pending.get(entity)
@@ -1446,6 +1571,17 @@ class Executor:
                 continue
             request_id = None
             try:
+                replacement_proof = getattr(self.ha, "replacement_startup_off", None)
+                if startup_recovery and entity in self.config.heads.values() and callable(replacement_proof):
+                    proof = replacement_proof(entity)
+                    if proof is not None:
+                        observed = snapshot.get(entity, {})
+                        if (proof is True and entity not in old_pending and entity not in self.recoveries
+                                and self.ready(observed) and self.reports_off(observed)):
+                            self._replacement_startup_checks.add(entity)
+                            continue
+                        self._replacement_startup_off_requests[entity] = (
+                            self.marker(observed), False, datetime.now(timezone.utc).timestamp())
                 if entity.startswith("climate."):
                     self._record_controller_head_stop(entity, snapshot, reason=reason, kind="shutdown",
                                                       previous_pending=old_pending.get(entity))
@@ -1453,6 +1589,9 @@ class Executor:
                         entity, "command_requested", snapshot.get(entity, {}),
                         service="set_hvac_mode", data={"hvac_mode": "off"}, reason=reason)
                     self.ha.service("climate", "set_hvac_mode", entity_id=entity, hvac_mode="off")
+                    if entity in self._replacement_startup_off_requests:
+                        baseline, _, boundary = self._replacement_startup_off_requests[entity]
+                        self._replacement_startup_off_requests[entity] = (baseline, True, boundary)
                     self.head_transitions.record(
                         entity, "service_returned", snapshot.get(entity, {}),
                         command_id=request_id, service="set_hvac_mode", data={"hvac_mode": "off"})

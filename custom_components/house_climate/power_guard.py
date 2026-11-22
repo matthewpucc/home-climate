@@ -1355,6 +1355,30 @@ class HeaterPowerGuard:
             from .controller.ha import HAActivationDeferred
             raise HAActivationDeferred(self._reason or "Heater power is not available")
 
+    def reserve_split_heating_evidence(self, *, maximum_age, not_before):
+        """Return a dedicated heat-draw report only under current guarded supply."""
+        entity, units, threshold, _ = self._heater_meter()
+        if (not self.live or not self._active or self.blocked or self.manual_control
+                or self._soc_grace_deadline is not None or not entity):
+            return None
+        try:
+            now = self._wall_clock()
+            states = self._states()
+            available = evaluate_power(states, self.bindings, now)
+            if available.issue or available.meter_issue or available.ac_enabled is not True:
+                return None
+            state = states.get(entity)
+            _, attrs, reported = _state_parts(state)
+            stamp = _timestamp(reported)
+            age = min(maximum_age, TELEMETRY_MAX_AGE_SECONDS)
+            if (attrs.get("restored") or attrs.get("assumed_state")
+                    or not not_before <= stamp <= now
+                    or _measurement(states, entity, units, now, maximum_age=age) < threshold):
+                return None
+            return stamp
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+
     def _schedule_check(self):
         if self._closed:
             return
