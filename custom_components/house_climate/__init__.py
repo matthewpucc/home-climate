@@ -74,6 +74,22 @@ async def async_setup_entry(hass, entry):
             generate_configuration, runtime.config, hass.config.config_dir
         )
 
+    async def retire_recovery_adapter(call):
+        if (hass.data.get(DOMAIN) is not runtime or runtime.stop_event.is_set()
+                or runtime.controls is None):
+            raise HomeAssistantError("Retired adapter recovery is unavailable")
+        user = await hass.auth.async_get_user(call.context.user_id) if call.context.user_id else None
+        if user is None or not user.is_admin or call.context.parent_id is not None:
+            raise HomeAssistantError("Run retired adapter recovery directly as a Home Assistant administrator")
+        if hass.data.get(DOMAIN) is not runtime or runtime.stop_event.is_set():
+            raise HomeAssistantError("Retired adapter recovery is unavailable")
+        try:
+            await runtime.controls.async_retire_recovery_adapter(
+                call.data["retired_entity_id"], call.data["replacement_entity_id"],
+                confirm_disconnected_same_head=call.data["confirm_disconnected_same_head"])
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise HomeAssistantError(str(exc)) from exc
+
     async def commission_heater_relay(call):
         # A registered action is not permission to run during unload, Preview,
         # or against a replacement runtime. The guard checks physical evidence
@@ -166,6 +182,12 @@ async def async_setup_entry(hass, entry):
     hass.services.async_register(DOMAIN, "supervised_heater_restore", supervised_heater_restore,
         schema=vol.Schema({vol.Required(field): vol.All(bool, vol.In((True,))) for field in
                            ("confirm", "operator_present", "local_cutoff_available")}))
+    hass.services.async_register(DOMAIN, "retire_recovery_adapter", retire_recovery_adapter,
+        schema=vol.Schema({
+            vol.Required("retired_entity_id"): str,
+            vol.Required("replacement_entity_id"): str,
+            vol.Required("confirm_disconnected_same_head"): vol.All(bool, vol.In((True,))),
+        }))
     hass.services.async_register(DOMAIN, "generate_package", generate_package)
     hass.services.async_register(
         DOMAIN, "commission_heater_relay", commission_heater_relay,
@@ -198,6 +220,7 @@ async def async_unload_entry(hass, entry):
             hass.services.async_remove(DOMAIN, "acknowledge_head_fan_restoration")
             hass.services.async_remove(DOMAIN, "start_head_fan_trial")
             hass.services.async_remove(DOMAIN, "cancel_head_fan_trial")
+            hass.services.async_remove(DOMAIN, "retire_recovery_adapter")
             hass.services.async_remove(DOMAIN, "generate_package")
             hass.services.async_remove(DOMAIN, "thermal_history_query")
             hass.services.async_remove(DOMAIN, "commission_heater_relay")

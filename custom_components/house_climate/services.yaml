@@ -136,3 +136,20 @@ acknowledge_head_fan_restoration:
       required: true
       selector:
         boolean:
+retire_recovery_adapter:
+  name: Retire disconnected recovery adapter
+  description: Forget one disconnected old head adapter in interrupted recovery after the replacement reports fresh Off. Never sends a device command.
+  fields:
+    retired_entity_id:
+      required: true
+      selector:
+        text:
+    replacement_entity_id:
+      required: true
+      selector:
+        entity:
+          domain: climate
+    confirm_disconnected_same_head:
+      required: true
+      selector:
+        boolean:
