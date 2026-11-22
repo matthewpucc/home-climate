@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.31
 
 - Expose [native heat-pump mode command attribution](docs/mode-command-diagnostics.md) through Home Assistant numeric diagnostics, with distinct reported feedback and shutdown-preset evidence retained across normal restarts.
 
