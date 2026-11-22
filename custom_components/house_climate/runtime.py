@@ -38,6 +38,7 @@ UNLOAD_ACK_TIMEOUT_SECONDS = 120
 WORKER_STOP_TIMEOUT_SECONDS = 45
 SHUTDOWN_RECHECK_SECONDS = 15
 NATIVE_HEARTBEAT_DISPATCH_SECONDS = 5
+ROUTINE_AUXILIARY_OFF_QUEUE_SECONDS = 15
 HEARTBEAT_WAIT_REASON = "Waiting for Home Assistant to confirm the controller heartbeat; new activations are deferred"
 
 
@@ -64,6 +65,8 @@ class ServiceOperation:
     started: bool = False
     controls: object | None = None
     observation: dict | None = None
+    queued_off_started: asyncio.Future | None = None
+    late_queued_off: bool = False
 
 
 def controller_entity_ids(config):
@@ -199,8 +202,15 @@ class NativeAPI:
             generation = self.controls.command_generation(body.get("entity_id"))
         proof_read = body is None and (path == "reserve_split_proof"
                                      or path.startswith("replacement_startup_off/"))
-        timeout = .5 if proof_read else 2 if self.stop_event.is_set() else 10
-        deadline = time.monotonic() + timeout
+        stopping = self.stop_event.is_set()
+        timeout = .5 if proof_read else 2 if stopping else 10
+        queued_at = time.monotonic()
+        deadline = queued_at + timeout
+        routine_auxiliary_off = (not stopping and self.controls is not None and not activation
+                                 and path == "services/climate/set_hvac_mode" and body is not None
+                                 and body.get("hvac_mode") == "off" and self.config.heater_entity
+                                 and body.get("entity_id") == self.config.heater_entity)
+        off_queue_deadline = queued_at + ROUTINE_AUXILIARY_OFF_QUEUE_SECONDS if routine_auxiliary_off else None
         bounded_activation = activation and activation_deadline is not None
         if bounded_activation:
             deadline = min(deadline, self._activation_deadline(activation_deadline))
@@ -213,10 +223,12 @@ class NativeAPI:
                                        or airflow_authorization is not None or cooling) else None)
         future = asyncio.run_coroutine_threadsafe(
             self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
-                                repair_epoch=repair_epoch, mode_recovery_reason=mode_recovery_reason), self.hass.loop
+                                repair_epoch=repair_epoch, off_queue_deadline=off_queue_deadline,
+                                mode_recovery_reason=mode_recovery_reason), self.hass.loop
         )
         try:
-            wait = max(0, deadline - time.monotonic()) if bounded_activation or proof_read else timeout + 1
+            wait = (max(0, deadline - time.monotonic()) if bounded_activation or proof_read else
+                    (ROUTINE_AUXILIARY_OFF_QUEUE_SECONDS if routine_auxiliary_off else timeout) + 1)
             return future.result(timeout=wait)
         except FutureTimeout:
             # Cancellation alone cannot prevent a queued coroutine from starting
@@ -476,10 +488,12 @@ class NativeAPI:
         return result
 
     async def _async_request(self, path, body, deadline, *, generation=None, dispatch=None,
-                             repair_epoch=None, mode_recovery_reason=None):
+                             repair_epoch=None, off_queue_deadline=None, mode_recovery_reason=None):
         # Cancelling the worker's future is not enough: a queued coroutine can
         # start before its cancellation callback when the loop resumes.
-        remaining = deadline - time.monotonic()
+        dispatch_deadline = (off_queue_deadline if off_queue_deadline is not None and not self.stop_event.is_set()
+                             else deadline)
+        remaining = dispatch_deadline - time.monotonic()
         if remaining <= 0:
             if dispatch is not None and dispatch.abandon_if_queued():
                 raise HAActivationDeferred(
@@ -533,11 +547,18 @@ class NativeAPI:
         operation = ServiceOperation(body.get("entity_id"), activation, controls=controls)
         if (controls and body.get("entity_id") == controls.config.heater_entity
                 and domain == "climate" and service == "set_hvac_mode" and body.get("hvac_mode") == "off"):
+            if any(existing.entity == operation.entity and existing.queued_off_started is not None
+                   and (not existing.started or existing.late_queued_off) and not job.done()
+                   for job, existing in self._service_jobs.items()):
+                raise HAError("Previous auxiliary Off service is still pending; no duplicate dispatched")
+            if off_queue_deadline is not None:
+                operation.queued_off_started = self.hass.loop.create_future()
             operation.observation = controls.observations.record(
                 controls, "off_requested", source="worker", request_generation=generation)
         task = self.hass.async_create_background_task(
             self._async_service_job(path, domain, service, body, deadline, activation,
-                                    generation, dispatch, repair_epoch, operation, mode_recovery_reason=mode_recovery_reason),
+                                    generation, dispatch, repair_epoch, operation,
+                                    off_queue_deadline=off_queue_deadline, mode_recovery_reason=mode_recovery_reason),
             "Home Climate device service", eager_start=False)
         self._service_jobs[task] = operation
         if controls is not None:
@@ -546,6 +567,10 @@ class NativeAPI:
             controls.service_inflight += 1
         task.add_done_callback(self._service_job_done)
         try:
+            if operation.queued_off_started is not None:
+                await self._await_routine_off_dispatch(task, operation.queued_off_started,
+                                                       dispatch_deadline, deadline, path)
+                return []
             done, _pending = await asyncio.wait({task}, timeout=remaining)
             if not done:
                 raise TimeoutError()
@@ -555,6 +580,28 @@ class NativeAPI:
         except Exception as exc:
             raise HAError(f"Home Assistant native operation failed: {path}: {exc}") from exc
         return []
+
+    @staticmethod
+    async def _await_routine_off_dispatch(task, started, dispatch_deadline, response_deadline, path):
+        """Wait longer only for entry to the HA service, keeping the old response deadline."""
+        try:
+            # Waiting for either future never cancels an actual HA service.
+            done, _ = await asyncio.wait({task, started}, timeout=max(0, dispatch_deadline - time.monotonic()),
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if started in done and started.result() >= response_deadline:
+                raise HAError(f"Home Assistant native Off dispatched after response deadline: {path}; "
+                              "service result unresolved")
+            if task in done:
+                task.result()
+                return
+            if started not in done:
+                raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
+            done, _ = await asyncio.wait({task}, timeout=max(0, response_deadline - time.monotonic()))
+            if task not in done:
+                raise TimeoutError()
+            task.result()
+        finally:
+            started.cancel()
 
     def _service_job_done(self, task):
         operation = self._service_jobs.pop(task, None)
@@ -591,10 +638,13 @@ class NativeAPI:
         return sorted(uncertain)
 
     async def _async_service_job(self, path, domain, service, body, deadline, activation,
-                                  generation, dispatch, repair_epoch, operation, *, mode_recovery_reason=None):
+                                  generation, dispatch, repair_epoch, operation, *, off_queue_deadline=None,
+                                  mode_recovery_reason=None):
         if activation and self.stop_event.is_set():
             raise HAStopping("Controller is stopping; activation was not dispatched")
-        if time.monotonic() >= deadline:
+        dispatch_deadline = (off_queue_deadline if off_queue_deadline is not None and not self.stop_event.is_set()
+                             else deadline)
+        if time.monotonic() >= dispatch_deadline:
             if dispatch is not None and dispatch.abandon_if_queued():
                 raise HAActivationDeferred("Head service expired before actual dispatch")
             raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
@@ -683,12 +733,21 @@ class NativeAPI:
         auxiliary_off = bool(
             controls and body.get("entity_id") == controls.config.heater_entity
             and service == "set_hvac_mode" and body.get("hvac_mode") == "off")
+        off_started_at = time.monotonic() if operation.queued_off_started is not None else None
+        if off_started_at is not None and (
+                off_started_at >= dispatch_deadline
+                or (off_started_at >= deadline and self.stop_event.is_set())):
+            raise HAError(f"Home Assistant native operation expired before dispatch: {path}")
         off_receipt = controls.auxiliary_off_started() if auxiliary_off else None
         head_off_receipt = (controls.head_off_started(body.get("entity_id"))
                             if controls and domain == "climate" and service == "set_hvac_mode"
                             and body.get("hvac_mode") == "off" else None)
         try:
             operation.started = True
+            if off_started_at is not None:
+                operation.late_queued_off = off_started_at >= deadline
+                if not operation.queued_off_started.done():
+                    operation.queued_off_started.set_result(off_started_at)
             if (auxiliary_off and self.power_guard is not None
                     and getattr(self.power_guard, "emergency_fallback_enabled", False) is True):
                 operation.observation = controls.observations.record(
