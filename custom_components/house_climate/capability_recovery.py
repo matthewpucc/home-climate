@@ -283,7 +283,7 @@ class CapabilityRecovery:
         await api._async_request(
             "services/climate/set_hvac_mode", {"entity_id": entity, "hvac_mode": "off"},
             time.monotonic() + 10, generation=self.runtime.controls.ownership_generation,
-            repair_epoch=api.repair_gate.capture(entity, activation=False))
+            repair_epoch=api.repair_gate.capture(entity, activation=False), mode_recovery_reason="integration_repair")
 
     async def _quiesce(self, row, required, phase):
         """Retain the first report boundary through ordinary stop retries."""

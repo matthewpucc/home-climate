@@ -667,7 +667,8 @@ async def step(controls):
                 request["dispatched_at"] = now()
                 controls.head_activation_started(entity)
                 started = True
-                await controls.hass.services.async_call(domain, service, {"entity_id": entity, **data}, blocking=True)
+                await controls.mode_diagnostics.call(domain, service, {"entity_id": entity, **data},
+                                                     path="shutdown_handoff", reason="terminal_preset")
             except Exception as exc:
                 if started:
                     request["service_failed"] = True

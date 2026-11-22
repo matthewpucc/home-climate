@@ -156,6 +156,17 @@ class HandoffRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(handoff._matches(self.hass.states.get(self.head),
                          {"hvac_mode": "cool", "target_temp_low": 68, "target_temp_high": 73}))
 
+    async def test_terminal_auto_uses_persistent_handoff_bucket(self):
+        from custom_components.house_climate.mode_diagnostics import MODE, OUTCOME, PATH, REASON
+
+        self.report_native()
+        await self.first()
+        values = self.controls.mode_diagnostics.values(self.head)
+        self.assertEqual(values["command_path_code"], PATH["shutdown_handoff"])
+        self.assertEqual(values["command_reason_code"], REASON["terminal_preset"])
+        self.assertEqual(values["handoff_mode_code"], MODE["auto"])
+        self.assertEqual(values["handoff_outcome_code"], OUTCOME["returned"])
+
     async def test_native_auto_rounded_midpoint_requires_fresh_mode_and_single_target(self):
         self.report_native(at=self.wall - 1)
         self.default_response = "no_report"

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.31
+
+- Expose [native heat-pump mode command attribution](docs/mode-command-diagnostics.md) through Home Assistant numeric diagnostics, with distinct reported feedback and shutdown-preset evidence retained across normal restarts.
+
 ## 0.9.30
 
 - Let stronger eligible cooling compete with a preventive heating reserve through a guarded Dyson trial. Keep heating until auxiliary heat is verified, then require fresh room readings after shared Off. Recheck throughout cooling and return to normal protective arbitration if the proof is lost; heating limits and equipment interlocks are unchanged.
