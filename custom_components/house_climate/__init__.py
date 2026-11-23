@@ -12,7 +12,7 @@ from homeassistant.helpers.start import async_at_started
 import voluptuous as vol
 
 from .configuration import generate_configuration, entry_configuration, validate_actuators
-from .const import CONF_LIVE, DOMAIN, NAME
+from .const import CONF_LIVE, CONF_THERMAL_MCP, DOMAIN, NAME
 from .runtime import ControllerRuntime
 
 PLATFORMS = [Platform.SENSOR, Platform.SWITCH, Platform.BUTTON, Platform.CLIMATE, Platform.NUMBER, Platform.FAN]
@@ -193,6 +193,9 @@ async def async_setup_entry(hass, entry):
         DOMAIN, "commission_heater_relay", commission_heater_relay,
         schema=vol.Schema({vol.Required("confirm"): vol.All(bool, vol.In((True,)))}),
     )
+    if values.get(CONF_THERMAL_MCP) is True and runtime.thermal_storage is not None:
+        from .thermal_mcp import register
+        entry.async_on_unload(register(hass, entry, runtime))
     entry.async_on_unload(entry.add_update_listener(async_update_options))
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, runtime.async_stop))
     entry.async_on_unload(async_at_started(hass, runtime.async_start))

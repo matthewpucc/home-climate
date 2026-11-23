@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add an opt-in, administrator-only [read-only thermal history MCP tool](docs/thermal-history.md#optional-read-only-mcp-tool), with bounded access to the current Home Climate entry and no equipment operations.
+
 ## 0.9.32
 
 - Give routine auxiliary-heater Off requests up to 15 seconds to enter Home Assistant's service, without extending the response wait, accepting a late dispatch as Off proof, or changing emergency cutoff timing.

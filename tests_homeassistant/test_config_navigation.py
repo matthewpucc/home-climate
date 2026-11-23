@@ -63,11 +63,12 @@ class FixedFlowTests(unittest.IsolatedAsyncioTestCase):
         manager, form, _ = await self.start()
         fields = probatio.to_field_list(form["data_schema"], custom_serializer=cv.custom_serializer)
         self.assertEqual([field["name"] for field in fields],
-                         ["live", *ProtectionTemperatures().to_dict(), "rooms", "auxiliary_policy",
+                         ["live", "thermal_history_mcp", *ProtectionTemperatures().to_dict(), "rooms", "auxiliary_policy",
                           "seasonal_policy", "purifiers", "fallback", "heartbeat_timeout_seconds",
                           "auxiliary_heartbeat_timeout_seconds"])
         self.assertEqual(form["step_id"], "user")
         self.assertFalse(form["data_schema"]({})["live"])
+        self.assertFalse(form["data_schema"]({})["thermal_history_mcp"])
         saved = await manager.async_configure(form["flow_id"], {"live": False})
         self.assertEqual(saved["type"], "create_entry")
         self.assertEqual({key: value for key, value in saved["data"].items() if key != "policy_settings"},
