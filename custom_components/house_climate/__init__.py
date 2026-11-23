@@ -193,6 +193,8 @@ async def async_setup_entry(hass, entry):
         DOMAIN, "commission_heater_relay", commission_heater_relay,
         schema=vol.Schema({vol.Required("confirm"): vol.All(bool, vol.In((True,)))}),
     )
+    from .prometheus_metrics import async_attach
+    await async_attach(hass, entry, runtime)
     entry.async_on_unload(entry.add_update_listener(async_update_options))
     entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, runtime.async_stop))
     entry.async_on_unload(async_at_started(hass, runtime.async_start))
