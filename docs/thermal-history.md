@@ -85,6 +85,50 @@ detailed decisions include the process's cumulative dropped-record count. A
 missing segment is not proof of stable conditions. Raw lookback and summary
 availability are separate; `coverage_complete` is deliberately false.
 
+### Optional read-only MCP tool
+
+Home Climate can publish the dedicated `house_climate_thermal_history` tool set
+with one tool, `GetThermalHistory`. It is **off by default**. In Home Climate's
+integration options, enable **Allow read-only thermal history through MCP** only
+if you intend authenticated Home Assistant administrators to be able to query
+this history from an MCP client. HA's [MCP Server integration][ha-mcp] must
+already be configured. An already-connected client may need to reconnect or
+refresh discovery. This Home Climate option does not enable live
+equipment commands, install/configure MCP Server, or change any existing
+connector or credentials.
+
+For just this tool set, point the client at **`/api/mcp/house_climate_thermal_history`**
+on your Home Assistant server and use an authorized Home Assistant administrator
+connection. Use HA's main MCP URL only if you intend to share its other
+configured tool sets; an administrator's dedicated API URL does not inherit
+the main URL's filter or read-only setting. This tool set contains no writes
+and is not offered to conversation/voice clients. Turning the Home Climate
+option off revokes this tool set independently of the MCP Server settings.
+Treat the history as private: it can reveal room labels, temperatures and
+activity patterns. Do not expose a general administrator token to an
+untrusted client.
+
+Give `start` (**inclusive**) and `end` (**exclusive**) as past UTC Unix
+seconds, with a maximum span of **7 days**, and optionally `limit` (**1–50**
+per category; default **20**). At most **32 decision** rows, **64 KiB** of
+projected result data and **one in-flight query** are allowed. The query only
+reads the Home Climate database and the current integration entry; it cannot
+select a file, another entry, an arbitrary entity or SQL. A reload or access
+revocation invalidates outstanding results. There is no room parameter, so
+every result may contain multiple rooms.
+
+The response includes projected decision temperatures and request targets,
+source observations, rollups and planned-demand episode summaries, but not
+raw decision or episode context, free-form warnings, internal
+entry/session/source IDs, raw configuration metadata, or other HA history.
+Read the [enum reference](thermal-history-enums.md) for exact values and
+attribution limits. A successful empty result differs from an unavailable or
+busy query. Overlapping rollup buckets are not split or interpolated, retained
+data is not guaranteed to cover the interval, and reported HVAC commands are
+not measured physical operation.
+
+[ha-mcp]: https://www.home-assistant.io/integrations/mcp_server/
+
 ## Resource and failure behavior
 
 One daemon writer handles SQLite off HA's event loop with WAL, FULL synchronous

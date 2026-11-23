@@ -210,7 +210,7 @@ class ThermalHistory:
             values = (n+old[0],total+old[1],squares+old[2],min(lo,old[3]),max(hi,old[4]),min(first,old[5]),max(last,old[6]),gap)
         self.db.execute("INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*key,*values))
 
-    def lookback(self, start, end, *, limit=200):
+    def lookback(self, start, end, *, limit=200, entry_id=None, include_regimes=True):
         if not finite(start) or not finite(end) or end <= start or not 1 <= limit <= 1000:
             raise ValueError("Invalid lookback bounds")
         result = {"schema":SCHEMA,"start":start,"end":end,"semantics":"distinct source-report statistics; not time-weighted coverage or physical HVAC runtime"}
@@ -221,6 +221,8 @@ class ThermalHistory:
             ("summaries","bucket<? AND bucket+width>?",(end,start)),
             ("episodes","start<? AND COALESCE(end,last)>=?",(end,start))):
             row_limit = min(limit,32) if table == "decisions" else limit
+            if entry_id is not None:
+                where, args = f"entry=? AND ({where})", (entry_id, *args)
             cursor = self.db.execute(f"SELECT * FROM {table} WHERE {where} ORDER BY rowid LIMIT ?", (*args,row_limit+1))
             names = [c[0] for c in cursor.description]
             rows = cursor.fetchall()
@@ -236,13 +238,14 @@ class ThermalHistory:
         result["regimes"] = {}
         regime_ids = {row["regime"] for table in ("decisions","observations","summaries","episodes")
                       for row in result[table]}
-        for regime in sorted(regime_ids):
+        for regime in sorted(regime_ids) if include_regimes else ():
             row = self.db.execute("SELECT metadata FROM regimes WHERE id=?", (regime,)).fetchone()
             if row and response_bytes+len(row[0].encode()) <= 2*1024*1024:
                 result["regimes"][regime] = json.loads(row[0])
                 response_bytes += len(row[0].encode())
-        result["regimes_truncated"] = len(result["regimes"]) < len(regime_ids)
-        result["metadata"] = dict(self.db.execute("SELECT key,value FROM metadata"))
+        result["regimes_truncated"] = include_regimes and len(result["regimes"]) < len(regime_ids)
+        if entry_id is None:
+            result["metadata"] = dict(self.db.execute("SELECT key,value FROM metadata"))
         result["availability"] = {"raw_available":bool(result["observations"]),
                                   "summaries_available":bool(result["summaries"]),
                                   "coverage_complete":False}
@@ -255,7 +258,7 @@ class ThermalHistory:
             self.db = None
 
 
-def read_history(path, start, end, limit=200):
+def read_history(path, start, end, limit=200, *, entry_id=None, include_regimes=True):
     """Bounded read-only transaction; does not create a missing database."""
     store = ThermalHistory(path)
     db = sqlite3.connect(Path(path).resolve().as_uri()+"?mode=ro", uri=True, timeout=1)
@@ -266,6 +269,6 @@ def read_history(path, start, end, limit=200):
             raise ValueError("Unsupported thermal history schema")
         db.execute("BEGIN")
         store.db = db
-        return store.lookback(start,end,limit=limit)
+        return store.lookback(start, end, limit=limit, entry_id=entry_id, include_regimes=include_regimes)
     finally:
         db.close()

@@ -7,7 +7,7 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import selector
 
-from .const import DOMAIN, NAME
+from .const import CONF_THERMAL_MCP, DOMAIN, NAME
 from .house_policy import HOUSE_POLICY
 from .configuration import entry_configuration, entry_policy_settings
 from .controller.protection import PROTECTION_RANGES, ProtectionTemperatures
@@ -22,9 +22,10 @@ class _ProtectionNumber(selector.NumberSelector):
         return super().__call__(value)
 
 
-def _schema(live=False, protection=None, policy_settings=None):
+def _schema(live=False, protection=None, policy_settings=None, *, thermal_mcp=False):
     protection = protection or ProtectionTemperatures()
-    data = {vol.Required("live", default=live): bool}
+    data = {vol.Required("live", default=live): bool,
+            vol.Optional(CONF_THERMAL_MCP, default=thermal_mcp): bool}
     for name, (minimum, maximum) in PROTECTION_RANGES.items():
         seconds = name == "qualification_seconds"
         step = 1 if seconds else .25 if name in ("release_hysteresis_f", "transition_deadband_f") else .5
@@ -54,7 +55,7 @@ def _live(values):
     return live
 
 
-def _values(user_input, current, policy_settings=None):
+def _values(user_input, current, policy_settings=None, *, thermal_mcp=False, keep_thermal_mcp=False):
     protection = ProtectionTemperatures.from_dict({
         **current.to_dict(), **{key: value for key, value in user_input.items() if key in current.to_dict()}})
     policy = dict(policy_settings or {})
@@ -76,8 +77,16 @@ def _values(user_input, current, policy_settings=None):
                 policy[key] = {**policy[key], **selected}
             else:
                 policy[key] = selected
-    return {"policy": HOUSE_POLICY, "live": _live(user_input),
-            "protection": protection.to_dict(), "policy_settings": policy}
+    thermal_mcp = user_input.get(CONF_THERMAL_MCP, thermal_mcp)
+    if type(thermal_mcp) is not bool:
+        raise ValueError("Thermal history MCP permission must be a boolean")
+    result = {"policy": HOUSE_POLICY, "live": _live(user_input),
+              "protection": protection.to_dict(), "policy_settings": policy}
+    # An absent setting is safely off; retain an explicit false when it must
+    # override a true value already stored in the entry's original data.
+    if thermal_mcp or keep_thermal_mcp:
+        result[CONF_THERMAL_MCP] = thermal_mcp
+    return result
 
 
 class HouseClimateConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -129,7 +138,9 @@ class HouseClimateOptionsFlow(config_entries.OptionsFlow):
             errors, detail = {"base": "invalid_config"}, str(exc)
         if user_input is not None:
             try:
-                selected = _values(user_input, protection, policy)
+                selected = _values(user_input, protection, policy,
+                    thermal_mcp=values.get(CONF_THERMAL_MCP, False),
+                    keep_thermal_mcp=self.config_entry.data.get(CONF_THERMAL_MCP) is True)
                 await self.hass.async_add_executor_job(
                     entry_configuration, self.hass.config.config_dir,
                     {**values, **selected})
@@ -139,5 +150,6 @@ class HouseClimateOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(
                     title="", data=selected)
         return self.async_show_form(
-            step_id="init", data_schema=_schema(values.get("live", False), protection, policy), errors=errors,
+            step_id="init", data_schema=_schema(values.get("live", False), protection, policy,
+                thermal_mcp=values.get(CONF_THERMAL_MCP, False)), errors=errors,
             description_placeholders={"detail": detail}, last_step=True)

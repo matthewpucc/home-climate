@@ -39,3 +39,6 @@ equipment. A normal Home Assistant shutdown flushes the buffered record so the
 next scrape can see it; a crash or failed storage write may lose recent events.
 An unfinished saved dispatch is exposed as uncertain and cannot match a new
 runtime's feedback. Nothing is backfilled for past events that were not captured.
+
+For a combined list of thermal-history enum values and native telemetry codes, see the
+[enum reference](thermal-history-enums.md).
