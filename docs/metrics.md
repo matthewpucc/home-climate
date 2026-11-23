@@ -1,5 +1,9 @@
 # Native metrics reference
 
+For the optional Home Climate scrape job, see [direct Prometheus metrics](direct-prometheus.md).
+The documented HA exporter below remains supported for parallel verification and for
+families that the direct exporter does not reproduce.
+
 This is the complete native Home Climate export contract, checked against the
 entity definitions and Home Assistant **2026.10.4** with **prometheus-client
 0.21.0**. It covers existing sensors, new diagnostics, native controls, and HA's

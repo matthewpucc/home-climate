@@ -13,6 +13,7 @@
   "requirements": [],
   "single_config_entry": true,
   "after_dependencies": [
-    "govee_ble"
+    "govee_ble",
+    "http"
   ]
 }
