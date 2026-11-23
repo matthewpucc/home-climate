@@ -1,7 +1,7 @@
 {
   "domain": "house_climate",
   "name": "Home Climate",
-  "version": "0.9.33",
+  "version": "0.9.34",
   "codeowners": [
     "@matthewpucc"
   ],

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.34
 
 - Log bounded, credential-free reasons for direct Prometheus authentication failures without changing the HTTP response.
 
