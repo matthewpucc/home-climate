@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.33
 
 - Add an opt-in [direct Prometheus endpoint](docs/direct-prometheus.md) with route-scoped HTTPS authentication and bounded read-only Home Climate runtime telemetry.
 
