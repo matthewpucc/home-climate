@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.http import HomeAssistantView, KEY_AUTHENTICATED, KEY_HASS
 from prometheus_client.parser import text_string_to_metric_families
@@ -172,3 +173,55 @@ class DirectPrometheusTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(self.token, " ".join(log.output))
         path.write_text(json.dumps({"token_sha256": self.digest.hex()}))
         self.assertEqual(metrics.load_digest(path), self.digest)
+
+    async def test_cold_start_without_http_never_reads_config(self):
+        self.hass.http = None
+        entry = SimpleNamespace(async_on_unload=Mock())
+        with patch.object(metrics, "load_digest", side_effect=AssertionError("unexpected config read")):
+            await metrics.async_attach(self.hass, entry, self.runtime)
+            self.hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+            await self.hass.async_block_till_done()
+        entry.async_on_unload.assert_called_once()
+
+    async def test_cold_start_registers_only_after_http_is_ready(self):
+        # Stop the test's pre-mounted fixture and exercise real startup events.
+        server = self.hass.http
+        self.unbind()
+        self.hass.data.pop(metrics._VIEW_KEY)
+        server.register_view = Mock()
+        self.hass.http = None
+        entry = SimpleNamespace(async_on_unload=Mock())
+        Path(self.directory.name, metrics.CONFIG_FILE).write_text(
+            json.dumps({"token_sha256": self.digest.hex()}))
+        await metrics.async_attach(self.hass, entry, self.runtime)
+        server.register_view.assert_not_called()
+        self.assertNotIn(metrics._ACTIVE_KEY, self.hass.data)
+        self.hass.http = server
+        self.hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await self.hass.async_block_till_done()
+        server.register_view.assert_called_once()
+        self.assertIs(self.hass.data[metrics._ACTIVE_KEY][0], self.runtime)
+        self.unbind = entry.async_on_unload.call_args.args[0]
+
+    async def test_unloading_before_http_is_ready_cancels_binding(self):
+        server = self.hass.http
+        self.hass.http = None
+        entry = SimpleNamespace(async_on_unload=Mock())
+        with patch.object(metrics, "load_digest", side_effect=AssertionError("unexpected config read")):
+            await metrics.async_attach(self.hass, entry, self.runtime)
+            entry.async_on_unload.call_args.args[0]()
+            self.hass.http = server
+            self.hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+            await self.hass.async_block_till_done()
+
+    async def test_runtime_replacement_during_credential_read_cannot_bind_stale(self):
+        entry = SimpleNamespace(async_on_unload=Mock())
+
+        async def read_then_replace(*_args):
+            self.hass.data[DOMAIN] = self.new_runtime()
+            return self.digest
+
+        with patch.object(self.hass, "async_add_executor_job", side_effect=read_then_replace):
+            await metrics.async_attach(self.hass, entry, self.runtime)
+        entry.async_on_unload.assert_not_called()
+        self.assertEqual((await self.client.get(metrics.URL, headers=self.headers())).status, 404)

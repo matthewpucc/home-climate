@@ -13,6 +13,7 @@ from aiohttp import web
 
 from homeassistant.core import callback
 from homeassistant.helpers.http import HomeAssistantView
+from homeassistant.helpers.start import async_at_started
 
 from .const import DOMAIN
 from .mode_diagnostics import FIELDS, MODE, _valid
@@ -194,3 +195,25 @@ def bind(hass, runtime, digest):
             hass.data.pop(_ACTIVE_KEY)
 
     return unbind
+
+async def async_attach(hass, entry, runtime):
+    """Bind if HTTP exists; otherwise retry after HA's cold-start setup barrier."""
+
+    def server_if_active():
+        if (not hass.is_stopping and hass.data.get(DOMAIN) is runtime
+                and not runtime.stop_event.is_set()):
+            return getattr(hass, "http", None)
+        return None
+
+    async def attach(_hass):
+        server = server_if_active()
+        if server is None:
+            return
+        digest = await hass.async_add_executor_job(load_digest, hass.config.path(CONFIG_FILE))
+        if digest is not None and server_if_active() is server:
+            entry.async_on_unload(bind(hass, runtime, digest))
+
+    if getattr(hass, "http", None) is not None:
+        await attach(hass)
+    else:
+        entry.async_on_unload(async_at_started(hass, attach))
