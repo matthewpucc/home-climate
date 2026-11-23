@@ -49,6 +49,12 @@ remove the JSON file, reload Home Climate and remove its scrape job. The
 route then returns `404`; no change to the old HA scrape is required. Malformed
 credential settings fail closed without disabling comfort control.
 
+When the Home Climate route returns `401`, check the Home Assistant Core logs
+for the rejection category: missing header, duplicate header, invalid format, or
+digest mismatch. Each category is logged at most once per integration load.
+The HTTP challenge is identical for all four categories; the logs contain no
+request values, credentials, or client metadata.
+
 ## Parallel scrape configuration
 
 Add a separate scrape job, keeping the existing Home Assistant scrape:

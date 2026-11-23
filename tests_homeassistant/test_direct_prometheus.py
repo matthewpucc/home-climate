@@ -104,6 +104,47 @@ class DirectPrometheusTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get(OrdinaryHAView.url, headers={"Authorization": "Bearer ha-fixture"})
         self.assertEqual(response.status, 200)
 
+    async def test_auth_rejection_logs_are_private_bounded_and_not_returned(self):
+        cases = [
+            ({"X-For-Test": "secure"}, "missing header"),
+            (self.headers("8" * 64), "digest mismatch"),
+            (self.headers("PRIVATE log-escape attempt"), "invalid format"),
+            ([("X-For-Test", "secure"), (metrics.TOKEN_HEADER, self.token),
+              (metrics.TOKEN_HEADER, "PRIVATE duplicate")], "duplicate header"),
+        ]
+        with self.assertLogs(metrics.__name__, "WARNING") as captured:
+            # The missing-header probe arrives first; it must not suppress
+            # the later actionable mismatch or any of the other categories.
+            for _ in range(6):
+                for headers, _ in cases:
+                    response = await self.client.get(metrics.URL, headers=headers)
+                    self.assertEqual(response.status, 401)
+                    self.assertEqual(response.headers["WWW-Authenticate"],
+                                     'HomeClimateMetrics realm="Home Climate metrics"')
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertEqual(await response.read(), b"")
+            response = await self.client.get(metrics.URL, headers=self.headers("c" * 64))
+            self.assertEqual(response.status, 401)  # New input, same category.
+            self.assertEqual((await self.client.get(metrics.URL, headers=self.headers())).status, 200)
+        self.assertEqual([record.getMessage() for record in captured.records],
+                         [f"Home Climate metrics authentication rejected: {reason}" for _, reason in cases])
+
+    async def test_auth_rejection_log_scope_resets_for_replacement_not_for_success(self):
+        no_header = {"X-For-Test": "secure"}
+        with self.assertLogs(metrics.__name__, "WARNING") as captured:
+            self.assertEqual((await self.client.get(metrics.URL, headers=no_header)).status, 401)
+            self.assertEqual((await self.client.get(metrics.URL, headers=self.headers())).status, 200)
+            self.assertEqual((await self.client.get(metrics.URL, headers=no_header)).status, 401)
+
+            old_unbind = self.unbind
+            other = self.new_runtime()
+            self.hass.data[DOMAIN] = other
+            self.unbind = metrics.bind(self.hass, other, self.digest)
+            old_unbind()
+            self.assertEqual((await self.client.get(metrics.URL, headers=no_header)).status, 401)
+        self.assertEqual([record.getMessage() for record in captured.records],
+                         ["Home Climate metrics authentication rejected: missing header"] * 2)
+
     async def test_reload_rotation_unload_and_stale_runtime(self):
         other = self.new_runtime()
         rotated = "a" * 64
@@ -200,7 +241,7 @@ class DirectPrometheusTests(unittest.IsolatedAsyncioTestCase):
         self.hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
         await self.hass.async_block_till_done()
         server.register_view.assert_called_once()
-        self.assertIs(self.hass.data[metrics._ACTIVE_KEY][0], self.runtime)
+        self.assertIs(self.hass.data[metrics._ACTIVE_KEY].runtime, self.runtime)
         self.unbind = entry.async_on_unload.call_args.args[0]
 
     async def test_unloading_before_http_is_ready_cancels_binding(self):

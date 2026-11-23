@@ -1,6 +1,7 @@
 """Read-only, route-scoped exposition of cached Home Climate evidence."""
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -143,6 +144,13 @@ def render(runtime, now):
     return "\n".join(lines) + "\n"
 
 
+@dataclass(slots=True)
+class _Binding:
+    runtime: object = field(repr=False)
+    digest: bytes = field(repr=False)
+    logged_rejections: set[str] = field(default_factory=set)
+
+
 class HomeClimateMetricsView(HomeAssistantView):
     url = URL
     name = "api:house_climate:metrics"
@@ -157,20 +165,33 @@ class HomeClimateMetricsView(HomeAssistantView):
     async def get(self, request):
         headers = {"Cache-Control": "no-store"}
         binding = self.hass.data.get(_ACTIVE_KEY)
-        if (binding is None or self.hass.data.get(DOMAIN) is not binding[0]
-                or binding[0].stop_event.is_set()):
+        if (binding is None or self.hass.data.get(DOMAIN) is not binding.runtime
+                or binding.runtime.stop_event.is_set()):
             return web.Response(status=404, headers=headers)
         if not request.secure:
             return web.Response(status=403, headers=headers)
         if request.query_string:
             return web.Response(status=400, headers=headers)
         presented = request.headers.getall(TOKEN_HEADER, [])
-        if (len(presented) != 1 or not _HEX.fullmatch(presented[0])
-                or not hmac.compare_digest(hashlib.sha256(presented[0].encode("ascii")).digest(), binding[1])):
+        rejection = None
+        if not presented:
+            rejection = "missing header"
+        elif len(presented) > 1:
+            rejection = "duplicate header"
+        elif not _HEX.fullmatch(presented[0]):
+            rejection = "invalid format"
+        elif not hmac.compare_digest(hashlib.sha256(presented[0].encode("ascii")).digest(), binding.digest):
+            rejection = "digest mismatch"
+        if rejection is not None:
+            # Fixed categories, once each per binding. Unauthenticated requests
+            # cannot flood the log or suppress a different rejection category.
+            if rejection not in binding.logged_rejections:
+                binding.logged_rejections.add(rejection)
+                _LOGGER.warning("Home Climate metrics authentication rejected: %s", rejection)
             headers["WWW-Authenticate"] = 'HomeClimateMetrics realm="Home Climate metrics"'
             return web.Response(status=401, headers=headers)
         headers["Content-Type"] = _CONTENT_TYPE
-        body = render(binding[0], datetime.now(timezone.utc).timestamp())
+        body = render(binding.runtime, datetime.now(timezone.utc).timestamp())
         return web.Response(text=body, headers=headers)
 
 
@@ -186,7 +207,7 @@ def bind(hass, runtime, digest):
             _LOGGER.warning("Home Climate metrics disabled: could not register scrape route")
             return lambda: None
         hass.data[_VIEW_KEY] = True
-    binding = (runtime, digest)
+    binding = _Binding(runtime, digest)
     hass.data[_ACTIVE_KEY] = binding
 
     @callback
