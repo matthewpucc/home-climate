@@ -171,7 +171,8 @@ async def resume(controls, entity):
                     or _outstanding(controls, entity)):
                 raise HAError("Switch Controller Off and wait for ownership cleanup before resuming one head")
             if (controls._replacement_registry_identity(entity) != record.registry_id
-                    or not _fresh_off(controls, entity, max(controls._manual_head_boundary, record.reported_off_at))):
+                    or not _fresh_off(controls, entity, max(controls._manual_head_boundary,
+                                      controls._manual_resume_boundary, record.reported_off_at))):
                 raise HAError("Turn the manual head Off and wait for a fresh native report before resuming")
             records = {key: row for key, row in controls.manual_heads.items() if key != role}
             try:

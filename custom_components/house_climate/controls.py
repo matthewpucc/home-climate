@@ -85,6 +85,7 @@ class NativeControls:
         self.manual_handoff_opt_in = frozenset()
         self.manual_head_entities = frozenset()
         self._manual_head_boundary = datetime.now(timezone.utc).timestamp()
+        self._manual_resume_boundary = self._manual_head_boundary
         self.head_write_fence = HeadWriteFence(config.heads.values())
         self._head_inflight = {entity: 0 for entity in config.heads.values()}
         self._head_possible = set()
@@ -440,6 +441,8 @@ class NativeControls:
             self._log_stop(logging.INFO, "Controller disabled")
         if enabled != self.enabled:
             self.ownership_generation += 1
+            if not enabled:
+                self._manual_resume_boundary = datetime.now(timezone.utc).timestamp()
         generation = self.ownership_generation
         # Revoke queued writes before the persistence await. Never roll this
         # generation backwards if storage fails.

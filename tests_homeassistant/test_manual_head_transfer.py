@@ -83,6 +83,8 @@ class ManualHeadTransferTests(IsolatedAsyncioTestCase):
         self.assertFalse(controls.owned)
         self.assertNotIn(self.head, {call[2]["entity_id"] for call in self.calls})
         self.calls.clear()
+        with self.assertRaisesRegex(HAError, "fresh native report"):
+            await controls.async_resume_manual_head(self.head)
         self.hass.states.async_set(self.head, "off", self.attrs, force_update=True)
         await controls.async_resume_manual_head(self.head)
         self.assertEqual(self.calls, [])
