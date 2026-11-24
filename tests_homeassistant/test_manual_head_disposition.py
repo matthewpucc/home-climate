@@ -1,6 +1,7 @@
 """Read and exercise the store/claim/native service boundaries with synthetic HA."""
 import asyncio
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import patch
 
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.storage import Store
@@ -67,6 +68,51 @@ class ManualHeadPersistenceTests(IsolatedAsyncioTestCase):
         self.assertTrue(await runtime.controls._off(sibling))
         self.assertEqual({entry[2]["entity_id"] for entry in self.calls}, {sibling})
 
+    async def test_final_dispatch_rechecks_manual_feedback_after_native_queueing(self):
+        role, manual = next(iter(self.cfg.heads.items()))
+        sibling = tuple(self.cfg.heads.values())[1]
+        registry = er.async_get(self.hass)
+        old = dict(self.hass.states.get(manual).attributes)
+        self.hass.states.async_remove(manual)
+        entry = registry.async_get_or_create("climate", "fixture", "manual", suggested_object_id=manual.split(".")[1])
+        self.assertEqual(entry.entity_id, manual)
+        self.hass.states.async_set(manual, "off", old, force_update=True)
+        store = self.store("dispatch")
+        await store.async_save({"devices": [], "manual_heads": self.records(identity=entry.id)})
+        runtime, _ = await self.runtime(entry_id="dispatch")
+        await self.claim(runtime)
+        await self.settle_watchdog(runtime.controls)
+        self.hass.states.async_set(manual, "off", old, force_update=True)
+        self.calls.clear()
+        real_submit = asyncio.run_coroutine_threadsafe
+        queued, release = asyncio.Event(), asyncio.Event()
+
+        def submit(coro, loop):
+            async def hold():
+                queued.set()
+                await release.wait()
+                return await coro
+            return real_submit(hold(), loop)
+
+        async def set_heat():
+            return await asyncio.to_thread(runtime.api.service, "climate", "set_temperature",
+                                           entity_id=sibling, hvac_mode="heat", temperature=71)
+
+        with patch("custom_components.house_climate.runtime.asyncio.run_coroutine_threadsafe",
+                   side_effect=submit):
+            task = asyncio.create_task(set_heat())
+            try:
+                await asyncio.wait_for(queued.wait(), timeout=2)
+                self.hass.states.async_set(manual, "cool", old, force_update=True)
+            finally:
+                release.set()
+            with self.assertRaisesRegex(HAActivationDeferred, "Manual heat-pump feedback blocks"):
+                await task
+        self.assertEqual(self.calls, [])
+        self.hass.states.async_set(manual, "off", old, force_update=True)
+        await set_heat()
+        self.assertEqual([c[2]["entity_id"] for c in self.calls], [sibling])
+
     async def test_registry_rename_and_changed_wiring_never_reclaim_either_candidate(self):
         registry = er.async_get(self.hass)
         renamed = registry.async_get_or_create("climate", "fixture", "physical")
@@ -111,4 +157,4 @@ class ManualHeadTerminalInterlockTest(IsolatedAsyncioTestCase):
         await handoff.step(self.controls)
         self.assertEqual(self.calls, [])
         self.assertFalse(self.plan["requests"][self.head].get("dispatched"))
-        self.assertIn("blocks shared activation", self.plan["problems"][self.head])
+        self.assertIn("blocks ambiguous shared activation", self.plan["problems"][self.head])

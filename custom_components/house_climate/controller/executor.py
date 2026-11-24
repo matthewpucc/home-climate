@@ -9,6 +9,7 @@ from .config import Config
 from .diagnostics import HeadTransitions
 from .ha import HAActivationDeferred, HAError
 from .head_guard import head_constraint
+from .manual_head_direction import manual_heads_off, permits_direction, read_scope, trusted_mode
 from .protection_context import limits
 from .policy import Plan, call_target_f, native_target
 from .sensors import from_f, to_f
@@ -873,13 +874,17 @@ class Executor:
             comfort = target_f if comfort_target_f is None else comfort_target_f
             self._acknowledge_head_run(entity, mode, comfort, to_f(target, self.unit), target, now)
 
+    def _managed_heads(self, states):
+        scope = read_scope(self.config, states)
+        return tuple(entity for entity in self.config.heads.values() if entity not in scope)
+
     def begin_stop(self, states, now, *, reason="Shared-system all-off reconciliation", kind="reconciliation"):
         self._shared_stop_context = (kind, reason)
         self.cycle_holds.clear()
         self.phase, self.direction, self.all_off_since = "stopping", None, None
         self.stop_started = now
         self.shared_stops = {}
-        for entity in self.config.heads.values():
+        for entity in self._managed_heads(states):
             self._shared_off(entity, states, now)
 
     def shared_stop_status(self, now):
@@ -1328,6 +1333,8 @@ class Executor:
             plan.warnings.append(f"Circulation fan {entity}: {failure.message}; retrying independently")
 
     def reserve_split_isolated_at(self, states, now):
+        if read_scope(self.config, states):
+            return None
         if (self.phase != "settling" or self.all_off_since is None
                 or now < (settled_at := self.all_off_since + self.config.off_settle_seconds)):
             return None
@@ -1473,6 +1480,11 @@ class Executor:
                 self.head_cycles[entity] = HeadCycle()
 
     def shared(self, plan: Plan, states: dict, now: float):
+        scope = read_scope(self.config, states)
+        managed = self._managed_heads(states)
+        wall = datetime.now(timezone.utc).timestamp()
+        def manual_allowed(mode, continuing):
+            return permits_direction(scope, states, wall, mode, continuing=continuing)
         if not self._reserve_cooling_ready(plan):
             if self._inhibit_revoked_reserve_cooling(plan, states):
                 self.begin_stop(states, now, reason="Auxiliary reserve proof revoked", kind="changeover")
@@ -1481,11 +1493,14 @@ class Executor:
             self.begin_stop(states, now, reason="Startup all-off reconciliation", kind="startup")
             return
         if self.phase == "running":
-            incompatible = any(self.available(states.get(entity, {}))
+            manual_conflict = bool(scope) and not manual_allowed(self.direction, True)
+            incompatible = manual_conflict or any(self.available(states.get(entity, {}))
                                and states[entity]["state"] not in ("off", self.direction)
-                               for entity in self.config.heads.values())
+                               for entity in managed)
             if plan.mode != self.direction or incompatible:
-                if incompatible:
+                if manual_conflict:
+                    kind, reason = "reconciliation", "Manual head feedback no longer permits managed direction"
+                elif incompatible:
                     kind, reason = "reconciliation", "Shared system reported a conflicting HVAC mode"
                 elif plan.mode == "off":
                     kind, reason = "no_demand", "Off requested: no eligible shared-system demand"
@@ -1494,13 +1509,16 @@ class Executor:
                 self.begin_stop(states, now, reason=reason, kind=kind)
                 return
         if self.phase == "stopping":
-            for entity in self.config.heads.values():
+            for entity in managed:
                 self._shared_off(entity, states, now)
             all_off = all(self.ready(states.get(entity, {})) and self.reports_off(states.get(entity, {}))
                           and entity not in self.pending and entity not in self.recoveries
                           and (entity not in self._replacement_startup_off_requests
                                or self.shared_stops[entity].confirmed)
-                          for entity in self.config.heads.values())
+                          for entity in managed)
+            if scope and not manual_heads_off(scope, states, wall):
+                plan.warnings.append("Manual head must freshly report Off before shared direction can start")
+                return
             if not all_off:
                 if any(stop.failed for stop in self.shared_stops.values()):
                     plan.warnings.append("Shared-head Off unconfirmed after 45 seconds; activation blocked; safety cleanup continues")
@@ -1509,8 +1527,11 @@ class Executor:
             self._replacement_startup_checks.clear()
             self._replacement_startup_off_requests.clear()
         if self.phase == "settling":
+            if scope and not manual_heads_off(scope, states, wall):
+                self.begin_stop(states, now, reason="Manual head stopped reporting fresh Off during shared settling")
+                return
             if any(not self.ready(states.get(entity, {})) or not self.reports_off(states.get(entity, {}))
-                   for entity in self.config.heads.values()):
+                   for entity in managed):
                 self.begin_stop(states, now, reason="Shared head changed state during off settling")
                 return
             if plan.mode == "off" or now - self.all_off_since < self.config.off_settle_seconds:
@@ -1520,7 +1541,7 @@ class Executor:
         if self.phase == "running":
             # Off commands first; every active head is then set to the same direction.
             for key, entity in self.config.heads.items():
-                if key not in plan.head_targets_f:
+                if entity in managed and key not in plan.head_targets_f:
                     self.off(entity, states, now)
             for key, target in plan.head_targets_f.items():
                 if not self._reserve_cooling_ready(plan):
@@ -1528,6 +1549,9 @@ class Executor:
                         self.begin_stop(states, now, reason="Auxiliary reserve proof revoked", kind="changeover")
                     return
                 entity = self.config.heads[key]
+                if entity not in managed or (scope and not manual_allowed(
+                        plan.mode, trusted_mode(states.get(entity), wall, 0) == plan.mode)):
+                    continue
                 call = plan.head_call_targets_f.get(key)
                 if call is None:
                     call = call_target_f(self.config, entity, plan.mode, target, states, self.unit)
@@ -1568,7 +1592,7 @@ class Executor:
                     "Auxiliary startup was interrupted", pending.baseline if pending
                     else self.marker(snapshot.get(entity, {}))))
             self._auxiliary_startup = None
-        for entity in [*([self.config.heater_entity] if self.config.heater_entity else []), *self.config.heads.values(), *self.config.fans.values()]:
+        for entity in [*([self.config.heater_entity] if self.config.heater_entity else []), *self._managed_heads(snapshot), *self.config.fans.values()]:
             if entity == self.config.heater_entity and manual_auxiliary(self.config, snapshot):
                 continue
             request_id = None
