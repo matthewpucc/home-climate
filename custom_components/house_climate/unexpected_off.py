@@ -25,10 +25,11 @@ class HeadEvidence:
 class UnexpectedOff:
     """Bounded by configured heads; never sends a command or changes ownership."""
 
-    def __init__(self, heads, eligible, now):
+    def __init__(self, heads, eligible, now, confirmed=None):
         self._rows = {entity: HeadEvidence() for entity in heads}
         self._eligible = eligible
         self._now = now
+        self._confirmed = confirmed
         self._commands = {}
 
     def command(self, entity, when, context_id):
@@ -84,7 +85,9 @@ class UnexpectedOff:
         elif elapsed >= CONFIRM_MIN_GAP:
             _LOGGER.warning(
                 "Home Climate head %s reported unexplained Off after %s; "
-                "no control or ownership change was made",
+                "this observation alone does not change ownership",
                 entity, row.active_mode,
             )
             self.reset(entity)
+            if self._confirmed is not None:
+                self._confirmed(entity, stamp, generation)

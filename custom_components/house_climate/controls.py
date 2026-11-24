@@ -23,6 +23,7 @@ from .controller.sensors import probe_value
 from .auxiliary_diagnostics import AuxiliaryDiagnostics
 from .mode_diagnostics import ModeDiagnostics
 from .manual_heads import check_no_overlap, held_entities, read_manual_heads
+from .manual_head_transfer import OPT_IN_CONFIG, read_opt_in, request_release, resume as resume_manual_head
 from .controller.manual_head_direction import DIRECTIONS, SCOPE_FIELD, permits_direction, trusted_mode
 from .head_write_fence import HeadWriteFence, capture_head_write, check_head_write
 
@@ -35,7 +36,7 @@ _CURRENT_PERSISTED = object()
 class NativeControls:
     def __init__(self, hass, config, live, entry_id, notify):
         self.hass, self.config, self.live, self.notify = hass, config, live, notify
-        self.store = Store(hass, 1, f"house_climate.{entry_id}.ownership")
+        self.store = Store(hass, 1, f"house_climate.{entry_id}.ownership", atomic_writes=True)
         self.enabled = False
         self.enabled_intent = False
         self._intent_dirty = False
@@ -79,6 +80,9 @@ class NativeControls:
         self._auxiliary_stop_pending = False
         self._auxiliary_stop_epoch = 0
         self.manual_heads = {}
+        self.manual_handoff_pending = None
+        self.manual_handoff_issue = None
+        self.manual_handoff_opt_in = frozenset()
         self.manual_head_entities = frozenset()
         self._manual_head_boundary = datetime.now(timezone.utc).timestamp()
         self.head_write_fence = HeadWriteFence(config.heads.values())
@@ -105,7 +109,8 @@ class NativeControls:
         self.power_guard = None
         self.observations = AuxiliaryDiagnostics()
         self.mode_diagnostics = ModeDiagnostics(
-            hass, entry_id, config.heads.values(), off_eligible=self._off_observation_eligible)
+            hass, entry_id, config.heads.values(), off_eligible=self._off_observation_eligible,
+            off_confirmed=lambda entity, marker, generation: request_release(self, entity, marker, generation))
         self._publish()
 
     def _off_observation_eligible(self, entity):
@@ -116,8 +121,25 @@ class NativeControls:
             return self.ownership_generation
         return None
 
+    async def async_resume_manual_head(self, entity):
+        task = self.hass.async_create_task(resume_manual_head(self, entity), "Home Climate resume manual head")
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        await asyncio.shield(task)
+
+    @property
+    def manual_handoff_status(self):
+        return {"opted_in_head_roles": sorted(self.manual_handoff_opt_in),
+                "manual_heads": {role: {"entity_id": record.entity,
+                                        "reason": "confirmed_unexplained_off",
+                                        "reported_off_at": record.reported_off_at}
+                                 for role, record in self.manual_heads.items()},
+                "pending_entity": self.manual_handoff_pending, "issue": self.manual_handoff_issue}
+
     async def async_load(self):
         await self.mode_diagnostics.async_load()
+        if self.live:
+            self.manual_handoff_opt_in = await self.hass.async_add_executor_job(
+                read_opt_in, self.hass.config.path(OPT_IN_CONFIG), frozenset(self.config.heads))
         data = await self.store.async_load()
         if data:
             # Legacy storage never implied permission to resume control.
@@ -783,7 +805,8 @@ class NativeControls:
     async def _save(self, devices, pending, *, auxiliary=None,
                     handoff=_CURRENT_PERSISTED, uncertain=_CURRENT_PERSISTED,
                     retirement_review_required=_CURRENT_PERSISTED,
-                    replacement_startup_bindings=_CURRENT_PERSISTED, verify_write=False):
+                    replacement_startup_bindings=_CURRENT_PERSISTED,
+                    manual_heads=_CURRENT_PERSISTED, verify_write=False):
         intent = self.enabled_intent
         data = {"devices": list(devices), "enabled_intent": intent}
         if self.takeover_pending:
@@ -811,9 +834,21 @@ class NativeControls:
         auxiliary = self.pending_auxiliaries if auxiliary is None else auxiliary
         if auxiliary:
             data["pending_auxiliaries"] = list(auxiliary)
-        if self.manual_heads:
-            check_no_overlap(self.manual_head_entities, data["devices"], auxiliary, uncertain, handoff)
-            data["manual_heads"] = {role: row.serialize() for role, row in self.manual_heads.items()}
+        records = self.manual_heads if manual_heads is _CURRENT_PERSISTED else manual_heads
+        if records:
+            saved_records = {role: row.serialize() for role, row in records.items()}
+            read_manual_heads(saved_records)
+            registry = self.hass.data.get(er.DATA_REGISTRY)
+
+            def lookup(identity):
+                entry = registry.async_get(identity) if registry is not None else None
+                return entry.entity_id if entry is not None else None
+
+            held = held_entities(records, self.config.heads, lookup)
+            if self.config.heater_entity in held:
+                raise HAError("Saved manual heat-pump ownership conflicts with the auxiliary heater")
+            check_no_overlap(held, data["devices"], auxiliary, uncertain, handoff)
+            data["manual_heads"] = saved_records
         if verify_write and self.hass.is_stopping:
             raise HAError("Home Assistant is stopping; adapter retirement is not being saved")
         await self.store.async_save(data)
@@ -1253,6 +1288,8 @@ class NativeControls:
         # valid report boundary. Only an exact current registry identity can
         # contribute evidence; confirmed Off in persisted data cannot.
         result = dict.fromkeys(self.manual_head_entities)
+        if self.manual_handoff_pending is not None:
+            result[self.manual_handoff_pending] = None
         if not result:
             return result
         registry = self.hass.data.get(er.DATA_REGISTRY)
@@ -1264,9 +1301,10 @@ class NativeControls:
         return result
 
     def check_manual_head_interlock(self, entity, data=None):
-        if entity in self.manual_head_entities:
-            raise HAActivationDeferred("Heat pump is under manual ownership")
-        if not self.manual_head_entities or entity not in self.config.heads.values():
+        if entity in self.manual_head_entities or (self.manual_handoff_pending is not None
+                                                   and entity == self.manual_handoff_pending):
+            raise HAActivationDeferred("Heat pump is under manual ownership transfer")
+        if not (self.manual_head_entities or self.manual_handoff_pending) or entity not in self.config.heads.values():
             return
         # Unconstrained terminal Auto/heat_cool, and aux-less/fan writes with
         # no requested heat/cool direction, remain outside the pilot contract.

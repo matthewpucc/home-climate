@@ -153,3 +153,16 @@ retire_recovery_adapter:
       required: true
       selector:
         boolean:
+resume_manual_head_control:
+  name: Resume control of one manually owned heat pump
+  description: Clear one manual handoff after fresh Off with the Controller stopped. Does not send any equipment commands.
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          domain: climate
+    confirm:
+      required: true
+      selector:
+        boolean:

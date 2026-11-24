@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- Log [qualified unexplained Off reports](docs/unexpected-off-observation.md) for live, owned heat-pump heads; diagnostic only, with no change to equipment control or ownership.
+- Log [qualified unexplained Off reports](docs/unexpected-off-observation.md) for live, owned heat-pump heads; diagnostic only, with no change to equipment control or ownership unless explicitly opted in.
+- Add supervised opt-in per-head manual handoff with durable ownership, shared-direction interlocks and an explicit resume action after Controller Off.
 
 ## 0.9.34
 

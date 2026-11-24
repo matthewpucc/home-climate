@@ -38,7 +38,7 @@ def _valid(field, value):
 
 
 class ModeDiagnostics:
-    def __init__(self, hass, entry_id, heads, off_eligible=None):
+    def __init__(self, hass, entry_id, heads, off_eligible=None, off_confirmed=None):
         self.hass = hass
         self.heads = frozenset(heads)
         self.store = Store(hass, 1, f"house_climate.mode_diagnostics.{entry_id}", atomic_writes=True)
@@ -47,7 +47,7 @@ class ModeDiagnostics:
         self.latest_dispatch = {}
         self.seen = set()
         self.unsubscribers = ()
-        self.unexpected_off = (UnexpectedOff(self.heads, off_eligible, _now)
+        self.unexpected_off = (UnexpectedOff(self.heads, off_eligible, _now, confirmed=off_confirmed)
                                if off_eligible is not None else None)
 
     async def async_load(self):

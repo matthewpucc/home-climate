@@ -207,7 +207,7 @@ def now():
 
 def arm(controls, devices):
     fallback = getattr(controls.config, "fallback", None)
-    if fallback is None:
+    if fallback is None or getattr(controls, "manual_head_entities", ()):
         return None
     plan = {
         "version": 1, "stage": "armed", "authorized": bool(controls.live),

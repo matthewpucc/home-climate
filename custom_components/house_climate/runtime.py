@@ -1058,6 +1058,7 @@ class ControllerRuntime:
                 self.head_fan_trials = HeadFanTrials(self, entry_id)
                 await self.head_fan_trials.async_load()
                 self.api.head_fan_trials = self.head_fan_trials
+                self.controls.head_fan_trials = self.head_fan_trials
             if self.house_policy:
                 from .power_guard import HeaterPowerGuard
                 self.power_guard = HeaterPowerGuard(
