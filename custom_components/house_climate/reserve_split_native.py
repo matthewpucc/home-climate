@@ -69,7 +69,7 @@ def proof(api):
     controls, guard, config = api.controls, api.power_guard, api.config
     heater = config.heater_entity
     if (not api.live or config.legacy or controls is None or guard is None
-            or api.stop_event.is_set() or not heater
+            or getattr(controls, "manual_head_entities", ()) or api.stop_event.is_set() or not heater
             or api.service_jobs({heater}) or api.uncertain_service_jobs({heater})):
         return None
     try:

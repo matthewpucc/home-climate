@@ -23,6 +23,7 @@ from .controller.sensors import probe_value
 from .auxiliary_diagnostics import AuxiliaryDiagnostics
 from .mode_diagnostics import ModeDiagnostics
 from .manual_heads import check_no_overlap, held_entities, read_manual_heads
+from .controller.manual_head_direction import DIRECTIONS, SCOPE_FIELD, permits_direction, trusted_mode
 from .head_write_fence import HeadWriteFence, capture_head_write, check_head_write
 
 _LOGGER = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ class NativeControls:
         self._auxiliary_stop_epoch = 0
         self.manual_heads = {}
         self.manual_head_entities = frozenset()
+        self._manual_head_boundary = datetime.now(timezone.utc).timestamp()
         self.head_write_fence = HeadWriteFence(config.heads.values())
         self._head_inflight = {entity: 0 for entity in config.heads.values()}
         self._head_possible = set()
@@ -256,7 +258,7 @@ class NativeControls:
             (entity("auxiliary_authorization", "input_datetime"), str(snapshot["auxiliary_authorized_wall"]),
              {"timestamp": snapshot["auxiliary_authorized_wall"]}),
             (entity("auxiliary_manual"), "on" if snapshot["auxiliary_manual"] else "off", {}),
-            (entity("status", "input_text"), "", {}),
+            (entity("status", "input_text"), "", {SCOPE_FIELD: self._manual_head_scope()}),
             (entity("auxiliary_watchdog", "automation"), "on" if snapshot["active"] else "off", {}),
             (entity("auxiliary_probe_safe", "binary_sensor"), "on" if self.probes_safe(states, authorization=False) else "off",
              {"configuration_signature": watchdog_signature(self.config)}),
@@ -1207,7 +1209,7 @@ class NativeControls:
         self._publish()
 
     def check_activation(self, entity, data, *, generation=None):
-        self.check_manual_head_interlock(entity)
+        self.check_manual_head_interlock(entity, data)
         if generation is not None and generation != self.command_generation(entity):
             raise HAActivationDeferred("Command belongs to an earlier controller lease")
         if entity == self.config.heater_entity and (self.auxiliary_manual or self._manual_transition):
@@ -1237,12 +1239,43 @@ class NativeControls:
                 and not self.probes_safe(self._probe_states())):
             raise HAError("External room probes block auxiliary heat")
 
-    def check_manual_head_interlock(self, entity):
-        # At this persistence-only stage there is no shared-mode proof for a
-        # manual head. Do not allow any other shared head to begin output.
-        if self.manual_head_entities and (entity in self.manual_head_entities
-                                          or entity in self.config.heads.values()):
-            raise HAActivationDeferred("Manual heat-pump ownership blocks shared activation pending arbitration")
+    def _manual_head_scope(self):
+        # Keep unresolved or remapped entries in the safety scope, with no
+        # valid report boundary. Only an exact current registry identity can
+        # contribute evidence; confirmed Off in persisted data cannot.
+        result = dict.fromkeys(self.manual_head_entities)
+        if not result:
+            return result
+        registry = self.hass.data.get(er.DATA_REGISTRY)
+        for role, record in self.manual_heads.items():
+            current = self.config.heads.get(role)
+            entry = registry.async_get(current) if registry is not None and current else None
+            if current == record.entity and entry is not None and entry.id == record.registry_id:
+                result[current] = max(self._manual_head_boundary, record.reported_off_at)
+        return result
+
+    def check_manual_head_interlock(self, entity, data=None):
+        if entity in self.manual_head_entities:
+            raise HAActivationDeferred("Heat pump is under manual ownership")
+        if not self.manual_head_entities or entity not in self.config.heads.values():
+            return
+        # Unconstrained terminal Auto/heat_cool, and aux-less/fan writes with
+        # no requested heat/cool direction, remain outside the pilot contract.
+        requested = data.get("hvac_mode") if data is not None else None
+        if requested not in DIRECTIONS:
+            raise HAActivationDeferred("Manual heat-pump ownership blocks ambiguous shared activation")
+        scope = self._manual_head_scope()
+        states = {}
+        for target in (*scope, entity):
+            current = self.hass.states.get(target)
+            if current is not None:
+                states[target] = {"state": current.state, "attributes": current.attributes,
+                                  "last_reported": current.last_reported.isoformat(),
+                                  "integration_repair": self.repair_gate.overlay(target) if self.repair_gate else {}}
+        now = datetime.now(timezone.utc).timestamp()
+        continuing = trusted_mode(states.get(entity), now, 0) == requested
+        if not permits_direction(scope, states, now, requested, continuing=continuing):
+            raise HAActivationDeferred("Manual heat-pump feedback blocks shared activation")
 
     def check_stop(self, entity):
         if entity in self.manual_head_entities:
