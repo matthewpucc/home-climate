@@ -667,6 +667,8 @@ async def step(controls):
                             controls=controls):
                         raise ValueError(issue)
                 check_head_write(controls, entity, head_revision)
+                if domain == "climate":
+                    controls.check_manual_head_interlock(entity)
                 request["dispatched"] = True
                 request["dispatched_at"] = now()
                 controls.head_activation_started(entity)
