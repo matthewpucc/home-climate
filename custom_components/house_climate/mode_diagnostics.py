@@ -10,6 +10,8 @@ from homeassistant.core import Context, callback
 from homeassistant.helpers.event import async_track_state_change_event, async_track_state_report_event
 from homeassistant.helpers.storage import Store
 
+from .unexpected_off import UnexpectedOff
+
 _LOGGER = logging.getLogger(__name__)
 MODE = {"off": 1, "heat": 2, "cool": 3, "auto": 4, "heat_cool": 5, "fan_only": 6, "dry": 7}
 PATH = {"normal": 1, "shutdown_handoff": 2, "recovery": 3}
@@ -36,7 +38,7 @@ def _valid(field, value):
 
 
 class ModeDiagnostics:
-    def __init__(self, hass, entry_id, heads):
+    def __init__(self, hass, entry_id, heads, off_eligible=None):
         self.hass = hass
         self.heads = frozenset(heads)
         self.store = Store(hass, 1, f"house_climate.mode_diagnostics.{entry_id}", atomic_writes=True)
@@ -45,6 +47,8 @@ class ModeDiagnostics:
         self.latest_dispatch = {}
         self.seen = set()
         self.unsubscribers = ()
+        self.unexpected_off = (UnexpectedOff(self.heads, off_eligible, _now)
+                               if off_eligible is not None else None)
 
     async def async_load(self):
         try:
@@ -91,6 +95,15 @@ class ModeDiagnostics:
     def _reported(self, event):
         try:
             state = event.data.get("new_state")
+            if self.unexpected_off is not None:
+                try:
+                    if state is not None and self.hass.states.get(state.entity_id) is state:
+                        self.unexpected_off.report(
+                            state, event.data.get("last_reported", state.last_reported), event.context)
+                    elif state is None:
+                        self.unexpected_off.reset(event.data.get("entity_id"))
+                except Exception:
+                    _LOGGER.debug("Home Climate unexpected Off observation failed", exc_info=True)
             if (state is None or state.entity_id not in self.heads or state.state not in MODE
                     or state.attributes.get("restored") or state.attributes.get("assumed_state")):
                 return
@@ -137,6 +150,8 @@ class ModeDiagnostics:
             try:
                 context = context or Context()
                 now = _now()
+                if self.unexpected_off is not None:
+                    self.unexpected_off.command(entity, now, context.id)
                 fields = dict(mode_code=MODE[mode], path_code=PATH[path], reason_code=REASON[reason],
                               outcome_code=OUTCOME["invoked"], dispatched_at=now)
                 row = self.rows.setdefault(entity, {})
