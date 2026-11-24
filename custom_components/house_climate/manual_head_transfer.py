@@ -53,7 +53,8 @@ def _outstanding(controls, entity):
     trial_manager = getattr(controls, "head_fan_trials", None)
     trial = trial_manager.trial if trial_manager is not None else None
     job = controls._handoff_jobs.get(entity)
-    return (controls._head_inflight.get(entity, 0) or entity in controls._head_stop_pending
+    return (controls.mode_diagnostics.blocks_manual_release(entity)
+            or controls._head_inflight.get(entity, 0) or entity in controls._head_stop_pending
             or entity in controls._uncertain_device_jobs or controls.pending_device_jobs({entity})
             or controls.stop_jobs({entity}) or (job is not None and not job.done())
             or entity in (controls.handoff or {}).get("blower_recovery", {})
@@ -84,9 +85,13 @@ def request_release(controls, entity, marker, generation):
     identity = controls._replacement_registry_identity(entity)
     if (identity is None or not _lease_fresh(controls)
             or controls._off_observation_eligible(entity) != generation
-            or not _can_drop_terminal_presets(controls)
-            or _outstanding(controls, entity) or not _fresh_off(controls, entity,
-                         controls._manual_head_boundary, exact=marker)):
+            or not _fresh_off(controls, entity, controls._manual_head_boundary, exact=marker)):
+        controls.manual_handoff_issue = f"{entity}: identity, ownership or fresh Off could not be verified"
+        controls._publish()
+        return
+    if not _can_drop_terminal_presets(controls) or _outstanding(controls, entity):
+        controls.manual_handoff_issue = f"{entity}: prior command or trial recovery remains unresolved"
+        controls._publish()
         return
     # Fence synchronously in the reporting callback, before any worker request
     # can use the newly confirmed Off. In-flight/uncertain jobs are never

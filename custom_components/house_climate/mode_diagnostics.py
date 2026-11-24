@@ -18,6 +18,7 @@ PATH = {"normal": 1, "shutdown_handoff": 2, "recovery": 3}
 REASON = {"worker_command": 1, "terminal_preset": 2, "ownership_cleanup": 3, "integration_repair": 4, "worker_reconciliation": 5}
 OUTCOME = {"invoked": 1, "returned": 2, "failed": 3, "cancelled_uncertain": 4}
 FEEDBACK = {"unattributed": 1, "matching_service_context": 2, "consistent_only": 3}
+MANUAL_RELEASE_BLOCK = "manual_release_block"
 COMMAND_FIELDS = ("mode_code", "path_code", "reason_code", "outcome_code", "dispatched_at", "finished_at")
 FIELDS = (*(f"command_{key}" for key in COMMAND_FIELDS),
           *(f"handoff_{key}" for key in COMMAND_FIELDS if key not in ("path_code", "reason_code")),
@@ -45,6 +46,7 @@ class ModeDiagnostics:
         self.rows = {}
         self.pending = {}
         self.latest_dispatch = {}
+        self._manual_off_finished = {}
         self.seen = set()
         self.unsubscribers = ()
         self.unexpected_off = (UnexpectedOff(self.heads, off_eligible, _now, confirmed=off_confirmed)
@@ -58,7 +60,8 @@ class ModeDiagnostics:
             return
         if isinstance(saved, dict):
             self.rows = {entity: {key: value for key, value in row.items()
-                                  if key in FIELDS and _valid(key, value)}
+                                  if (key in FIELDS and _valid(key, value))
+                                  or (key == MANUAL_RELEASE_BLOCK and value is True)}
                          for entity, row in saved.items() if entity in self.heads and isinstance(row, dict)}
         # A resumed runtime cannot infer an outcome or causal link for a
         # previously invoked service whose task did not complete.
@@ -66,6 +69,7 @@ class ModeDiagnostics:
             for prefix in ("command", "handoff"):
                 if row.get(f"{prefix}_outcome_code") == OUTCOME["invoked"]:
                     row[f"{prefix}_outcome_code"] = OUTCOME["cancelled_uncertain"]
+                    row[MANUAL_RELEASE_BLOCK] = True
 
     @callback
     def start(self):
@@ -79,6 +83,10 @@ class ModeDiagnostics:
             unsubscribe()
         self.unsubscribers = ()
         self.pending.clear()
+        self._manual_off_finished.clear()
+
+    def blocks_manual_release(self, entity):
+        return self.rows.get(entity, {}).get(MANUAL_RELEASE_BLOCK) is True
 
     def _save(self):
         # HA's Store flushes delayed writes in the final-write phase. Never
@@ -109,7 +117,19 @@ class ModeDiagnostics:
                 return
             instant, stamp = _now(), state.last_reported.timestamp()
             row = self.rows.setdefault(state.entity_id, {})
-            if not 0 <= instant - stamp <= 180 or stamp <= row.get("feedback_at", 0):
+            if not 0 <= instant - stamp <= 180:
+                return
+            report_stamp = event.data.get("last_reported", state.last_reported).timestamp()
+            if (row.get(MANUAL_RELEASE_BLOCK) is True and state.state == "off"
+                    and self.hass.states.get(state.entity_id) is state
+                    and 0 <= instant - report_stamp <= 180
+                    and state.attributes.get("hvac_action") in (None, "off", "idle")
+                    and (finished := self._manual_off_finished.get(state.entity_id)) is not None
+                    and report_stamp > finished):
+                row.pop(MANUAL_RELEASE_BLOCK)
+                self._manual_off_finished.pop(state.entity_id, None)
+                self._save()
+            if stamp <= row.get("feedback_at", 0):
                 return
             mode = MODE[state.state]
             pending = self.pending.get(state.entity_id)
@@ -168,6 +188,7 @@ class ModeDiagnostics:
                     self.latest_dispatch[entity, prefix] = token
                 record = row, token, prefixes
                 self.pending[entity] = (now, MODE[mode], context.id, path)
+                self._manual_off_finished.pop(entity, None)
                 self._save()
             except Exception:
                 _LOGGER.debug("Home Climate mode command observation failed", exc_info=True)
@@ -184,8 +205,14 @@ class ModeDiagnostics:
         finally:
             if record:
                 row, token, prefixes = record
+                finished = _now()
+                if outcome != "returned":
+                    row[MANUAL_RELEASE_BLOCK] = True
+                    self._manual_off_finished.pop(entity, None)
+                elif mode == "off" and self.latest_dispatch.get((entity, "command")) is token:
+                    self._manual_off_finished[entity] = finished
                 for prefix in prefixes:
                     if self.latest_dispatch.get((entity, prefix)) is token:
                         row[f"{prefix}_outcome_code"] = OUTCOME[outcome]
-                        row[f"{prefix}_finished_at"] = _now()
+                        row[f"{prefix}_finished_at"] = finished
                 self._save()

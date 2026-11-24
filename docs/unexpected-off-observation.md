@@ -65,7 +65,9 @@ is still on for all owned native heads. There is no automatic re-enable.
    message. Confirm that Controller status names exactly the pilot head as
    manual. Verify Home Climate sends no Off, Auto, target, or fan command to
    the released head. Unverified storage or native work in flight does not
-   count as a release.
+   count as a release. After a failed or cancelled mode handler, the pilot
+   needs a later successful Home Climate Off and a fresh subsequent Off
+   report before treating another transition as eligible.
 3. If safe, turn the pilot head on using the same mode as an already-running
    managed sibling, then observe that continuation stays compatible. A
    contrary or untrustworthy manual report should block new shared activation

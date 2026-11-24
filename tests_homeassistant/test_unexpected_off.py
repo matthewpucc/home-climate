@@ -97,6 +97,28 @@ class UnexpectedOffTests(IsolatedAsyncioTestCase):
         await self.report("off", context=Context(user_id="synthetic_user"))
         self.log.assert_not_called()
 
+    async def test_uncertain_mode_write_requires_completed_off_and_new_feedback(self):
+        def fails(_):
+            raise RuntimeError("synthetic dispatch uncertainty")
+
+        async def send(mode):
+            await self.diagnostic.call("climate", "set_hvac_mode",
+                {"entity_id": self.HEAD, "hvac_mode": mode}, path="normal", reason="worker_command")
+
+        self.hass.services.async_register("climate", "set_hvac_mode", fails)
+        with self.assertRaises(RuntimeError):
+            await send("off")
+        self.assertTrue(self.diagnostic.blocks_manual_release(self.HEAD))
+        await self.off()
+        self.assertTrue(self.diagnostic.blocks_manual_release(self.HEAD))
+        self.hass.services.async_register("climate", "set_hvac_mode", lambda _: None)
+        await send("heat")
+        self.assertTrue(self.diagnostic.blocks_manual_release(self.HEAD))
+        await send("off")
+        self.assertTrue(self.diagnostic.blocks_manual_release(self.HEAD))
+        await self.report("off")
+        self.assertFalse(self.diagnostic.blocks_manual_release(self.HEAD))
+
     async def test_lease_change_and_uncertain_operation_cannot_join_evidence(self):
         await self.report("cool")
         await self.report("off")
