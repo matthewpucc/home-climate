@@ -12,6 +12,8 @@ import time
 from homeassistant.core import Context
 from homeassistant.exceptions import ServiceValidationError
 
+from .head_write_fence import capture_head_write, check_head_write
+
 MAX_ATTEMPTS = 3
 RETRY_SECONDS = 15
 REPORT_MAX_AGE = 180
@@ -188,10 +190,11 @@ async def step(controls, plan):
                       reserved_at=time.time(), finished_at=None)
         record.setdefault("first_at", time.time())
         generation = controls.ownership_generation
+        head_revision = capture_head_write(controls, entity)
         await controls._save(controls.owned, controls.pending_fans)
 
         async def dispatch(entity=entity, record=record, context=context, epoch=epoch,
-                           generation=generation, problem=problem):
+                           generation=generation, problem=problem, head_revision=head_revision):
             started = False
             try:
                 current = controls.hass.states.get(entity)
@@ -211,6 +214,7 @@ async def step(controls, plan):
                     return
                 if controls.repair_gate:
                     controls.repair_gate.check(entity, epoch, activation=True)
+                check_head_write(controls, entity, head_revision)
                 record["dispatched_at"] = time.time()
                 controls.head_activation_started(entity)
                 started = True

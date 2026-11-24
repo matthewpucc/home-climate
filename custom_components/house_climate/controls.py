@@ -22,6 +22,7 @@ from .controller.ha_package import watchdog_signature
 from .controller.sensors import probe_value
 from .auxiliary_diagnostics import AuxiliaryDiagnostics
 from .mode_diagnostics import ModeDiagnostics
+from .head_write_fence import HeadWriteFence, capture_head_write, check_head_write
 
 _LOGGER = logging.getLogger(__name__)
 _CURRENT_AUXILIARY_LIMIT = object()
@@ -75,6 +76,7 @@ class NativeControls:
         self._auxiliary_heartbeat_off_ack = False
         self._auxiliary_stop_pending = False
         self._auxiliary_stop_epoch = 0
+        self.head_write_fence = HeadWriteFence(config.heads.values())
         self._head_inflight = {entity: 0 for entity in config.heads.values()}
         self._head_possible = set()
         self._head_stop_epochs = {entity: 0 for entity in config.heads.values()}
@@ -1310,8 +1312,9 @@ class NativeControls:
         observation = (self.observations.record(self, "off_requested", source="watchdog",
                                                 request_generation=generation)
                        if entity == self.config.heater_entity else None)
+        head_revision = capture_head_write(self, entity)
         task = self.hass.async_create_background_task(
-            self._off_job(entity, generation, repair_epoch, observation), "Home Climate watchdog device stop", eager_start=False)
+            self._off_job(entity, generation, repair_epoch, observation, head_revision=head_revision), "Home Climate watchdog device stop", eager_start=False)
 
         self._stop_jobs[task] = entity
 
@@ -1334,12 +1337,13 @@ class NativeControls:
         return tuple(task for task, entity in self._stop_jobs.items()
                      if entity in entities and not task.done())
 
-    async def _off_job(self, entity, generation, repair_epoch, observation=None):
+    async def _off_job(self, entity, generation, repair_epoch, observation=None, *, head_revision=None):
         if generation != self.command_generation(entity):
             if observation is not None:
                 self.observations.record(self, "off_not_dispatched", command=observation)
             return False
         try:
+            check_head_write(self, entity, head_revision)
             self.check_stop(entity)
             if self.repair_gate:
                 self.repair_gate.check(entity, repair_epoch, activation=False)
