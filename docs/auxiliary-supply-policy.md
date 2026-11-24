@@ -18,6 +18,21 @@ Living's heat pump participates normally in shared-system arbitration. The auxil
 
 Low battery inhibits the entire automated Dyson, including circulation. With adequate supply and reserve, heater-only comfort restrictions need not stop eligible fan-only circulation. During an ordinary 60-second heat recovery hold, circulation requires a previously proved native Off, fresh low dedicated load, available supply and no actual fault, cutoff ownership or uncertain work. Low-load evidence must remain current while circulating; lost evidence or supply requests a new native Off. Failed-shutdown, retained ownership and legacy cooldown obligations remain blocking. Critical low-battery notifications remain active during manual ownership.
 
+When Home Climate has observed missing or untrusted battery telemetry, a
+returning low reading does not by itself send a critical low-battery alert.
+Two consecutive, distinct fresh Home Assistant battery reports at or below
+40% qualify the reconnect; one fresh report above 40% resolves the episode
+without a new low-battery alert. A repeated poll of the same timestamp does
+not confirm it, and an intervening invalid report breaks confirmation. If
+telemetry does not qualify within three minutes, Home Climate reports a
+battery telemetry fault instead. A previously confirmed low-battery alert
+stays active until a fresh healthy report. A low reading without an observed
+telemetry interruption still alerts immediately, even if AC turns Off.
+
+This filter only affects notices. It does not change the 40% safety threshold,
+the existing 75-second isolated SOC-dropout grace, or the shutdown and power
+proof rules.
+
 Explicit **Dyson manual takeover** transfers only the auxiliary to the user. It persists across schedules and restarts until explicitly returned; other heads and fans remain automated. During takeover Home Climate does not apply its reserve cutoff or fallback preset to deliberate manual operation. Ordinary app changes do not silently grant takeover. Outstanding jobs and genuine shutdown faults require reconciliation, and takeover never clears saved cut ownership. Return requires supported stop/readiness checks; low reserve can then keep automated heat inhibited without preventing ownership return.
 
 ## Auxiliary startup and target acknowledgement

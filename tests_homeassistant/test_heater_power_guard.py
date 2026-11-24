@@ -1054,3 +1054,125 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.guard.blocked)
         self.assertEqual(self.calls, [])
 
+
+    def reserve_notice(self, key="auxiliary_low_battery"):
+        calls = [call for call in self.guard.alerts.update.call_args_list if call.args[0] == key]
+        return bool(calls and calls[-1].args[1])
+
+    async def start_reconnect_alert_fixture(self):
+        self.guard.alerts = Mock()
+        await self.start(listen=True)
+        self.wall = self.origin + 1
+        self.put(self.b.battery, "unavailable", {"unit_of_measurement": "%"})
+        await self.hass.async_block_till_done()
+
+    async def test_reconnect_zero_blocks_heat_without_false_low_alert(self):
+        await self.start_reconnect_alert_fixture()
+        self.write_snapshot(2, changes={
+            self.b.battery: (0, {"unit_of_measurement": "%"}),
+            self.b.ac_output_switch: ("off", {}),
+            self.b.input_power: (0, {"unit_of_measurement": "W"}),
+            self.b.output_power: (0, {"unit_of_measurement": "W"}),
+        })
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.guard.blocked)
+        self.assertFalse(self.reserve_notice())
+        self.assertFalse(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+        self.write_snapshot(9.37, changes={
+            self.b.battery: (100, {"unit_of_measurement": "%"}),
+            self.b.ac_output_switch: ("on", {}),
+            self.b.output_power: (150, {"unit_of_measurement": "W"}),
+        })
+        await self.hass.async_block_till_done()
+        low_calls = [call for call in self.guard.alerts.update.call_args_list
+                     if call.args[0] == "auxiliary_low_battery" and call.args[1]]
+        self.assertEqual(low_calls, [])
+        self.assertFalse(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+
+    async def test_reconnect_low_needs_two_distinct_fresh_reports_even_if_value_unchanged(self):
+        await self.start_reconnect_alert_fixture()
+        self.wall = self.origin + 2
+        self.put(self.b.battery, 40, {"unit_of_measurement": "%"})
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.reserve_notice())
+        # A normal maintenance tick or an unrelated HA state does not turn
+        # the same stored battery timestamp into a second report.
+        self.wall = self.origin + 7
+        self.guard._schedule_check()
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.reserve_notice())
+        self.wall = self.origin + 10
+        self.put(self.b.battery, 40, {"unit_of_measurement": "%"})
+        self.guard._schedule_check()  # ordinary periodic HA guard entry
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.reserve_notice())
+
+    async def test_unsettled_reconnect_reports_telemetry_fault_then_recovers(self):
+        await self.start_reconnect_alert_fixture()
+        self.wall = self.origin + 2
+        self.put(self.b.battery, 30, {"unit_of_measurement": "%"})
+        await self.hass.async_block_till_done()
+        self.wall = self.origin + 181
+        self.guard._schedule_check()
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.reserve_notice())
+        self.assertTrue(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+        self.wall = self.origin + 184
+        self.put(self.b.battery, 30, {"unit_of_measurement": "%"})
+        self.guard._schedule_check()
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.reserve_notice())  # the original low is no longer fresh
+        self.assertTrue(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+        self.wall = self.origin + 185
+        self.put(self.b.battery, 65, {"unit_of_measurement": "%"})
+        await self.hass.async_block_till_done()
+        self.assertFalse(self.reserve_notice())
+        self.assertFalse(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+
+    async def test_normal_low_alerts_immediately_even_with_simultaneous_supply_shutdown(self):
+        self.guard.alerts = Mock()
+        await self.start(listen=True)
+        self.write_snapshot(2, changes={
+            self.b.battery: (0, {"unit_of_measurement": "%"}),
+            self.b.ac_output_switch: ("off", {}),
+            self.b.input_power: (0, {"unit_of_measurement": "W"}),
+            self.b.output_power: (0, {"unit_of_measurement": "W"}),
+        })
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.reserve_notice())
+        self.wall = self.origin + 3
+        self.put(self.b.battery, "unavailable", {"unit_of_measurement": "%"})
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.reserve_notice())
+
+    async def test_reconnect_qualification_reaches_real_ha_notification_entry(self):
+        from homeassistant.components import persistent_notification
+        from custom_components.house_climate.controller.notifications import NotificationRoute, NotificationSettings
+        from custom_components.house_climate.notifications import AlertManager
+
+        await persistent_notification.async_setup(self.hass, {})
+        sent = []
+        async def deliver(call):
+            sent.append(call.data["title"])
+        self.hass.services.async_register("notify", "fixture_reserve_critical", deliver)
+        manager = AlertManager(self.hass, "fixture_reserve", NotificationSettings(
+            None, NotificationRoute("notify.fixture_reserve_critical", data={"data": {"priority": "high"}},
+                                    critical_capable=True)))
+        self.guard.alerts = manager
+        try:
+            await self.start(listen=True)
+            # State callbacks may coalesce: the missing edge must still count.
+            self.wall = self.origin + 2
+            self.put(self.b.battery, "unavailable", {"unit_of_measurement": "%"}, timestamp=self.wall - 1)
+            self.put(self.b.battery, 38, {"unit_of_measurement": "%"})
+            await self.hass.async_block_till_done()
+            self.assertNotIn("Home Climate: battery reserve low", sent)
+            self.wall = self.origin + 4
+            self.put(self.b.battery, 39, {"unit_of_measurement": "%"})
+            await self.hass.async_block_till_done()
+            self.assertEqual(sent.count("Home Climate: battery reserve low"), 1)
+            notices = persistent_notification._async_get_or_create_notifications(self.hass)
+            self.assertIn("home_climate_fixture_reserve_auxiliary_low_battery", notices)
+        finally:
+            self.guard.alerts = None
+            await manager.async_close()
