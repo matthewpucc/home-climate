@@ -97,8 +97,17 @@ class NativeControls:
         self._snapshot = {}
         self.power_guard = None
         self.observations = AuxiliaryDiagnostics()
-        self.mode_diagnostics = ModeDiagnostics(hass, entry_id, config.heads.values())
+        self.mode_diagnostics = ModeDiagnostics(
+            hass, entry_id, config.heads.values(), off_eligible=self._off_observation_eligible)
         self._publish()
+
+    def _off_observation_eligible(self, entity):
+        if (self.live and self.active and self.enabled and entity in self.owned
+                and not (self.recovering or self._claiming or self._closing or self.takeover_pending)
+                and entity not in self._uncertain_device_jobs and entity not in self._head_stop_pending
+                and not self.pending_device_jobs((entity,))):
+            return self.ownership_generation
+        return None
 
     async def async_load(self):
         await self.mode_diagnostics.async_load()

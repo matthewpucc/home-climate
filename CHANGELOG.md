@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Log [qualified unexplained Off reports](docs/unexpected-off-observation.md) for live, owned heat-pump heads; diagnostic only, with no change to equipment control or ownership.
+
 ## 0.9.34
 
 - Log bounded, credential-free reasons for direct Prometheus authentication failures without changing the HTTP response.
