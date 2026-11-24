@@ -29,6 +29,7 @@ from .controller.auxiliary_target import AuxiliaryTarget, trusted_auxiliary_stat
 from .controller.window_authorization import WindowAuthorization, check_window_authorization
 from .recovery import RecoveryManager
 from .repair_gate import RepairGate
+from .head_write_fence import capture_head_write, check_head_write
 from .reserve_split_native import ReserveSplitAuthorization, floor_valid as reserve_split_floor_valid
 from .reserve_split_native import proof as read_reserve_split_proof
 
@@ -189,6 +190,7 @@ class NativeAPI:
                 return []
         activation = self._is_activation(path, body)
         actuator = bool(body is not None and path.startswith(("services/climate/", "services/fan/")))
+        head_revision = capture_head_write(self.controls, body.get("entity_id")) if actuator else None
         cooling = self._shared_cooling_request(path, body)
         with self._reserve_split_lock:
             reserve_epoch = self._reserve_split_epoch if cooling else None
@@ -224,7 +226,7 @@ class NativeAPI:
         future = asyncio.run_coroutine_threadsafe(
             self._async_request(path, body, deadline, generation=generation, dispatch=dispatch,
                                 repair_epoch=repair_epoch, off_queue_deadline=off_queue_deadline,
-                                mode_recovery_reason=mode_recovery_reason), self.hass.loop
+                                mode_recovery_reason=mode_recovery_reason, head_revision=head_revision), self.hass.loop
         )
         try:
             wait = (max(0, deadline - time.monotonic()) if bounded_activation or proof_read else
@@ -488,7 +490,8 @@ class NativeAPI:
         return result
 
     async def _async_request(self, path, body, deadline, *, generation=None, dispatch=None,
-                             repair_epoch=None, off_queue_deadline=None, mode_recovery_reason=None):
+                             repair_epoch=None, off_queue_deadline=None, mode_recovery_reason=None,
+                             head_revision=None):
         # Cancelling the worker's future is not enough: a queued coroutine can
         # start before its cancellation callback when the loop resumes.
         dispatch_deadline = (off_queue_deadline if off_queue_deadline is not None and not self.stop_event.is_set()
@@ -558,7 +561,8 @@ class NativeAPI:
         task = self.hass.async_create_background_task(
             self._async_service_job(path, domain, service, body, deadline, activation,
                                     generation, dispatch, repair_epoch, operation,
-                                    off_queue_deadline=off_queue_deadline, mode_recovery_reason=mode_recovery_reason),
+                                    off_queue_deadline=off_queue_deadline, mode_recovery_reason=mode_recovery_reason,
+                                    head_revision=head_revision),
             "Home Climate device service", eager_start=False)
         self._service_jobs[task] = operation
         if controls is not None:
@@ -639,7 +643,7 @@ class NativeAPI:
 
     async def _async_service_job(self, path, domain, service, body, deadline, activation,
                                   generation, dispatch, repair_epoch, operation, *, off_queue_deadline=None,
-                                  mode_recovery_reason=None):
+                                  mode_recovery_reason=None, head_revision=None):
         if activation and self.stop_event.is_set():
             raise HAStopping("Controller is stopping; activation was not dispatched")
         dispatch_deadline = (off_queue_deadline if off_queue_deadline is not None and not self.stop_event.is_set()
@@ -716,6 +720,9 @@ class NativeAPI:
                 raise HAActivationDeferred("Fan dispatch requires a current trial reservation")
             self.head_fan_trials.validate_dispatch(dispatch.fan_trial_token,
                                                    body.get("entity_id"), body.get("fan_mode"))
+        # The logical target remains authoritative even if the typed adapter
+        # translated the service/address. Refusal precedes dispatch accounting.
+        check_head_write(controls, body.get("entity_id"), head_revision)
         if dispatch is None and self._shared_cooling_request(path, body):
             with self._reserve_split_lock:
                 if self._reserve_split_epoch:
@@ -1051,6 +1058,7 @@ class ControllerRuntime:
                 self.head_fan_trials = HeadFanTrials(self, entry_id)
                 await self.head_fan_trials.async_load()
                 self.api.head_fan_trials = self.head_fan_trials
+                self.controls.head_fan_trials = self.head_fan_trials
             if self.house_policy:
                 from .power_guard import HeaterPowerGuard
                 self.power_guard = HeaterPowerGuard(

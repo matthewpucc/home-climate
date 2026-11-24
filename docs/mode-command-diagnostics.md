@@ -39,3 +39,6 @@ equipment. A normal Home Assistant shutdown flushes the buffered record so the
 next scrape can see it; a crash or failed storage write may lose recent events.
 An unfinished saved dispatch is exposed as uncertain and cannot match a new
 runtime's feedback. Nothing is backfilled for past events that were not captured.
+
+For the separate read-only comparison of active-to-Off feedback, see
+[Unexplained heat-pump Off observations](unexpected-off-observation.md).

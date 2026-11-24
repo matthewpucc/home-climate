@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.35
+
+- Log [qualified unexplained Off reports](docs/unexpected-off-observation.md) for live, owned heat-pump heads; diagnostic only, with no change to equipment control or ownership unless explicitly opted in.
+- Add supervised opt-in per-head manual handoff with durable ownership, shared-direction interlocks and an explicit resume action after Controller Off.
+
 ## 0.9.34
 
 - Log bounded, credential-free reasons for direct Prometheus authentication failures without changing the HTTP response.

@@ -594,7 +594,7 @@ class NumericDiagnostic(ControllerEntity):
 
 class ControllerStatus(ControllerEntity):
     """Keep the existing status entity compatible with automations."""
-    _unrecorded_attributes = frozenset({"head_transition_history", "reserve_split"})
+    _unrecorded_attributes = frozenset({"head_transition_history", "reserve_split", "manual_head_handoff"})
     _attr_name = "Controller status"
     _attr_icon = "mdi:home-thermometer"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -625,6 +625,7 @@ class ControllerStatus(ControllerEntity):
                  "enabled_intent", "takeover_pending",
                  "auxiliary_decision", "auxiliary_policy", "reserve_split", "shared_stop", "seasonal",
                  "seasonal_policy", "shutdown_evidence") if key in status} | heartbeat_attributes(status) | {
+                    "manual_head_handoff": getattr(getattr(self.runtime, "controls", None), "manual_handoff_status", {}),
                     "head_transition_summary": head_transition_summary(
                         status, getattr(getattr(self.runtime, "config", None), "heads", {}).values())}
 

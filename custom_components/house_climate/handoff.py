@@ -15,6 +15,8 @@ from homeassistant.components.climate import ClimateEntityFeature
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.temperature import display_temp
 
+from .head_write_fence import capture_head_write, check_head_write
+
 from .controller.policy import native_target
 from .controller.sensors import from_f, to_f
 
@@ -205,7 +207,7 @@ def now():
 
 def arm(controls, devices):
     fallback = getattr(controls.config, "fallback", None)
-    if fallback is None:
+    if fallback is None or getattr(controls, "manual_head_entities", ()):
         return None
     plan = {
         "version": 1, "stage": "armed", "authorized": bool(controls.live),
@@ -608,12 +610,13 @@ async def step(controls):
             _add_auto_readback(controls, plan, entity, request)
         plan["requests"][entity] = request
         generation = controls.ownership_generation
+        head_revision = capture_head_write(controls, entity)
         await _save(controls)
         controls.service_inflight += 1
         async def dispatch(entity=entity, domain=domain, service=service, data=data,
                            epoch=epoch if controls.repair_gate else None,
                            generation=generation, request=request, retry=retry, mode_epochs=mode_epochs,
-                           fallback=fallback):
+                           fallback=fallback, head_revision=head_revision):
             started = False
             try:
                 if (controls.handoff is not plan or controls.takeover_pending
@@ -663,6 +666,9 @@ async def step(controls):
                             require_identity=plan.get("fan_minimum_percentages", {}).get(entity, 0) > 0,
                             controls=controls):
                         raise ValueError(issue)
+                check_head_write(controls, entity, head_revision)
+                if domain == "climate":
+                    controls.check_manual_head_interlock(entity)
                 request["dispatched"] = True
                 request["dispatched_at"] = now()
                 controls.head_activation_started(entity)
