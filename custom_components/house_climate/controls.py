@@ -22,6 +22,7 @@ from .controller.ha_package import watchdog_signature
 from .controller.sensors import probe_value
 from .auxiliary_diagnostics import AuxiliaryDiagnostics
 from .mode_diagnostics import ModeDiagnostics
+from .manual_heads import check_no_overlap, held_entities, read_manual_heads
 from .head_write_fence import HeadWriteFence, capture_head_write, check_head_write
 
 _LOGGER = logging.getLogger(__name__)
@@ -76,6 +77,8 @@ class NativeControls:
         self._auxiliary_heartbeat_off_ack = False
         self._auxiliary_stop_pending = False
         self._auxiliary_stop_epoch = 0
+        self.manual_heads = {}
+        self.manual_head_entities = frozenset()
         self.head_write_fence = HeadWriteFence(config.heads.values())
         self._head_inflight = {entity: 0 for entity in config.heads.values()}
         self._head_possible = set()
@@ -160,6 +163,20 @@ class NativeControls:
             if not isinstance(uncertain, list) or any(e not in (*devices, *pending, *auxiliary) for e in uncertain):
                 raise HAError("Invalid saved uncertain device commands")
             self._uncertain_device_jobs.update(uncertain)
+            records = read_manual_heads(data.get("manual_heads", {}))
+            registry = self.hass.data.get(er.DATA_REGISTRY)
+
+            def registry_entity(identity):
+                entry = registry.async_get(identity) if registry is not None else None
+                return entry.entity_id if entry is not None else None
+
+            held = held_entities(records, self.config.heads, registry_entity)
+            if self.config.heater_entity in held:
+                raise HAError("Saved manual heat-pump ownership conflicts with the auxiliary heater")
+            check_no_overlap(held, devices, auxiliary, uncertain, self.handoff)
+            self.manual_heads, self.manual_head_entities = records, held
+            for entity in held.intersection(self.config.heads.values()):
+                self.head_write_fence.rotate(entity, blocked=True)
             # This journal remembers identity only, never earlier Off or a
             # prior controller's right to skip. Require a new native report
             # after this runtime's load and exact registry identity.
@@ -170,6 +187,7 @@ class NativeControls:
                     continue
                 identity, boundary = binding.get("identity"), binding.get("not_before")
                 if (entity in self.config.heads.values() and entity not in self.owned
+                        and entity not in self.manual_head_entities
                         and isinstance(identity, str) and identity
                         and type(boundary) in (float, int) and math.isfinite(boundary) and boundary > 0):
                     self._replacement_startup_off[entity] = {
@@ -215,6 +233,7 @@ class NativeControls:
             "auxiliary_generation": self.auxiliary_generation,
             "auxiliary_stop_revision": self.auxiliary_stop_revision,
             "handoff": self.handoff,
+            "manual_head_entities": self.manual_head_entities,
             "generation": self.ownership_generation,
             "replacement_startup_candidates": tuple(
                 entity for entity, proof in self._replacement_startup_off.items()
@@ -462,6 +481,8 @@ class NativeControls:
                         or self._claiming or self._intent_dirty or self.hass.is_stopping):
                     raise HAError("Switch Controller Off and wait for the stopped intent to be saved")
                 heads = tuple(self.config.heads.values())
+                if (retired in self.manual_head_entities or replacement in self.manual_head_entities):
+                    raise HAError("Manual heat-pump disposition must be resolved before adapter retirement")
                 if (not isinstance(retired, str) or not retired.startswith("climate.")
                         or retired in self.config.climate_entities or retired in heads
                         or retired == self.auxiliary_manual_entity or retired in self.pending_auxiliaries
@@ -779,6 +800,9 @@ class NativeControls:
         auxiliary = self.pending_auxiliaries if auxiliary is None else auxiliary
         if auxiliary:
             data["pending_auxiliaries"] = list(auxiliary)
+        if self.manual_heads:
+            check_no_overlap(self.manual_head_entities, data["devices"], auxiliary, uncertain, handoff)
+            data["manual_heads"] = {role: row.serialize() for role, row in self.manual_heads.items()}
         if verify_write and self.hass.is_stopping:
             raise HAError("Home Assistant is stopping; adapter retirement is not being saved")
         await self.store.async_save(data)
@@ -810,6 +834,7 @@ class NativeControls:
                                 devices = tuple(entity for entity in [*self.config.climate_entities,
                                                  *self.config.fans.values()]
                                                 if entity not in self.pending_auxiliaries
+                                                and entity not in self.manual_head_entities
                                                 and not (self.auxiliary_manual and entity == self.config.heater_entity))
                                 pending = tuple(entity for entity in self.pending_fans
                                                 if entity not in devices)
@@ -1182,6 +1207,7 @@ class NativeControls:
         self._publish()
 
     def check_activation(self, entity, data, *, generation=None):
+        self.check_manual_head_interlock(entity)
         if generation is not None and generation != self.command_generation(entity):
             raise HAActivationDeferred("Command belongs to an earlier controller lease")
         if entity == self.config.heater_entity and (self.auxiliary_manual or self._manual_transition):
@@ -1211,7 +1237,16 @@ class NativeControls:
                 and not self.probes_safe(self._probe_states())):
             raise HAError("External room probes block auxiliary heat")
 
+    def check_manual_head_interlock(self, entity):
+        # At this persistence-only stage there is no shared-mode proof for a
+        # manual head. Do not allow any other shared head to begin output.
+        if self.manual_head_entities and (entity in self.manual_head_entities
+                                          or entity in self.config.heads.values()):
+            raise HAActivationDeferred("Manual heat-pump ownership blocks shared activation pending arbitration")
+
     def check_stop(self, entity):
+        if entity in self.manual_head_entities:
+            raise HAActivationDeferred("Stop belongs to a manually controlled heat pump")
         if entity == self.config.heater_entity and (self.auxiliary_manual or self._manual_transition):
             raise HAActivationDeferred("Routine auxiliary stop is excluded by manual ownership")
         if entity not in self.owned and entity not in self.pending_fans and entity not in self.pending_auxiliaries:
