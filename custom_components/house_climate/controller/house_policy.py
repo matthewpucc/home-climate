@@ -176,6 +176,7 @@ def house_configuration(previous=None, bindings=None, protection=None, policy_se
         "head_minimum_run_seconds": 300, "head_minimum_off_seconds": 180,
         "head_activation_timeout_seconds": 120,
         "head_cool_min_f": {entity: 65 for entity in bindings.heads.values()},
+        "whole_fahrenheit_heads": list(bindings.whole_fahrenheit_heads),
         "head_heat_call_offset_f": 5, "head_cool_call_offset_f": 5,
         "sensor_stale_seconds": 900, "sensor_confirmation_seconds": 60,
         "sensor_disagreement_f": 3, "forecast_minutes": 10,

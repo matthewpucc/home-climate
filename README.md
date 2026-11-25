@@ -17,6 +17,23 @@ Use the [installation guide](docs/hacs.md) to add this repository through Home A
 3. Open **Configure** to review live permission, protection settings and the prepopulated policy objects. Inspect plans and source/ownership diagnostics before allowing active control.
 4. Resolve any retained shutdown or recovery obligation through its supported procedure. When ready, permit live commands and turn on **Controller enabled**.
 
+For a heat pump whose adapter uses whole-degree Fahrenheit setpoints despite
+advertising a fractional step (for example, a Serin running CN105
+`fahrenheit_compatibility: standard`), opt in by adding its **exact native
+climate entity ID** at the top level of the private bindings file:
+
+```json
+"whole_fahrenheit_heads": ["climate.shared_head"]
+```
+
+This example ID is synthetic. After the binding is reloaded, only listed heads
+on a Fahrenheit Home Assistant install use whole-degree Heat/Cool commands:
+67.5°F goes out as 68°F. The room target, sensor precision, native Auto handoff,
+and command acknowledgement deadline and matching rules do not change. Only
+list a head whose command/feedback behavior is confirmed; leave other heads
+unlisted. When replacing or renaming a listed head, remove or update its entry
+at the same time as the head binding.
+
 Existing installs update in place. The old private filename `house_climate_bindings.json` remains supported when the current filename is absent. An upgrade does not clear saved cut ownership or shutdown faults. A successful installation or passed historical commissioning test does not prove current equipment readiness.
 
 See the [configuration guide](docs/configuration.md) for the editor, default schedules, source descriptors, manual takeover and notification routing.

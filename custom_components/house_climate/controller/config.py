@@ -250,6 +250,7 @@ class Config:
     head_heat_call_offset_f: float = 5
     head_cool_call_offset_f: float = 5
     head_cool_min_f: dict[str, float] = field(default_factory=dict)
+    whole_fahrenheit_heads: tuple[str, ...] = ()
     sensor_stale_seconds: float = 900
     sensor_confirmation_seconds: float = 60
     sensor_disagreement_f: float = 3
@@ -556,6 +557,11 @@ class Config:
             raise HeartbeatTimeoutError(
                 "auxiliary_heartbeat_timeout_seconds", "auxiliary_heartbeat_exceeds_controller",
                 "auxiliary_heartbeat_timeout_seconds must not exceed heartbeat_timeout_seconds")
+        if (not isinstance(self.whole_fahrenheit_heads, (list, tuple))
+                or any(not isinstance(entity, str) or entity not in self.heads.values()
+                       for entity in self.whole_fahrenheit_heads)
+                or len(set(self.whole_fahrenheit_heads)) != len(self.whole_fahrenheit_heads)):
+            raise ValueError("whole_fahrenheit_heads must list distinct bound heat-pump entity IDs")
         if not isinstance(self.head_cool_min_f, dict):
             raise ValueError("head_cool_min_f must map configured climate entity IDs to temperatures")
         for entity, value in self.head_cool_min_f.items():
