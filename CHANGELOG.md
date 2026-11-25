@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.36
+
+- Add an explicit whole-Fahrenheit command profile for affected heat-pump adapters. Opted-in heads use whole-degree Heat/Cool setpoints while room targets, command acknowledgement, cooling floors and recovery behavior stay unchanged.
+
 ## 0.9.35
 
 - Log [qualified unexplained Off reports](docs/unexpected-off-observation.md) for live, owned heat-pump heads; diagnostic only, with no change to equipment control or ownership unless explicitly opted in.

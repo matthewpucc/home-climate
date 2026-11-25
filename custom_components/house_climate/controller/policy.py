@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 import math
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 
 from .config import Config, Settings
 from .sensors import Reading, Sensors, forecast_slope, from_f, to_f
@@ -48,6 +48,31 @@ def native_target(fahrenheit: float, attrs: dict, unit: str, *, minimum_f: float
     return round(value, 3)
 
 
+def uses_whole_fahrenheit(config: Config, entity: str, unit: str) -> bool:
+    return unit in ("F", "°F") and entity in config.whole_fahrenheit_heads
+
+
+def head_native_target(config: Config, entity: str, mode: str | None, fahrenheit: float,
+                       attrs: dict, unit: str) -> float:
+    """Select one representable native head command without changing room comfort."""
+    floor = config.head_cool_min_f.get(entity) if mode == "cool" else None
+    if not uses_whole_fahrenheit(config, entity, unit):
+        return native_target(fahrenheit, attrs, unit, minimum_f=floor)
+
+    # This explicit equipment profile overrides the advertised step: Serin
+    # standard Fahrenheit lookup can report a different value from HA's 0.5° UI.
+    low, high = float(attrs["min_temp"]), float(attrs["max_temp"])
+    if not all(math.isfinite(number) for number in (low, high, fahrenheit)) or low > high:
+        raise ValueError("Invalid climate temperature range")
+    first = math.ceil(max(low, floor) if floor is not None else low)
+    last = math.floor(high)
+    if first > last:
+        constraint = f" and cooling minimum {floor:g}°F" if floor is not None else ""
+        raise ValueError(f"No whole-Fahrenheit setpoint within HA range {low:g} to {high:g}°F{constraint}")
+    nearest = int(Decimal(str(fahrenheit)).to_integral_value(rounding=ROUND_HALF_UP))
+    return max(first, min(last, nearest))
+
+
 def call_target_f(config: Config, entity: str, mode: str, comfort: float,
                   states: dict, climate_unit: str) -> float:
     """An equipment call setpoint; room probes still decide when the call ends."""
@@ -70,7 +95,7 @@ def call_target_f(config: Config, entity: str, mode: str, comfort: float,
     if floor is not None:
         target = max(target, floor)
     try:
-        return to_f(native_target(target, attrs, climate_unit, minimum_f=floor), climate_unit)
+        return to_f(head_native_target(config, entity, mode, target, attrs, climate_unit), climate_unit)
     except (KeyError, TypeError, ValueError, OverflowError):
         # Disconnected/incomplete heads still get an explainable shadow plan.
         # The executor retains its activation-time metadata validation.
@@ -473,9 +498,11 @@ class Policy:
         if not modes or not missing or self.head_guard.constraint(head, mode, rooms, targets, states):
             return None
         floor = self.config.head_cool_min_f.get(entity) if mode == "cool" else None
-        if floor is not None:
+        if floor is not None or uses_whole_fahrenheit(self.config, entity, climate_unit):
             try:
-                native_target(floor, attrs, climate_unit, minimum_f=floor)
+                head_native_target(self.config, entity, mode,
+                                   floor if floor is not None else to_f(float(attrs["min_temp"]), climate_unit),
+                                   attrs, climate_unit)
             except ValueError:
                 return None
             except (KeyError, TypeError, OverflowError):
@@ -659,21 +686,27 @@ class Policy:
                     plan.warnings.append(
                         f"{labels}: {mode} requested but unavailable (HA modes: {', '.join(modes)})")
                     continue
-                floor = self.config.head_cool_min_f.get(self.config.heads[head]) if mode == "cool" else None
-                if floor is not None:
-                    attrs = states.get(self.config.heads[head], {}).get("attributes", {})
+                entity = self.config.heads[head]
+                floor = self.config.head_cool_min_f.get(entity) if mode == "cool" else None
+                if floor is not None or uses_whole_fahrenheit(self.config, entity, climate_unit):
+                    attrs = states.get(entity, {}).get("attributes", {})
                     try:
-                        # Incomplete/invalid HA metadata keeps the existing
-                        # executor recovery path. Only a proven floor conflict
-                        # removes this cooling call from shared arbitration.
-                        native_target(floor, attrs, climate_unit)
+                        # Missing range metadata is handled at execution.
+                        # Only a known range/grid conflict removes this call
+                        # from shared arbitration.
+                        lower, upper = float(attrs["min_temp"]), float(attrs["max_temp"])
+                        if not all(math.isfinite(value) for value in (lower, upper)) or lower > upper:
+                            raise ValueError("Invalid climate temperature range")
+                        test_target = floor if floor is not None else to_f(lower, climate_unit)
+                        if not uses_whole_fahrenheit(self.config, entity, climate_unit):
+                            native_target(test_target, attrs, climate_unit)
                     except (KeyError, TypeError, ValueError, OverflowError):
                         pass
                     else:
                         try:
-                            native_target(floor, attrs, climate_unit, minimum_f=floor)
+                            head_native_target(self.config, entity, mode, test_target, attrs, climate_unit)
                         except ValueError as exc:
-                            plan.warnings.append(f"{head}: cooling unavailable because {exc}")
+                            plan.warnings.append(f"{head}: {mode}ing unavailable because {exc}")
                             continue
                 constraint = self.head_guard.constraint(head, mode, rooms, plan.room_targets, states)
                 if constraint:

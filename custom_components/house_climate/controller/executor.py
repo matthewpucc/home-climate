@@ -11,7 +11,7 @@ from .ha import HAActivationDeferred, HAError
 from .head_guard import head_constraint
 from .manual_head_direction import manual_heads_off, permits_direction, read_scope, trusted_mode
 from .protection_context import limits
-from .policy import Plan, call_target_f, native_target
+from .policy import Plan, call_target_f, head_native_target, native_target, uses_whole_fahrenheit
 from .sensors import from_f, to_f
 from .auxiliary_dispatch import manual_auxiliary, soc_grace_continuation, soc_grace_observed
 from .auxiliary_target import AuxiliaryTarget, trusted_auxiliary_state
@@ -485,13 +485,17 @@ class Executor:
         floor = (self.config.head_cool_min_f.get(entity)
                  if not heater and mode == "cool" and entity in self.head_cycles else None)
         try:
-            result = native_target(fahrenheit, attrs, self.unit, minimum_f=floor)
+            result = (head_native_target(self.config, entity, mode, fahrenheit, attrs, self.unit)
+                      if not heater and entity in self.head_cycles
+                      else native_target(fahrenheit, attrs, self.unit))
             if heater and not float(attrs["min_temp"]) <= from_f(fahrenheit, self.unit) <= float(attrs["max_temp"]):
                 raise ControlFault("Configured high heater setpoint is outside its supported range")
             return result
         except (KeyError, ValueError, TypeError, OverflowError) as exc:
             if floor is not None:
                 raise ControlFault(f"Cooling minimum {floor:g}°F cannot be applied to {entity}: {exc}") from None
+            if not heater and uses_whole_fahrenheit(self.config, entity, self.unit):
+                raise ControlFault(f"Whole-Fahrenheit target cannot be applied to {entity}: {exc}") from None
             raise ControlFault(f"Missing/invalid climate temperature range: {entity}") from None
 
     def _command_timeout_message(self, entity, service, data, observed):
@@ -811,7 +815,9 @@ class Executor:
             return
         floor_configured = (not heater and mode == "cool" and entity in self.head_cycles
                             and entity in self.config.head_cool_min_f)
-        if not heater and not floor_configured and self._head_off_guard(entity, states, now):
+        target_constraint = floor_configured or (
+            not heater and uses_whole_fahrenheit(self.config, entity, self.unit))
+        if not heater and not target_constraint and self._head_off_guard(entity, states, now):
             return
         selected = None
         try:
@@ -833,7 +839,7 @@ class Executor:
                 self.off(entity, states, now, preserve_capability=True)
             return
         except ControlFault as exc:
-            if not floor_configured:
+            if not target_constraint:
                 raise
             # This is a configuration/metadata constraint, not a failed
             # device command. Keep the issue local and exclude automatic reload.
@@ -843,7 +849,7 @@ class Executor:
             self._sync_issue(entity)
             self.off(entity, states, now, preserve_capability=True)
             return
-        if floor_configured and self._head_off_guard(entity, states, now):
+        if target_constraint and self._head_off_guard(entity, states, now):
             return
         if heater and mode == "heat" and not self._auxiliary_native_trusted(state):
             if self._auxiliary_startup is not None and self._auxiliary_startup.since is not None:
@@ -1558,9 +1564,9 @@ class Executor:
                 try:
                     # Fresh capability limits may differ from the cached policy
                     # snapshot; this never recalculates bias from a changing sensor.
-                    floor = self.config.head_cool_min_f.get(entity) if plan.mode == "cool" else None
-                    call = to_f(native_target(call, states.get(entity, {}).get("attributes", {}),
-                                              self.unit, minimum_f=floor), self.unit)
+                    call = to_f(head_native_target(self.config, entity, plan.mode, call,
+                                                   states.get(entity, {}).get("attributes", {}),
+                                                   self.unit), self.unit)
                 except (KeyError, TypeError, ValueError, OverflowError):
                     pass
                 plan.head_call_targets_f[key] = call

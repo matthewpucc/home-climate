@@ -131,6 +131,7 @@ class HouseBindings:
     windows: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     outdoor: tuple[OutdoorProbe, ...] = ()
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
+    whole_fahrenheit_heads: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not all(isinstance(value, Mapping) for value in (self.heads, self.rooms, self.fans, self.windows)):
@@ -140,6 +141,12 @@ class HouseBindings:
         _keys(selected_rooms, ROOM_ROLES, "rooms")
         _keys(fans, FAN_ROLES, "fans", optional=OPTIONAL_FAN_ROLES)
         heads = {role: _entity(value, "climate", f"heads.{role}") for role, value in heads.items()}
+        whole_f = self.whole_fahrenheit_heads
+        if (not isinstance(whole_f, (list, tuple))
+                or any(not isinstance(entity, str) or entity not in heads.values() for entity in whole_f)
+                or len(set(whole_f)) != len(whole_f)):
+            raise BindingsError("whole_fahrenheit_heads must list distinct bound heat-pump entity IDs")
+        object.__setattr__(self, "whole_fahrenheit_heads", tuple(whole_f))
         heater = _entity(self.heater, "climate", "heater")
         if len(set(heads.values()) | {heater}) != len(heads) + 1:
             raise BindingsError("Heads and the auxiliary heater must be distinct")
@@ -218,7 +225,7 @@ class HouseBindings:
 
     @classmethod
     def from_dict(cls, raw):
-        _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings", optional={"windows", "outdoor", "notifications"})
+        _keys(raw, {"heads", "rooms", "fans", "heater", "power"}, "Bindings", optional={"windows", "outdoor", "notifications", "whole_fahrenheit_heads"})
         _keys(raw["heads"], HEAD_ROLES, "heads")
         _keys(raw["rooms"], ROOM_ROLES, "rooms")
         _keys(raw["fans"], FAN_ROLES, "fans", optional=OPTIONAL_FAN_ROLES)
@@ -246,7 +253,7 @@ class HouseBindings:
         if not isinstance(outdoor, list) or any(not isinstance(item, dict) for item in outdoor):
             raise BindingsError("outdoor must list explicit current-temperature source objects")
         return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power, windows, outdoor,
-                   NotificationSettings.from_dict(raw.get("notifications")))
+                   NotificationSettings.from_dict(raw.get("notifications")), raw.get("whole_fahrenheit_heads", ()))
 
     def room_probes(self, room):
         """Resolve legacy IDs and explicit physical-source mappings uniformly."""
@@ -260,6 +267,8 @@ class HouseBindings:
                                   if isinstance(probe, Probe) else probe) for probe in probes]
                           for role, probes in self.rooms.items()},
                 "fans": dict(self.fans), "heater": self.heater, "power": power}
+        if self.whole_fahrenheit_heads:
+            result["whole_fahrenheit_heads"] = list(self.whole_fahrenheit_heads)
         if self.windows:
             result["windows"] = {role: list(entities) for role, entities in self.windows.items()}
         if self.outdoor:
