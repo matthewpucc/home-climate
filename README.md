@@ -17,22 +17,22 @@ Use the [installation guide](docs/hacs.md) to add this repository through Home A
 3. Open **Configure** to review live permission, protection settings and the prepopulated policy objects. Inspect plans and source/ownership diagnostics before allowing active control.
 4. Resolve any retained shutdown or recovery obligation through its supported procedure. When ready, permit live commands and turn on **Controller enabled**.
 
-For a heat pump whose adapter uses whole-degree Fahrenheit setpoints despite
-advertising a fractional step (for example, a Serin running CN105
-`fahrenheit_compatibility: standard`), opt in by adding its **exact native
-climate entity ID** at the top level of the private bindings file:
+On a Fahrenheit Home Assistant installation, Home Climate sends whole-degree
+Heat/Cool equipment setpoints to bound heads whose entity IDs contain the
+underscore-delimited name `serin` (for example,
+`climate.serin_guest_room_heat_pump`). This matches the CN105
+`fahrenheit_compatibility: standard` firmware behavior: 67.5°F goes out as 68°F.
+Other heads retain their existing precision. Room targets, sensor precision,
+native Auto handoff, and acknowledgement rules do not change.
 
-```json
-"whole_fahrenheit_heads": ["climate.shared_head"]
-```
-
-This example ID is synthetic. After the binding is reloaded, only listed heads
-on a Fahrenheit Home Assistant install use whole-degree Heat/Cool commands:
-67.5°F goes out as 68°F. The room target, sensor precision, native Auto handoff,
-and command acknowledgement deadline and matching rules do not change. Only
-list a head whose command/feedback behavior is confirmed; leave other heads
-unlisted. When replacing or renaming a listed head, remove or update its entry
-at the same time as the head binding.
+To manage this explicitly, set `whole_fahrenheit_heads` in the private bindings
+file. The list replaces the automatic selection, so include all desired heads,
+including any renamed Serin adapters or non-Serin adapters that require this.
+Use exact native climate entity IDs. Set `[]` to disable this behavior, for
+example if your Serin firmware uses fractional setpoints, or omit the key to
+restore automatic selection. When renaming or replacing a head in an explicit
+list, update its list entry at the same time as its binding. Reload Home Climate
+after changing the bindings.
 
 Existing installs update in place. The old private filename `house_climate_bindings.json` remains supported when the current filename is absent. An upgrade does not clear saved cut ownership or shutdown faults. A successful installation or passed historical commissioning test does not prove current equipment readiness.
 

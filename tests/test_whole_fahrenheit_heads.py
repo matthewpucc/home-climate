@@ -1,4 +1,4 @@
-"""Only an explicitly bound Fahrenheit adapter gets integer equipment commands."""
+"""Whole-degree equipment commands for recognized Serin or explicitly configured heads."""
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -110,7 +110,7 @@ class WholeFahrenheitHeadTests(unittest.TestCase):
         self.assertEqual(self.commands(ha, self.guest)[0]["temperature"], 67.5)
         self.assertEqual(controller.recovery_status(0)["devices"][self.bonus]["kind"], "configuration")
 
-    def test_private_wiring_only_accepts_explicit_distinct_bound_head_ids(self):
+    def test_private_wiring_validates_explicit_distinct_bound_head_ids(self):
         raw = example_bindings().to_dict()
         entity = raw["heads"]["bonus"]
         raw["whole_fahrenheit_heads"] = [entity]
@@ -129,3 +129,52 @@ class WholeFahrenheitHeadTests(unittest.TestCase):
             path.write_text(json.dumps(replacement))
             with self.assertRaises(BindingsError):
                 load_bindings(directory)
+
+    def test_private_bindings_default_applies_to_all_four_serin_heads(self):
+        raw = example_bindings().to_dict()
+        raw["heads"] = {
+            "bonus": "climate.media_room_serin_bonus_heat_pump",
+            "guest": "climate.guest_room_serin_guest_heat_pump",
+            "primary": "climate.serin_suite_heat_pump",
+            "living": "climate.common_area_serin_living_heat_pump",
+        }
+        attrs = {"min_temp": 60, "max_temp": 85, "target_temp_step": .5}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / BINDINGS_FILENAME
+            path.write_text(json.dumps(raw))
+            loaded = load_bindings(directory)
+            self.assertNotIn("whole_fahrenheit_heads", loaded.to_dict())
+            cfg = house_configuration(bindings=loaded)
+            self.assertCountEqual(cfg.whole_fahrenheit_heads, raw["heads"].values())
+            for entity in raw["heads"].values():
+                for mode in ("heat", "cool"):
+                    with self.subTest(entity=entity, mode=mode):
+                        self.assertEqual(head_native_target(cfg, entity, mode, 67.5, attrs, "°F"), 68)
+                self.assertEqual(head_native_target(cfg, entity, "heat", 67.1,
+                                                  {"min_temp": 16, "max_temp": 29, "target_temp_step": .5},
+                                                  "°C"), 19.5)
+
+    def test_mixed_bindings_and_explicit_overrides_round_trip(self):
+        raw = example_bindings().to_dict()
+        raw["heads"].update(bonus="climate.serin_bonus", primary="climate.notserin_primary",
+                            guest="climate.guest_serin", living="climate.kumo_living")
+        for override, expected in (
+            ({}, ["climate.serin_bonus", "climate.guest_serin"]),
+            ({"whole_fahrenheit_heads": []}, []),
+            ({"whole_fahrenheit_heads": ["climate.kumo_living"]}, ["climate.kumo_living"]),
+        ):
+            with self.subTest(override=override):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / BINDINGS_FILENAME
+                    path.write_text(json.dumps(dict(raw, **override)))
+                    loaded = load_bindings(directory)
+                    cfg = house_configuration(bindings=loaded)
+                    self.assertCountEqual(cfg.whole_fahrenheit_heads, expected)
+                    attrs = {"min_temp": 60, "max_temp": 85, "target_temp_step": .5}
+                    for entity in raw["heads"].values():
+                        target = head_native_target(cfg, entity, "cool", 67.5, attrs, "°F")
+                        self.assertEqual(target, 68 if entity in expected else 67.5)
+                    emitted = loaded.to_dict()
+                    self.assertEqual("whole_fahrenheit_heads" in emitted, bool(override))
+                    path.write_text(json.dumps(emitted))
+                    self.assertEqual(load_bindings(directory), loaded)

@@ -131,7 +131,8 @@ class HouseBindings:
     windows: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     outdoor: tuple[OutdoorProbe, ...] = ()
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
-    whole_fahrenheit_heads: tuple[str, ...] = ()
+    # None means infer the default; an empty list explicitly opts out.
+    whole_fahrenheit_heads: tuple[str, ...] | None = None
 
     def __post_init__(self):
         if not all(isinstance(value, Mapping) for value in (self.heads, self.rooms, self.fans, self.windows)):
@@ -142,11 +143,12 @@ class HouseBindings:
         _keys(fans, FAN_ROLES, "fans", optional=OPTIONAL_FAN_ROLES)
         heads = {role: _entity(value, "climate", f"heads.{role}") for role, value in heads.items()}
         whole_f = self.whole_fahrenheit_heads
-        if (not isinstance(whole_f, (list, tuple))
-                or any(not isinstance(entity, str) or entity not in heads.values() for entity in whole_f)
-                or len(set(whole_f)) != len(whole_f)):
-            raise BindingsError("whole_fahrenheit_heads must list distinct bound heat-pump entity IDs")
-        object.__setattr__(self, "whole_fahrenheit_heads", tuple(whole_f))
+        if whole_f is not None:
+            if (not isinstance(whole_f, (list, tuple))
+                    or any(not isinstance(entity, str) or entity not in heads.values() for entity in whole_f)
+                    or len(set(whole_f)) != len(whole_f)):
+                raise BindingsError("whole_fahrenheit_heads must list distinct bound heat-pump entity IDs")
+            object.__setattr__(self, "whole_fahrenheit_heads", tuple(whole_f))
         heater = _entity(self.heater, "climate", "heater")
         if len(set(heads.values()) | {heater}) != len(heads) + 1:
             raise BindingsError("Heads and the auxiliary heater must be distinct")
@@ -252,8 +254,17 @@ class HouseBindings:
         outdoor = raw.get("outdoor", [])
         if not isinstance(outdoor, list) or any(not isinstance(item, dict) for item in outdoor):
             raise BindingsError("outdoor must list explicit current-temperature source objects")
+        if "whole_fahrenheit_heads" in raw and raw["whole_fahrenheit_heads"] is None:
+            raise BindingsError("whole_fahrenheit_heads must list distinct bound heat-pump entity IDs")
         return cls(raw["heads"], raw["rooms"], raw["fans"], raw["heater"], power, windows, outdoor,
-                   NotificationSettings.from_dict(raw.get("notifications")), raw.get("whole_fahrenheit_heads", ()))
+                   NotificationSettings.from_dict(raw.get("notifications")), raw.get("whole_fahrenheit_heads"))
+
+    def resolved_whole_fahrenheit_heads(self) -> tuple[str, ...]:
+        """Use an explicit list if present; otherwise recognize standard Serin IDs."""
+        if self.whole_fahrenheit_heads is not None:
+            return self.whole_fahrenheit_heads
+        return tuple(entity for entity in self.heads.values()
+                     if "serin" in entity.split(".", 1)[1].split("_"))
 
     def room_probes(self, room):
         """Resolve legacy IDs and explicit physical-source mappings uniformly."""
@@ -267,7 +278,7 @@ class HouseBindings:
                                   if isinstance(probe, Probe) else probe) for probe in probes]
                           for role, probes in self.rooms.items()},
                 "fans": dict(self.fans), "heater": self.heater, "power": power}
-        if self.whole_fahrenheit_heads:
+        if self.whole_fahrenheit_heads is not None:
             result["whole_fahrenheit_heads"] = list(self.whole_fahrenheit_heads)
         if self.windows:
             result["windows"] = {role: list(entities) for role, entities in self.windows.items()}
