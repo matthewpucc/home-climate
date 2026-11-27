@@ -29,7 +29,7 @@ HEATER_OFF_MAX_W = 100.0  # Non-heating evidence, not an amp or appliance-rating
 BATTERY_RESERVE_PERCENT = 40.0
 TELEMETRY_MAX_AGE_SECONDS = 180
 BATTERY_MAX_AGE_SECONDS = 900
-SOC_RECONNECT_ALERT_SECONDS = 180.0
+SOC_RECONNECT_DIAGNOSTIC_SECONDS = 180.0
 SOC_GRACE_SECONDS = 75.0
 SOC_GRACE_PRIOR_MAX_AGE_SECONDS = 120.0
 SOC_GRACE_PRIOR_MIN_PERCENT = 50.0
@@ -248,6 +248,7 @@ class HeaterPowerGuard:
         self.manual_override = lambda: False
         self.alerts = None
         self._low_battery_alert_active = False
+        self._battery_telemetry_fault_logged = False
         self._reserve_alert_last_stamp = None
         self._reserve_alert_reconnect = None
         self._reserve_alert_low_stamp = None
@@ -973,12 +974,23 @@ class HeaterPowerGuard:
         self._low_battery_alert_active = value <= BATTERY_RESERVE_PERCENT
         self._reserve_alert_reconnect = self._reserve_alert_low_stamp = None
 
+    def _battery_telemetry_fault(self):
+        reconnect = self._reserve_alert_reconnect
+        return (reconnect is not None
+                and self._clock() >= reconnect[0] + SOC_RECONNECT_DIAGNOSTIC_SECONDS)
+
     def _update_alerts(self):
+        # Missing or unconfirmed telemetry is diagnostic, not a user alert.
+        telemetry_fault = self._battery_telemetry_fault()
+        if telemetry_fault and not self._battery_telemetry_fault_logged:
+            _LOGGER.warning(
+                "Auxiliary battery telemetry did not recover within %.0f seconds (%s); "
+                "charge remains unconfirmed",
+                SOC_RECONNECT_DIAGNOSTIC_SECONDS, self.bindings.battery,
+            )
+        self._battery_telemetry_fault_logged = telemetry_fault
         if self.alerts is None:
             return
-        reconnect = self._reserve_alert_reconnect
-        telemetry_fault = bool(reconnect is not None
-                               and self._clock() >= reconnect[0] + SOC_RECONNECT_ALERT_SECONDS)
         try:
             self.alerts.update("auxiliary_low_battery", self._low_battery_alert_active,
                 "Home Climate: battery reserve low",
@@ -986,10 +998,6 @@ class HeaterPowerGuard:
                  "Home Climate will not apply the automated reserve cutoff." if self.manual_control else
                  "The last qualified battery reading is at or below the 40% reserve. Automated Dyson heat and circulation are inhibited."),
                 severity="critical")
-            self.alerts.update("auxiliary_battery_telemetry_fault", telemetry_fault,
-                "Home Climate: battery telemetry did not recover",
-                "The battery feed did not return a healthy charge report or two distinct low reports "
-                "after reconnecting. Check the battery connection and telemetry in Home Assistant.")
             self.alerts.update("auxiliary_shutdown_fault", bool(self._shutdown_fault or self._shutdown_contradicted
                                or self._emergency_ac_latched),
                 "Home Climate: heater shutdown needs attention",
@@ -1069,6 +1077,7 @@ class HeaterPowerGuard:
                 "supervised_recovery": dict(self._supervised_recovery),
                 "circuit_power_w": r.circuit_w, "elite_input_w": r.input_w,
                 "elite_output_w": r.output_w, "battery_percent": r.battery_percent,
+                "battery_telemetry_fault": self._battery_telemetry_fault(),
                 "battery_reserve_percent": BATTERY_RESERVE_PERCENT,
                 "heater_current_a": r.heater_a, "heater_power_w": r.heater_w,
                 "input_budget_w": r.input_budget_w,
@@ -1081,6 +1090,7 @@ class HeaterPowerGuard:
         self.shutdown_observations.capture(self, current)
         stable = {key: current[key] for key in (
             "blocked", "reason", "latched", "switch_cut_owned", "power_cut_confirmed",
+            "battery_telemetry_fault",
             "restoring", "restore_attempts", "power_restore_inflight",
             "power_restore_cleanup_pending", "persistence_error", "live",
             "shutdown_active", "shutdown_stage", "shutdown_confirmation", "aggregate_stop",

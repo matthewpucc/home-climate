@@ -1077,7 +1077,7 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         self.assertTrue(self.guard.blocked)
         self.assertFalse(self.reserve_notice())
-        self.assertFalse(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+        self.assertFalse(self.guard.diagnostics["battery_telemetry_fault"])
         self.write_snapshot(9.37, changes={
             self.b.battery: (100, {"unit_of_measurement": "%"}),
             self.b.ac_output_switch: ("on", {}),
@@ -1087,7 +1087,7 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         low_calls = [call for call in self.guard.alerts.update.call_args_list
                      if call.args[0] == "auxiliary_low_battery" and call.args[1]]
         self.assertEqual(low_calls, [])
-        self.assertFalse(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+        self.assertFalse(self.guard.diagnostics["battery_telemetry_fault"])
 
     async def test_reconnect_low_needs_two_distinct_fresh_reports_even_if_value_unchanged(self):
         await self.start_reconnect_alert_fixture()
@@ -1107,27 +1107,32 @@ class NativeHeaterWattTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         self.assertTrue(self.reserve_notice())
 
-    async def test_unsettled_reconnect_reports_telemetry_fault_then_recovers(self):
+    async def test_unsettled_reconnect_logs_once_without_alert_then_recovers(self):
         await self.start_reconnect_alert_fixture()
         self.wall = self.origin + 2
         self.put(self.b.battery, 30, {"unit_of_measurement": "%"})
         await self.hass.async_block_till_done()
-        self.wall = self.origin + 181
-        self.guard._schedule_check()
-        await self.hass.async_block_till_done()
-        self.assertFalse(self.reserve_notice())
-        self.assertTrue(self.reserve_notice("auxiliary_battery_telemetry_fault"))
-        self.wall = self.origin + 184
-        self.put(self.b.battery, 30, {"unit_of_measurement": "%"})
-        self.guard._schedule_check()
-        await self.hass.async_block_till_done()
-        self.assertFalse(self.reserve_notice())  # the original low is no longer fresh
-        self.assertTrue(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+        with self.assertLogs("custom_components.house_climate.power_guard", "WARNING") as logs:
+            self.wall = self.origin + 181
+            self.guard._schedule_check()
+            await self.hass.async_block_till_done()
+            self.assertFalse(self.reserve_notice())
+            self.assertTrue(self.guard.diagnostics["battery_telemetry_fault"])
+            self.wall = self.origin + 184
+            self.put(self.b.battery, 30, {"unit_of_measurement": "%"})
+            self.guard._schedule_check()
+            await self.hass.async_block_till_done()
+            self.assertFalse(self.reserve_notice())  # the original low is no longer fresh
+            self.assertTrue(self.guard.diagnostics["battery_telemetry_fault"])
+        messages = [message for message in logs.output if "battery telemetry did not recover" in message]
+        self.assertEqual(len(messages), 1)
+        self.assertFalse(any(call.args[0] == "auxiliary_battery_telemetry_fault"
+                             for call in self.guard.alerts.update.call_args_list))
         self.wall = self.origin + 185
         self.put(self.b.battery, 65, {"unit_of_measurement": "%"})
         await self.hass.async_block_till_done()
         self.assertFalse(self.reserve_notice())
-        self.assertFalse(self.reserve_notice("auxiliary_battery_telemetry_fault"))
+        self.assertFalse(self.guard.diagnostics["battery_telemetry_fault"])
 
     async def test_normal_low_alerts_immediately_even_with_simultaneous_supply_shutdown(self):
         self.guard.alerts = Mock()
