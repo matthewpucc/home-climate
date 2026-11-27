@@ -24,8 +24,9 @@ Two consecutive, distinct fresh Home Assistant battery reports at or below
 40% qualify the reconnect; one fresh report above 40% resolves the episode
 without a new low-battery alert. A repeated poll of the same timestamp does
 not confirm it, and an intervening invalid report breaks confirmation. If
-telemetry does not qualify within three minutes, Home Climate reports a
-battery telemetry fault instead. A previously confirmed low-battery alert
+telemetry does not qualify within three minutes, Home Climate logs one
+warning per unresolved episode and exposes the fault in guard diagnostics.
+The telemetry fault does not create a notification. A previously confirmed low-battery alert
 stays active until a fresh healthy report. A low reading without an observed
 telemetry interruption still alerts immediately, even if AC turns Off.
 
