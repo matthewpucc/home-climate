@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.37
+
+- Require two fresh low charge readings before sending a new critical battery-reserve alert after a telemetry dropout. The 40% heater cutoff and 75-second missing-data grace are unchanged.
+
+## 0.9.36
+
+- Add an explicit whole-Fahrenheit command profile for affected heat-pump adapters. Opted-in heads use whole-degree Heat/Cool setpoints while room targets, command acknowledgement, cooling floors and recovery behavior stay unchanged.
+
 ## 0.9.35
 
 - Log [qualified unexplained Off reports](docs/unexpected-off-observation.md) for live, owned heat-pump heads; diagnostic only, with no change to equipment control or ownership unless explicitly opted in.
