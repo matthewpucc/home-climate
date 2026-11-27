@@ -29,6 +29,7 @@ HEATER_OFF_MAX_W = 100.0  # Non-heating evidence, not an amp or appliance-rating
 BATTERY_RESERVE_PERCENT = 40.0
 TELEMETRY_MAX_AGE_SECONDS = 180
 BATTERY_MAX_AGE_SECONDS = 900
+SOC_RECONNECT_ALERT_SECONDS = 180.0
 SOC_GRACE_SECONDS = 75.0
 SOC_GRACE_PRIOR_MAX_AGE_SECONDS = 120.0
 SOC_GRACE_PRIOR_MIN_PERCENT = 50.0
@@ -247,6 +248,9 @@ class HeaterPowerGuard:
         self.manual_override = lambda: False
         self.alerts = None
         self._low_battery_alert_active = False
+        self._reserve_alert_last_stamp = None
+        self._reserve_alert_reconnect = None
+        self._reserve_alert_low_stamp = None
         self._clock, self._wall_clock = clock, wall_clock
         self._soc_grace_eligible = None
         self._soc_grace_context = None
@@ -942,13 +946,39 @@ class HeaterPowerGuard:
                     and self._heater_meter_stopped() is True else "unconfirmed")
         return self._shutdown_confirmation
 
+    def _reserve_alert_note_loss(self, wall):
+        if self._reserve_alert_reconnect is None:
+            self._reserve_alert_reconnect = (self._clock(), wall)
+        # An intervening invalid report breaks consecutive low proof.
+        self._reserve_alert_low_stamp = None
+
+    def _reserve_alert_observe(self, state, now):
+        """Qualify notifications only; never grant or retain heat authorization."""
+        value, stamp = self._soc_bound_value(state, now)
+        if value is None:
+            self._reserve_alert_note_loss(now)
+            return
+        if stamp > now or (self._reserve_alert_last_stamp is not None
+                           and stamp <= self._reserve_alert_last_stamp):
+            return
+        if self._reserve_alert_reconnect is not None and (
+                stamp < self._reserve_alert_reconnect[1] or now - stamp > TELEMETRY_MAX_AGE_SECONDS):
+            return
+        self._reserve_alert_last_stamp = stamp
+        if value <= BATTERY_RESERVE_PERCENT and self._reserve_alert_reconnect is not None:
+            if (self._reserve_alert_low_stamp is None
+                    or now - self._reserve_alert_low_stamp > TELEMETRY_MAX_AGE_SECONDS):
+                self._reserve_alert_low_stamp = stamp
+                return
+        self._low_battery_alert_active = value <= BATTERY_RESERVE_PERCENT
+        self._reserve_alert_reconnect = self._reserve_alert_low_stamp = None
+
     def _update_alerts(self):
         if self.alerts is None:
             return
-        reading = self._reading
-        reserve = reading.battery_percent
-        if reserve is not None and 0 <= reserve <= 100:
-            self._low_battery_alert_active = reserve <= BATTERY_RESERVE_PERCENT
+        reconnect = self._reserve_alert_reconnect
+        telemetry_fault = bool(reconnect is not None
+                               and self._clock() >= reconnect[0] + SOC_RECONNECT_ALERT_SECONDS)
         try:
             self.alerts.update("auxiliary_low_battery", self._low_battery_alert_active,
                 "Home Climate: battery reserve low",
@@ -956,6 +986,10 @@ class HeaterPowerGuard:
                  "Home Climate will not apply the automated reserve cutoff." if self.manual_control else
                  "The last qualified battery reading is at or below the 40% reserve. Automated Dyson heat and circulation are inhibited."),
                 severity="critical")
+            self.alerts.update("auxiliary_battery_telemetry_fault", telemetry_fault,
+                "Home Climate: battery telemetry did not recover",
+                "The battery feed did not return a healthy charge report or two distinct low reports "
+                "after reconnecting. Check the battery connection and telemetry in Home Assistant.")
             self.alerts.update("auxiliary_shutdown_fault", bool(self._shutdown_fault or self._shutdown_contradicted
                                or self._emergency_ac_latched),
                 "Home Climate: heater shutdown needs attention",
@@ -1247,7 +1281,18 @@ class HeaterPowerGuard:
         def changed(_event=None):
             if _event is not None:
                 self.shutdown_observations.ha_state(_event, self.bindings)
-                self._soc_changed(_event.data.get("entity_id"), _event.data.get("new_state"))
+                entity, state = _event.data.get("entity_id"), _event.data.get("new_state")
+                self._soc_changed(entity, state)
+                if entity == self.bindings.battery:
+                    now = self._wall_clock()
+                    if self._soc_bound_value(state, now)[0] is None:
+                        # Preserve a real missing edge even if HA's scheduled
+                        # snapshot sees the reconnect report instead.
+                        try:
+                            edge = _timestamp(_state_parts(state)[2])
+                        except (ValueError, TypeError, OverflowError, OSError):
+                            edge = now
+                        self._reserve_alert_note_loss(min(now, edge))
             if _event and self.supervised_recovery_active and self._supervised_restore is None:
                 self._supervised_preparation_check(
                     entity=_event.data.get("entity_id"), state=_event.data.get("new_state"))
@@ -2343,6 +2388,7 @@ class HeaterPowerGuard:
         self._manual_off_wall = barrier
         self._safe_since = None
         self._reading = reading
+        self._reserve_alert_observe(self._state(self.bindings.battery), self._wall_clock())
         self._update_alerts()
         self._schedule_check()
         self._publish()
@@ -2422,6 +2468,7 @@ class HeaterPowerGuard:
         self._observe_isolation(now)
         states = self._states()
         reading = evaluate_power(states, self.bindings, now)
+        self._reserve_alert_observe(states.get(self.bindings.battery), now)
         reading, soc_retaining = self._soc_grace_reading(states, reading, now)
         if self.commissioning_active and (self._external_power().issue
                                          or not self._commissioning_external_trusted()):
