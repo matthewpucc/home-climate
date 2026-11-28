@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.39
+
+- Prefer active cooling demand over comfort-only aim for directed purifier airflow, and reject cooling transfer from a warmer source room.
+
 ## 0.9.38
 
 - Log unresolved auxiliary battery telemetry and expose it in guard diagnostics without sending a notification. Confirmed low-reserve alerts and heater protection are unchanged.

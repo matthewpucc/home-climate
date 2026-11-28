@@ -61,7 +61,7 @@ class DirectedAirflowTests(unittest.TestCase):
                                   NOW + timedelta(seconds=seconds), self.settings)
 
     def test_comfort_aim_without_hvac_or_useful_gradient_does_not_claim_cooling(self):
-        plan = self.decide(73, 73.1)
+        plan = self.decide(73, 73)
         # Two plausible destinations have no arbitrary winner.
         self.assertIsNone(plan.fan_airflow[FAN]["profile"])
         self.cfg = Config.from_dict(directed_config())
@@ -70,12 +70,54 @@ class DirectedAirflowTests(unittest.TestCase):
         self.cfg = Config.from_dict(raw)
         self.policy = Policy(self.cfg)
         self.settings = Settings.read({}, self.cfg)
-        plan = self.decide(73, 73.1)
+        plan = self.decide(73, 73)
         self.assertEqual(plan.mode, "off")
         self.assertEqual(plan.head_targets_f, {})
         self.assertEqual(plan.fan_airflow[FAN]["profile"], "toward_alpha")
         self.assertEqual(plan.fans[FAN], 20)
         self.assertFalse(plan.fan_airflow[FAN]["physical_benefit_verified"])
+
+    def test_shared_cooling_does_not_aim_warm_air_at_cooler_comfort_room(self):
+        raw = directed_config()
+        raw["rooms"]["alpha"]["profile"] = {
+            "target_f": 70, "low_f": 67, "high_f": 73, "comfort_enabled": False}
+        raw["rooms"]["beta"]["profile"] = {"target_f": 70, "low_f": 69, "high_f": 72}
+        self.cfg = Config.from_dict(raw)
+        self.policy = Policy(self.cfg)
+        self.settings = Settings.read({}, self.cfg)
+        plan = self.decide(73.7, 71.1)
+        self.assertEqual(plan.mode, "cool")
+        self.assertIn("shared", plan.head_targets_f)
+        self.assertTrue(plan.room_targets["alpha"]["cool_requested"])
+        self.assertFalse(plan.room_targets["beta"]["cool_requested"])
+        self.assertEqual(plan.fan_airflow[FAN]["profile"], "toward_alpha")
+
+    def test_actual_cooling_request_beats_eligible_comfort_only_aim(self):
+        raw = directed_config()
+        raw["rooms"]["alpha"]["profile"] = {
+            "target_f": 71, "low_f": 70, "high_f": 72, "comfort_enabled": False}
+        raw["rooms"]["beta"]["profile"] = {"target_f": 71.8, "low_f": 70, "high_f": 74}
+        self.cfg = Config.from_dict(raw)
+        self.policy = Policy(self.cfg)
+        self.settings = Settings.read({}, self.cfg)
+        # Equal temperatures leave both routes eligible before prioritization.
+        plan = self.decide(72.6, 72.6)
+        self.assertEqual(plan.mode, "cool")
+        self.assertTrue(plan.room_targets["alpha"]["cool_requested"])
+        self.assertFalse(plan.room_targets["beta"]["cool_requested"])
+        self.assertEqual(plan.fan_airflow[FAN]["profile"], "toward_alpha")
+
+    def test_warmer_source_cannot_supply_cooling_airflow_even_during_shared_call(self):
+        raw = directed_config()
+        del raw["rooms"]["alpha"]["fans"][0]["airflow"]["profiles"]["toward_beta"]
+        self.cfg = Config.from_dict(raw)
+        self.policy = Policy(self.cfg)
+        self.settings = Settings.read({}, self.cfg)
+        plan = self.decide(75, 76)
+        self.assertEqual(plan.mode, "cool")
+        self.assertIn("shared", plan.head_targets_f)
+        self.assertIsNone(plan.fan_airflow[FAN]["profile"])
+        self.assertEqual(plan.fans[FAN], 20)
 
     def test_both_device_specific_directions_and_provisional_status(self):
         for alpha, beta, name, low, high, provisional in (
@@ -127,7 +169,7 @@ class DirectedAirflowTests(unittest.TestCase):
 
     def test_ambiguous_demand_retains_only_still_valid_previous_choice(self):
         self.decide(73, 72)
-        self.assertEqual(self.decide(73, 73.1, 90).fan_airflow[FAN]["profile"], "toward_alpha")
+        self.assertEqual(self.decide(73, 73, 90).fan_airflow[FAN]["profile"], "toward_alpha")
 
     def test_stale_source_or_destination_cancels_profile_and_boost(self):
         for room in ("alpha", "beta"):
