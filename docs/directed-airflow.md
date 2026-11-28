@@ -36,7 +36,11 @@ gradient. Source/HVAC guards, stale-probe guards, and protection limits still
 apply. These are reasons to try airflow, not measurements of its thermal benefit.
 Room measurements still govern HVAC independently.
 
-If multiple destinations are plausible, retain a still-valid selected profile;
+A cooling transfer cannot aim air from a warmer room into a cooler room,
+even during a compatible shared-head call. Among eligible cooling routes,
+an active cooling call takes precedence over comfort-only aim.
+
+If multiple destinations are still plausible, retain a still-valid selected profile;
 otherwise stay at the purifier minimum. Direction changes require 120 seconds
 of continuous candidate eligibility and 300 seconds since the last selected
 direction. Invalid or opposing intents lose their boost immediately, including

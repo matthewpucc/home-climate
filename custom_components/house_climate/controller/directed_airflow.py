@@ -23,6 +23,7 @@ class DirectedAirflow:
         demands = policy.demand(profile.destination, destination, band, target["priority"], update=False)
         modes = [mode for mode in ("heat", "cool")
                  if target.get(f"{mode}_requested") and demands[mode]["active"]]
+        active_cooling = modes == ["cool"]
         if not modes and target["comfort_enabled"]:
             # Aim can serve comfort inside the HVAC deadband. This never
             # creates a heat-pump call, and does not apply to limits-only time.
@@ -45,21 +46,25 @@ class DirectedAirflow:
         head = policy.config.zones[profile.source].head
         if policy.transfer_airflow.opposing_direction(head, destination.temperature, stop):
             return None
+        delta = destination.temperature - source.temperature
+        # A shared cooling call does not prove that blowing warmer room air
+        # into a cooler room helps. Local circulation is not a transfer.
+        if mode == "cool" and profile.purpose == "transfer" and delta < 0:
+            return None
         if (head in plan.head_targets_f and plan.mode == mode
                 and policy.config.zones[profile.destination].head == head):
-            return mode, "Assist selected shared-head output", head, True
+            return mode, "Assist selected shared-head output", head, True, active_cooling
         if profile.purpose == "circulation":
             # Cooling airflow is useful for comfort, without claiming that it
             # lowers room temperature or satisfies the HVAC call.
             if mode == "cool":
-                return mode, "Local comfort aim at purifier minimum; cooling benefit unmeasured", None, False
+                return mode, "Local comfort aim at purifier minimum; cooling benefit unmeasured", None, False, active_cooling
             return None
-        delta = destination.temperature - source.temperature
         useful = delta > 0 if mode == "cool" else delta < 0
         if useful and abs(delta) > (.25 if boosted else .75):
-            return mode, "Useful ambient gradient; thermal benefit unmeasured", None, True
+            return mode, "Useful ambient gradient; thermal benefit unmeasured", None, True, active_cooling
         if mode == "cool" and target["comfort_enabled"]:
-            return mode, "Comfort aim at purifier minimum; thermal transfer unproven", None, False
+            return mode, "Comfort aim at purifier minimum; thermal transfer unproven", None, False, active_cooling
         return None
 
     def update(self, plan, rooms, now, *, allow_start=True):
@@ -73,6 +78,11 @@ class DirectedAirflow:
                        if fan.speed_override != 0
                        and (result := self.useful(profile, plan, rooms, retained=name == previous,
                                                  boosted=name == self.boosting.get(entity)))}
+            # A comfort-only cooling aim must not tie with (or retain
+            # precedence over) an eligible destination actually calling for cooling.
+            if any(result[4] for result in choices.values()):
+                choices = {name: result for name, result in choices.items()
+                           if result[0] != "cool" or result[4]}
             # Keep a still-useful route through ambiguous demand. Without a
             # previous route, equally plausible destinations cause no movement.
             selected = previous if previous in choices else next(iter(choices)) if len(choices) == 1 else None
@@ -108,7 +118,7 @@ class DirectedAirflow:
                       "outlet_control": config.outlet,
                       "physical_benefit_verified": False}
             if selected:
-                mode, reason, head, boost = choices[selected]
+                mode, reason, head, boost, _ = choices[selected]
                 profile = config.profiles[selected]
                 intent.update(profile=selected, destination=profile.destination, mode=mode, reason=reason,
                               requested=asdict(profile), head=head, boost=boost,

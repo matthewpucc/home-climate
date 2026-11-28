@@ -292,8 +292,16 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_dispatch_rechecks_loss_of_boost_basis_with_same_comfort_profile(self):
         self.set_fan(angle_low=100, angle_high=190)
         ticket = await self.ticket()
-        self.temperature("beta", 73.2)
+        self.temperature("beta", 72.9)
         with self.assertRaisesRegex(HAActivationDeferred, "no longer permits"):
+            await self.send(ticket, "turn_on", percentage=60)
+        self.assertEqual(self.boosts(), [])
+
+    async def test_dispatch_rejects_cooling_intent_if_source_has_become_warmer(self):
+        self.set_fan(angle_low=100, angle_high=190)
+        ticket = await self.ticket()
+        self.temperature("beta", 73.2)
+        with self.assertRaisesRegex(HAActivationDeferred, "no longer supports this airflow intent"):
             await self.send(ticket, "turn_on", percentage=60)
         self.assertEqual(self.boosts(), [])
 
@@ -369,7 +377,7 @@ class NativeAirflowTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_aim_losing_transfer_basis_reduces_to_comfort_floor(self):
         for _ in range(6):
             await self.tick()
-        self.temperature("beta", 73.2)
+        self.temperature("beta", 72.9)
         plan = await self.tick()
         self.assertEqual(plan.fan_airflow[FAN]["profile"], "toward_alpha")
         self.assertEqual(plan.fan_airflow[FAN]["execution"]["phase"], "verified")
